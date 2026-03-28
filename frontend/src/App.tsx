@@ -5,6 +5,7 @@ import DashboardPage from "@/pages/DashboardPage";
 import DocumentsPage from "@/pages/DocumentsPage";
 import DocumentDetailPage from "@/pages/DocumentDetailPage";
 import ExportPage from "@/pages/ExportPage";
+import SettingsPage from "@/pages/SettingsPage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { username, loading } = useAuth();
@@ -34,10 +35,6 @@ function AppLayout({ children }: { children: React.ReactNode }) {
   );
 }
 
-// Placeholder pages — implemented in subsequent tasks
-function Placeholder({ name }: { name: string }) {
-  return <div className="text-xl">{name} — coming soon</div>;
-}
 
 export default function App() {
   return (
@@ -49,7 +46,7 @@ export default function App() {
           <Route path="/documents" element={<ProtectedRoute><AppLayout><DocumentsPage /></AppLayout></ProtectedRoute>} />
           <Route path="/documents/:id" element={<ProtectedRoute><AppLayout><DocumentDetailPage /></AppLayout></ProtectedRoute>} />
           <Route path="/export" element={<ProtectedRoute><AppLayout><ExportPage /></AppLayout></ProtectedRoute>} />
-          <Route path="/settings" element={<ProtectedRoute><AppLayout><Placeholder name="Settings" /></AppLayout></ProtectedRoute>} />
+          <Route path="/settings" element={<ProtectedRoute><AppLayout><SettingsPage /></AppLayout></ProtectedRoute>} />
         </Routes>
       </AuthProvider>
     </BrowserRouter>
