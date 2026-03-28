@@ -13,37 +13,62 @@ from backend.storage import compute_file_hash, save_original
 
 logger = logging.getLogger(__name__)
 
-IMAP_HOST = "imap.gmail.com"
-IMAP_PORT = 993
-
 
 def _connect_imap():
-    """Connect to Gmail via IMAP with App Password."""
+    """Connect to IMAP server with configured credentials."""
     address = get_setting("gmail_address")
     app_password = get_setting("gmail_app_password")
     if not address or not app_password:
         return None
 
-    mail = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+    host = get_setting("gmail_imap_host")
+    port = get_setting("gmail_imap_port")
+
+    mail = imaplib.IMAP4_SSL(host, port)
     mail.login(address, app_password)
     return mail
 
 
 def test_connection() -> dict:
-    """Test Gmail IMAP connection. Returns status dict."""
+    """Test IMAP connection. Returns status dict."""
     address = get_setting("gmail_address")
     app_password = get_setting("gmail_app_password")
     if not address or not app_password:
-        return {"status": "not_configured", "message": "Gmail address and App Password required"}
+        return {"status": "not_configured", "message": "Email address and App Password required"}
+
+    labels = get_setting("gmail_labels")
+    if not labels:
+        return {"status": "not_configured", "message": "No labels configured — email ingestion is disabled"}
+
+    host = get_setting("gmail_imap_host")
+    port = get_setting("gmail_imap_port")
 
     try:
-        mail = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+        mail = imaplib.IMAP4_SSL(host, port)
         mail.login(address, app_password)
-        mail.select("INBOX", readonly=True)
-        status, data = mail.search(None, "UNSEEN")
-        count = len(data[0].split()) if data[0] else 0
+
+        unread_only = get_setting("gmail_unread_only")
+        total_matching = 0
+        for label in labels:
+            try:
+                status, _ = mail.select(f'"{label}"', readonly=True)
+                if status == "OK":
+                    criteria = "UNSEEN" if unread_only else "ALL"
+                    s, data = mail.search(None, criteria)
+                    if s == "OK" and data[0]:
+                        total_matching += len(data[0].split())
+            except Exception:
+                pass
+
         mail.logout()
-        return {"status": "connected", "email": address, "unread": count}
+        return {
+            "status": "connected",
+            "email": address,
+            "host": host,
+            "labels": labels,
+            "unread_only": unread_only,
+            "matching": total_matching,
+        }
     except imaplib.IMAP4.error as e:
         return {"status": "error", "message": f"IMAP login failed: {e}"}
     except Exception as e:
@@ -181,46 +206,61 @@ def _ingest_attachment(content: bytes, filename: str, sender_email: str, data_di
             doc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         os.unlink(tmp_path)
-        logger.info(f"Gmail: ingested {filename} as document #{doc_id} from {sender_email} (authorized={authorized})")
+        logger.info(f"Email: ingested {filename} as document #{doc_id} from {sender_email} (authorized={authorized})")
         return {"filename": filename, "status": "ingested", "doc_id": doc_id, "authorized": authorized}
 
     except Exception as e:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
-        logger.error(f"Gmail: failed to ingest {filename}: {e}")
+        logger.error(f"Email: failed to ingest {filename}: {e}")
         return {"filename": filename, "status": "error", "error": str(e)}
 
 
 def poll_gmail(data_dir: str) -> list[dict]:
-    """Poll Gmail for unread messages and process them."""
+    """Poll configured IMAP labels for unread messages and process them."""
+    labels = get_setting("gmail_labels")
+    if not labels:
+        return []
+
     mail = _connect_imap()
     if mail is None:
         return []
 
     try:
-        mail.select("INBOX")
-        status, data = mail.search(None, "UNSEEN")
-        if status != "OK" or not data[0]:
-            mail.logout()
-            return []
-
-        msg_ids = data[0].split()
-        logger.info(f"Gmail: found {len(msg_ids)} unread message(s)")
-
         processed = []
-        for msg_id in msg_ids[:20]:  # Process up to 20 per poll
+        unread_only = get_setting("gmail_unread_only")
+        criteria = "UNSEEN" if unread_only else "ALL"
+
+        for label in labels:
             try:
-                result = _process_message(mail, msg_id, data_dir)
-                processed.append(result)
+                status, _ = mail.select(f'"{label}"')
+                if status != "OK":
+                    logger.warning(f"Email: could not select label '{label}'")
+                    continue
+
+                status, data = mail.search(None, criteria)
+                if status != "OK" or not data[0]:
+                    continue
+
+                msg_ids = data[0].split()
+                logger.info(f"Email: found {len(msg_ids)} {'unread ' if unread_only else ''}message(s) in '{label}'")
+
+                for msg_id in msg_ids[:20]:
+                    try:
+                        result = _process_message(mail, msg_id, data_dir)
+                        result["label"] = label
+                        processed.append(result)
+                    except Exception as e:
+                        logger.error(f"Email: failed to process message {msg_id} in '{label}': {e}")
+                        processed.append({"msg_id": msg_id.decode(), "label": label, "status": "error", "error": str(e)})
             except Exception as e:
-                logger.error(f"Gmail: failed to process message {msg_id}: {e}")
-                processed.append({"msg_id": msg_id.decode(), "status": "error", "error": str(e)})
+                logger.error(f"Email: error processing label '{label}': {e}")
 
         mail.logout()
         return processed
 
     except Exception as e:
-        logger.error(f"Gmail poll failed: {e}")
+        logger.error(f"Email poll failed: {e}")
         try:
             mail.logout()
         except Exception:
@@ -229,14 +269,15 @@ def poll_gmail(data_dir: str) -> list[dict]:
 
 
 async def run_gmail_poller(data_dir: str) -> None:
-    """Background loop that polls Gmail on a configurable interval."""
-    logger.info("Gmail poller started")
+    """Background loop that polls email on a configurable interval."""
+    logger.info("Email poller started")
 
     while True:
         try:
             address = get_setting("gmail_address")
             app_password = get_setting("gmail_app_password")
-            if not address or not app_password:
+            labels = get_setting("gmail_labels")
+            if not address or not app_password or not labels:
                 await asyncio.sleep(60)
                 continue
 
@@ -246,8 +287,8 @@ async def run_gmail_poller(data_dir: str) -> None:
             await asyncio.sleep(poll_interval)
 
         except asyncio.CancelledError:
-            logger.info("Gmail poller shutting down")
+            logger.info("Email poller shutting down")
             break
         except Exception as e:
-            logger.error(f"Gmail poller error: {e}")
+            logger.error(f"Email poller error: {e}")
             await asyncio.sleep(60)

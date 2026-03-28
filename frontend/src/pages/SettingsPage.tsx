@@ -6,6 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import CategoryManager from "@/components/CategoryManager";
 import BackupPanel from "@/components/BackupPanel";
 import LogViewer from "@/components/LogViewer";
@@ -80,7 +81,7 @@ export default function SettingsPage() {
           <TabsTrigger value="general">General</TabsTrigger>
           <TabsTrigger value="llm">LLM</TabsTrigger>
           <TabsTrigger value="telegram">Telegram</TabsTrigger>
-          <TabsTrigger value="gmail">Gmail</TabsTrigger>
+          <TabsTrigger value="email">Email</TabsTrigger>
           <TabsTrigger value="categories">Categories</TabsTrigger>
           <TabsTrigger value="backup">Backup</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
@@ -204,6 +205,12 @@ export default function SettingsPage() {
                   To find your user ID, message @userinfobot on Telegram. Restart the server after changing the token.
                 </p>
               </div>
+              {telegramStatus?.bot_username && (
+                <div className="border rounded p-3 bg-muted/50">
+                  <p className="text-sm font-medium">Send documents to: <a href={`https://t.me/${telegramStatus.bot_username.replace("@", "")}`} target="_blank" rel="noopener noreferrer" className="underline">{telegramStatus.bot_username}</a></p>
+                  <p className="text-xs text-muted-foreground">{telegramStatus.bot_name}</p>
+                </div>
+              )}
               <div className="flex items-center gap-2">
                 <Button variant="outline" onClick={checkTelegram}>Check Status</Button>
                 {telegramStatus && (
@@ -215,8 +222,7 @@ export default function SettingsPage() {
                     }>
                       {telegramStatus.status}
                     </Badge>
-                    {telegramStatus.bot_username && <span>{telegramStatus.bot_username} ({telegramStatus.bot_name})</span>}
-                    {telegramStatus.message && <span className="text-muted-foreground">{telegramStatus.message}</span>}
+                    {!telegramStatus.bot_username && telegramStatus.message && <span className="text-muted-foreground">{telegramStatus.message}</span>}
                   </span>
                 )}
               </div>
@@ -224,17 +230,17 @@ export default function SettingsPage() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="gmail" className="space-y-4">
+        <TabsContent value="email" className="space-y-4">
           <Card>
-            <CardHeader><CardTitle>Gmail Integration (IMAP)</CardTitle></CardHeader>
+            <CardHeader><CardTitle>Email Ingestion (IMAP)</CardTitle></CardHeader>
             <CardContent className="space-y-3">
               <div>
-                <Label>Gmail Address</Label>
+                <Label>Email Address</Label>
                 <Input
                   value={settings.gmail_address || ""}
                   onBlur={(e) => save({ gmail_address: e.target.value })}
                   onChange={(e) => setSettings({ ...settings, gmail_address: e.target.value })}
-                  placeholder="your-receipts@gmail.com"
+                  placeholder="you@gmail.com"
                 />
               </div>
               <div>
@@ -244,11 +250,55 @@ export default function SettingsPage() {
                   value={settings.gmail_app_password || ""}
                   onBlur={(e) => { if (e.target.value && !e.target.value.includes("***")) save({ gmail_app_password: e.target.value }); }}
                   onChange={(e) => setSettings({ ...settings, gmail_app_password: e.target.value })}
-                  placeholder="16-character App Password from Google"
+                  placeholder="16-character App Password"
                 />
                 <p className="text-xs text-muted-foreground mt-1">
-                  Generate at <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer" className="underline">myaccount.google.com/apppasswords</a> (requires 2FA enabled)
+                  Gmail: <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer" className="underline">myaccount.google.com/apppasswords</a> (requires 2FA)
                 </p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label>IMAP Host</Label>
+                  <Input
+                    value={settings.gmail_imap_host || "imap.gmail.com"}
+                    onBlur={(e) => save({ gmail_imap_host: e.target.value })}
+                    onChange={(e) => setSettings({ ...settings, gmail_imap_host: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <Label>IMAP Port</Label>
+                  <Input
+                    type="number"
+                    value={settings.gmail_imap_port ?? 993}
+                    onBlur={(e) => save({ gmail_imap_port: parseInt(e.target.value) || 993 })}
+                    onChange={(e) => setSettings({ ...settings, gmail_imap_port: e.target.value })}
+                  />
+                </div>
+              </div>
+              <div>
+                <Label>Labels to Monitor (semicolon-separated)</Label>
+                <Input
+                  value={Array.isArray(settings.gmail_labels) ? settings.gmail_labels.join("; ") : (settings.gmail_labels ?? "")}
+                  onBlur={(e) => save({ gmail_labels: e.target.value.split(";").map((s: string) => s.trim()).filter(Boolean) })}
+                  onChange={(e) => setSettings({ ...settings, gmail_labels: e.target.value })}
+                  placeholder="Receipts; Invoices"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Only emails in these labels/folders are ingested. No labels = email ingestion disabled.
+                  Create a Gmail filter to auto-label incoming receipts.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  checked={settings.gmail_unread_only !== false}
+                  onCheckedChange={(checked) => save({ gmail_unread_only: !!checked })}
+                />
+                <Label>Unread only</Label>
+                <span className="text-xs text-muted-foreground">
+                  {settings.gmail_unread_only !== false
+                    ? "Only unread emails are processed (processed emails are marked as read)"
+                    : "All emails in the label are checked — duplicates are skipped by file hash"}
+                </span>
               </div>
               <div>
                 <Label>Poll Interval (seconds)</Label>
@@ -260,7 +310,7 @@ export default function SettingsPage() {
                 />
               </div>
               <div>
-                <Label>Authorized Senders (semicolon-separated, use @domain.com for domain rules, leave empty for all)</Label>
+                <Label>Authorized Senders (semicolon-separated, @domain.com for domain rules, empty = all)</Label>
                 <Input
                   value={Array.isArray(settings.gmail_authorized_senders) ? settings.gmail_authorized_senders.join("; ") : (settings.gmail_authorized_senders ?? "")}
                   onBlur={(e) => save({ gmail_authorized_senders: e.target.value.split(";").map((s: string) => s.trim()).filter(Boolean) })}
@@ -279,7 +329,7 @@ export default function SettingsPage() {
                     }>
                       {gmailStatus.status}
                     </Badge>
-                    {gmailStatus.email && <span>{gmailStatus.email} ({gmailStatus.unread} unread)</span>}
+                    {gmailStatus.email && <span>{gmailStatus.email} ({gmailStatus.matching} {gmailStatus.unread_only ? "unread" : "total"} in {(gmailStatus.labels || []).join(", ")})</span>}
                     {gmailStatus.message && <span className="text-muted-foreground">{gmailStatus.message}</span>}
                   </span>
                 )}
