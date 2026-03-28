@@ -37,8 +37,8 @@ def test_llm(username: str = Depends(require_auth)):
         response = litellm.completion(
             model=model,
             api_key=api_key,
-            messages=[{"role": "user", "content": "Reply with OK"}],
-            max_tokens=10,
+            messages=[{"role": "user", "content": "Reply with exactly: Hello from <your model name>"}],
+            max_tokens=50,
         )
         return {
             "status": "ok",

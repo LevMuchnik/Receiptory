@@ -28,8 +28,9 @@ export default function SettingsPage() {
   const testLlm = async () => {
     setTestResult("Testing...");
     try {
-      const res = await api.post<{ status: string; response: string }>("/settings/test-llm");
-      setTestResult(`OK: ${(res as any).response}`);
+      const res: any = await api.post("/settings/test-llm");
+      const reply = res.response || "(no content)";
+      setTestResult(`Connected to ${res.model}. Response: ${reply}`);
     } catch (e: any) {
       setTestResult(`Failed: ${e.message}`);
     }
@@ -52,26 +53,26 @@ export default function SettingsPage() {
             <CardHeader><CardTitle>Business Information</CardTitle></CardHeader>
             <CardContent className="space-y-3">
               <div>
-                <Label>Business Names (comma-separated, multi-language)</Label>
+                <Label>Business Names (semicolon-separated, multi-language)</Label>
                 <Input
-                  value={Array.isArray(settings.business_names) ? settings.business_names.join(", ") : ""}
-                  onBlur={(e) => save({ business_names: e.target.value.split(",").map((s: string) => s.trim()).filter(Boolean) })}
+                  value={Array.isArray(settings.business_names) ? settings.business_names.join("; ") : (settings.business_names ?? "")}
+                  onBlur={(e) => save({ business_names: e.target.value.split(";").map((s: string) => s.trim()).filter(Boolean) })}
                   onChange={(e) => setSettings({ ...settings, business_names: e.target.value })}
                 />
               </div>
               <div>
-                <Label>Business Addresses (comma-separated)</Label>
+                <Label>Business Addresses (semicolon-separated)</Label>
                 <Input
-                  value={Array.isArray(settings.business_addresses) ? settings.business_addresses.join(", ") : ""}
-                  onBlur={(e) => save({ business_addresses: e.target.value.split(",").map((s: string) => s.trim()).filter(Boolean) })}
+                  value={Array.isArray(settings.business_addresses) ? settings.business_addresses.join("; ") : (settings.business_addresses ?? "")}
+                  onBlur={(e) => save({ business_addresses: e.target.value.split(";").map((s: string) => s.trim()).filter(Boolean) })}
                   onChange={(e) => setSettings({ ...settings, business_addresses: e.target.value })}
                 />
               </div>
               <div>
-                <Label>Business Tax IDs (comma-separated)</Label>
+                <Label>Business Tax IDs (semicolon-separated)</Label>
                 <Input
-                  value={Array.isArray(settings.business_tax_ids) ? settings.business_tax_ids.join(", ") : ""}
-                  onBlur={(e) => save({ business_tax_ids: e.target.value.split(",").map((s: string) => s.trim()).filter(Boolean) })}
+                  value={Array.isArray(settings.business_tax_ids) ? settings.business_tax_ids.join("; ") : (settings.business_tax_ids ?? "")}
+                  onBlur={(e) => save({ business_tax_ids: e.target.value.split(";").map((s: string) => s.trim()).filter(Boolean) })}
                   onChange={(e) => setSettings({ ...settings, business_tax_ids: e.target.value })}
                 />
               </div>

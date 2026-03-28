@@ -152,6 +152,7 @@ class ExportRequest(BaseModel):
     status: str | None = None
     category_id: int | None = None
     document_type: str | None = None
+    document_ids: list[int] | None = None
 
 
 # === Settings ===

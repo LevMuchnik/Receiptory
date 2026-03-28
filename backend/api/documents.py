@@ -37,7 +37,7 @@ def _row_to_response(row) -> dict:
 def list_documents(
     request: Request,
     status: str | None = None,
-    category_id: int | None = None,
+    category_id: str | None = None,
     document_type: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
@@ -53,14 +53,20 @@ def list_documents(
     params: list = []
 
     if status:
-        conditions.append("d.status = ?")
-        params.append(status)
+        statuses = [s.strip() for s in status.split(",")]
+        placeholders = ",".join("?" * len(statuses))
+        conditions.append(f"d.status IN ({placeholders})")
+        params.extend(statuses)
     if category_id:
-        conditions.append("d.category_id = ?")
-        params.append(category_id)
+        cat_ids = [int(c.strip()) for c in str(category_id).split(",")]
+        placeholders = ",".join("?" * len(cat_ids))
+        conditions.append(f"d.category_id IN ({placeholders})")
+        params.extend(cat_ids)
     if document_type:
-        conditions.append("d.document_type = ?")
-        params.append(document_type)
+        types = [t.strip() for t in document_type.split(",")]
+        placeholders = ",".join("?" * len(types))
+        conditions.append(f"d.document_type IN ({placeholders})")
+        params.extend(types)
     if date_from:
         conditions.append("d.receipt_date >= ?")
         params.append(date_from)

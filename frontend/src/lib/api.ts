@@ -1,17 +1,21 @@
 const API_BASE = import.meta.env.DEV ? "http://localhost:8080/api" : "/api";
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, options: RequestInit & { skipAuthRedirect?: boolean } = {}): Promise<T> {
+  const { skipAuthRedirect, ...fetchOptions } = options;
+  const headers: Record<string, string> = { ...fetchOptions.headers as Record<string, string> };
+  if (fetchOptions.body) {
+    headers["Content-Type"] = "application/json";
+  }
   const res = await fetch(`${API_BASE}${path}`, {
     credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      ...options.headers,
-    },
-    ...options,
+    headers,
+    ...fetchOptions,
   });
 
   if (res.status === 401) {
-    window.location.href = "/login";
+    if (!skipAuthRedirect && !window.location.pathname.startsWith("/login")) {
+      window.location.href = "/login";
+    }
     throw new Error("Unauthorized");
   }
 

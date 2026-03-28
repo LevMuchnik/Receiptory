@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv init:*)",
+      "Bash(uv sync:*)",
+      "Bash(uv run:*)",
+      "Bash(echo \"Exit code: $?\")",
+      "Bash(git init:*)",
+      "Bash(git -C /e/Projects/Lev/SmallProjects/Receiptory add pyproject.toml .env.example .gitignore backend/__init__.py backend/api/__init__.py backend/processing/__init__.py backend/backup/__init__.py tests/__init__.py uv.lock)",
+      "Bash(git -C /e/Projects/Lev/SmallProjects/Receiptory status)",
+      "Bash(git:*)",
+      "Bash(npm create:*)",
+      "Bash(npm install:*)",
+      "Bash(node -e \"require\\(''@types/node''\\)\")",
+      "Bash(npm list:*)",
+      "Bash(npx shadcn@latest init -d)",
+      "Bash(npm run:*)",
+      "Bash(find \"E:/Projects/Lev/SmallProjects/Receiptory\" -name \"*.pyc\" -delete)",
+      "Bash(find \"E:/Projects/Lev/SmallProjects/Receiptory\" -name \"__pycache__\" -type d -exec rm -rf {} +)",
+      "Bash(curl -s -c /tmp/cookies -X POST http://localhost:8080/api/auth/login -H \"Content-Type: application/json\" -d '{\"\"username\"\":\"\"admin\"\",\"\"password\"\":\"\"admin\"\"}')",
+      "Bash(curl -s -b /tmp/cookies http://localhost:8080/api/stats/dashboard)",
+      "Bash(curl -s -c /tmp/cookies -X POST http://localhost:8080/api/auth/login -H \"Content-Type: application/json\" -d \"{\"\"username\"\":\"\"admin\"\",\"\"password\"\":\"\"admin\"\"}\")",
+      "Bash(curl -s -b /tmp/cookies http://localhost:8080/api/queue/status)",
+      "Bash(curl -s http://localhost:8080/api/stats/dashboard)",
+      "Bash(curl -s http://localhost:5173/)",
+      "Bash(curl:*)"
+    ]
+  }
+}

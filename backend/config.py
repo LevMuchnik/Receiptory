@@ -31,6 +31,7 @@ SENSITIVE_KEYS = {"llm_api_key", "auth_password_hash"}
 
 
 def get_setting(key: str) -> Any:
+    """Get a setting value. Precedence: env > db > default."""
     env_key = f"RECEIPTORY_{key.upper()}"
     env_val = os.environ.get(env_key)
     if env_val is not None:

@@ -18,13 +18,28 @@ interface QueueData {
 export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardData | null>(null);
   const [queue, setQueue] = useState<QueueData | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    api.get<DashboardData>("/stats/dashboard").then(setStats);
-    api.get<QueueData>("/queue/status").then(setQueue);
+    api.get<DashboardData>("/stats/dashboard")
+      .then((data) => {
+        console.log("Dashboard data:", data);
+        setStats(data);
+      })
+      .catch((e) => {
+        console.error("Dashboard load failed:", e);
+        setError(e.message || "Failed to load dashboard");
+      });
+    api.get<QueueData>("/queue/status")
+      .then((data) => {
+        console.log("Queue data:", data);
+        setQueue(data);
+      })
+      .catch((e) => console.error("Queue status failed:", e));
   }, []);
 
-  if (!stats) return <div>Loading...</div>;
+  if (error) return <div className="p-6 text-destructive">Failed to load dashboard: {error}</div>;
+  if (!stats) return <div className="p-6">Loading dashboard...</div>;
 
   return (
     <div className="space-y-6">

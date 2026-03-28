@@ -20,13 +20,16 @@ def create_app(data_dir: str | None = None, run_background: bool = True) -> Fast
 
     background_tasks: list[asyncio.Task] = []
 
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        # Initialize DB and settings
+    # Initialize DB and settings eagerly (not in lifespan)
+    # so it's done before any request, including in tests
+    from backend.database import get_db_path
+    if get_db_path() is None:
         db_path = os.path.join(data_dir, "receiptory.db")
         init_db(db_path)
         init_settings()
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
         # Configure logging
         from backend.config import get_setting
         log_level = get_setting("log_level")
@@ -102,9 +105,10 @@ def create_app(data_dir: str | None = None, run_background: bool = True) -> Fast
     from backend.api.backup import router as backup_router
     app.include_router(backup_router, prefix="/api", tags=["backup"])
 
-    # Serve frontend static files in production
-    frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
-    if os.path.exists(frontend_dir):
-        app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
+    # Serve frontend static files in production (skip in dev when Vite handles frontend)
+    if not os.environ.get("RECEIPTORY_DEV"):
+        frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+        if os.path.exists(frontend_dir):
+            app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
 
     return app

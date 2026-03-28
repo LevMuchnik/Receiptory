@@ -1,19 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { Button, buttonVariants } from "@/components/ui/button";
-import FilterBar from "@/components/FilterBar";
+import FilterBar, { type Filters, defaultFilters } from "@/components/FilterBar";
 import DocumentTable from "@/components/DocumentTable";
-
-interface Filters {
-  search: string;
-  status: string;
-  category_id: string;
-  document_type: string;
-  date_from: string;
-  date_to: string;
-}
-
-const defaultFilters: Filters = { search: "", status: "all", category_id: "all", document_type: "all", date_from: "", date_to: "" };
 
 export default function DocumentsPage() {
   const [filters, setFilters] = useState<Filters>(defaultFilters);
@@ -23,14 +12,15 @@ export default function DocumentsPage() {
   const [sortBy, setSortBy] = useState("submission_date");
   const [sortOrder, setSortOrder] = useState("desc");
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [exporting, setExporting] = useState(false);
   const pageSize = 20;
 
   const fetchDocs = useCallback(() => {
     const params = new URLSearchParams();
     if (filters.search) params.set("search", filters.search);
-    if (filters.status !== "all") params.set("status", filters.status);
-    if (filters.category_id !== "all") params.set("category_id", filters.category_id);
-    if (filters.document_type !== "all") params.set("document_type", filters.document_type);
+    if (filters.statuses.length > 0) params.set("status", filters.statuses.join(","));
+    if (filters.category_ids.length > 0) params.set("category_id", filters.category_ids.join(","));
+    if (filters.document_types.length > 0) params.set("document_type", filters.document_types.join(","));
     if (filters.date_from) params.set("date_from", filters.date_from);
     if (filters.date_to) params.set("date_to", filters.date_to);
     params.set("sort_by", sortBy);
@@ -75,6 +65,22 @@ export default function DocumentsPage() {
     fetchDocs();
   };
 
+  const handleExportSelected = async () => {
+    if (selected.size === 0) return;
+    setExporting(true);
+    try {
+      const blob = await api.exportDocs({ document_ids: Array.from(selected) });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "receiptory_export.zip";
+      a.click();
+      URL.revokeObjectURL(url);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const totalPages = Math.ceil(total / pageSize);
 
   return (
@@ -87,7 +93,14 @@ export default function DocumentsPage() {
             <input type="file" multiple className="hidden" onChange={handleUpload} accept=".pdf,.jpg,.jpeg,.png,.html,.htm" />
           </label>
           {selected.size > 0 && (
-            <Button variant="outline" onClick={handleBatchReprocess}>Reprocess ({selected.size})</Button>
+            <>
+              <Button variant="outline" onClick={handleExportSelected} disabled={exporting}>
+                {exporting ? "Exporting..." : `Export (${selected.size})`}
+              </Button>
+              <Button variant="outline" onClick={handleBatchReprocess}>
+                Reprocess ({selected.size})
+              </Button>
+            </>
           )}
         </div>
       </div>

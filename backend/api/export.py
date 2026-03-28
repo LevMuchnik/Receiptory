@@ -29,10 +29,18 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
     filed_dir = os.path.join(data_dir, "storage", "filed")
 
     # Build query conditions
-    conditions = ["d.is_deleted = 0", "d.status = 'processed'"]
+    conditions = ["d.is_deleted = 0"]
     params: list = []
 
-    if body.preset == "since_last_export":
+    # If specific document IDs provided, filter to those only
+    if body.document_ids:
+        placeholders = ",".join("?" * len(body.document_ids))
+        conditions.append(f"d.id IN ({placeholders})")
+        params.extend(body.document_ids)
+    else:
+        conditions.append("d.status = 'processed'")
+
+    if not body.document_ids and body.preset == "since_last_export":
         conditions.append("d.last_exported_date IS NULL")
     elif body.preset == "month" and body.month:
         conditions.append("d.receipt_date >= ?")

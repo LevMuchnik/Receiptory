@@ -7,3 +7,4 @@ node_modules/
 frontend/dist/
 *.egg-info/
 .pytest_cache/
+test_documents/
