@@ -59,6 +59,9 @@ def create_app(data_dir: str | None = None, run_background: bool = True) -> Fast
 
     app = FastAPI(title="Receiptory", version="0.1.0", lifespan=lifespan)
 
+    # Set data_dir immediately so it's available even without lifespan
+    app.state.data_dir = data_dir
+
     # CORS for dev mode
     app.add_middleware(
         CORSMiddleware,
