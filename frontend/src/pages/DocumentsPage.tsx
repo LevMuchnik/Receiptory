@@ -36,6 +36,14 @@ export default function DocumentsPage() {
 
   useEffect(() => { fetchDocs(); }, [fetchDocs]);
 
+  // Auto-refresh when documents are pending/processing
+  useEffect(() => {
+    const hasPending = documents.some((d) => d.status === "pending" || d.status === "processing");
+    if (!hasPending) return;
+    const interval = setInterval(fetchDocs, 3000);
+    return () => clearInterval(interval);
+  }, [documents, fetchDocs]);
+
   const handleSort = (field: string) => {
     if (sortBy === field) {
       setSortOrder(sortOrder === "asc" ? "desc" : "asc");
