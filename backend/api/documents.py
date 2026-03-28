@@ -43,6 +43,7 @@ def list_documents(
     date_to: str | None = None,
     channel: str | None = None,
     search: str | None = None,
+    missing_info: bool = False,
     sort_by: str = "submission_date",
     sort_order: str = "desc",
     page: int = 1,
@@ -79,6 +80,8 @@ def list_documents(
     if search:
         conditions.append("d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?)")
         params.append(search)
+    if missing_info:
+        conditions.append("(d.receipt_date IS NULL OR d.vendor_receipt_id IS NULL)")
 
     where = " AND ".join(conditions)
     allowed_sort = {"submission_date", "receipt_date", "vendor_name", "total_amount", "status", "created_at"}

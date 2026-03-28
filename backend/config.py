@@ -31,6 +31,8 @@ DEFAULTS: dict[str, Any] = {
     "gmail_app_password": "",
     "gmail_poll_interval": 300,
     "gmail_authorized_senders": [],
+    "watched_folder_path": "",
+    "watched_folder_poll_interval": 10,
 }
 
 SENSITIVE_KEYS = {"llm_api_key", "auth_password_hash", "telegram_bot_token", "gmail_app_password"}

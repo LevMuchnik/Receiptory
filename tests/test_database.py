@@ -15,7 +15,7 @@ def test_wal_mode(db_conn):
 
 def test_migration_version(db_conn):
     version = _get_current_version(db_conn)
-    assert version == 1
+    assert version == 2
 
 def test_system_categories_seeded(db_conn):
     rows = db_conn.execute("SELECT name FROM categories WHERE is_system = 1 ORDER BY name").fetchall()
@@ -23,6 +23,7 @@ def test_system_categories_seeded(db_conn):
     assert "failed" in names
     assert "not_a_receipt" in names
     assert "pending" in names
+    assert "unauthorized_sender" in names
 
 def test_user_categories_seeded(db_conn):
     rows = db_conn.execute("SELECT name FROM categories WHERE is_system = 0 ORDER BY name").fetchall()
@@ -39,4 +40,4 @@ def test_idempotent_migration(tmp_data_dir):
     init_db(path)
     with get_connection() as conn:
         count = conn.execute("SELECT COUNT(*) as c FROM categories").fetchone()["c"]
-        assert count == 8  # 3 system + 5 user
+        assert count == 9  # 4 system + 5 user

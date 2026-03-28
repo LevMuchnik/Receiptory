@@ -163,7 +163,7 @@ def _ingest_attachment(content: bytes, filename: str, sender_email: str, data_di
         if not authorized:
             with get_connection() as conn:
                 cat = conn.execute(
-                    "SELECT id FROM categories WHERE name = 'not_a_receipt' AND is_system = 1"
+                    "SELECT id FROM categories WHERE name = 'unauthorized_sender' AND is_system = 1"
                 ).fetchone()
                 if cat:
                     category_id = cat["id"]

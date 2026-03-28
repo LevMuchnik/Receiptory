@@ -81,9 +81,10 @@ async def run_backup(data_dir: str, trigger: str = "manual") -> int:
                 """UPDATE backups SET
                     status = 'completed',
                     completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-                    size_bytes = ?
+                    size_bytes = ?,
+                    local_path = ?
                 WHERE id = ?""",
-                (size, backup_id),
+                (size, backup_dir, backup_id),
             )
         logger.info(f"Backup {backup_id} completed ({size} bytes)")
 

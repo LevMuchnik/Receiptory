@@ -13,6 +13,7 @@ export default function DocumentsPage() {
   const [sortOrder, setSortOrder] = useState("desc");
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [exporting, setExporting] = useState(false);
+  const [quickFilter, setQuickFilter] = useState<string | null>(null);
   const pageSize = 20;
 
   const fetchDocs = useCallback(() => {
@@ -23,6 +24,9 @@ export default function DocumentsPage() {
     if (filters.document_types.length > 0) params.set("document_type", filters.document_types.join(","));
     if (filters.date_from) params.set("date_from", filters.date_from);
     if (filters.date_to) params.set("date_to", filters.date_to);
+    if (quickFilter === "needs_review") params.set("status", "needs_review");
+    if (quickFilter === "failed") params.set("status", "failed");
+    if (quickFilter === "missing_info") params.set("missing_info", "true");
     params.set("sort_by", sortBy);
     params.set("sort_order", sortOrder);
     params.set("page", String(page));
@@ -32,7 +36,7 @@ export default function DocumentsPage() {
       setDocuments(data.documents);
       setTotal(data.total);
     });
-  }, [filters, page, sortBy, sortOrder]);
+  }, [filters, page, sortBy, sortOrder, quickFilter]);
 
   useEffect(() => { fetchDocs(); }, [fetchDocs]);
 
@@ -124,6 +128,24 @@ export default function DocumentsPage() {
             </>
           )}
         </div>
+      </div>
+
+      <div className="flex gap-1">
+        {[
+          { key: null, label: "All" },
+          { key: "needs_review", label: "Needs Review" },
+          { key: "failed", label: "Failed" },
+          { key: "missing_info", label: "Missing Info" },
+        ].map((tab) => (
+          <Button
+            key={tab.key ?? "all"}
+            variant={quickFilter === tab.key ? "default" : "outline"}
+            size="sm"
+            onClick={() => { setQuickFilter(tab.key); setPage(1); }}
+          >
+            {tab.label}
+          </Button>
+        ))}
       </div>
 
       <FilterBar filters={filters} onChange={(f) => { setFilters(f); setPage(1); }} />

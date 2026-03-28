@@ -48,10 +48,12 @@ def create_app(data_dir: str | None = None, run_background: bool = True) -> Fast
             from backend.backup.scheduler import run_backup_scheduler
             from backend.ingestion.telegram import start_telegram_bot, stop_telegram_bot
             from backend.ingestion.gmail import run_gmail_poller
+            from backend.ingestion.watched_folder import run_watched_folder
             queue_task = asyncio.create_task(run_queue_loop(data_dir))
             backup_task = asyncio.create_task(run_backup_scheduler(data_dir))
             gmail_task = asyncio.create_task(run_gmail_poller(data_dir))
-            background_tasks.extend([queue_task, backup_task, gmail_task])
+            folder_task = asyncio.create_task(run_watched_folder(data_dir))
+            background_tasks.extend([queue_task, backup_task, gmail_task, folder_task])
             await start_telegram_bot(data_dir)
 
         app.state.data_dir = data_dir

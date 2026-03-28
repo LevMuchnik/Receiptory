@@ -128,6 +128,32 @@ export default function SettingsPage() {
               <div><Label>New Password</Label><Input type="password" placeholder="Enter new password" onBlur={(e) => { if (e.target.value) save({ auth_password_hash: e.target.value }); }} /></div>
             </CardContent>
           </Card>
+          <Card>
+            <CardHeader><CardTitle>Watched Folder</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              <div>
+                <Label>Folder Path (leave empty to disable)</Label>
+                <Input
+                  value={settings.watched_folder_path || ""}
+                  onBlur={(e) => save({ watched_folder_path: e.target.value })}
+                  onChange={(e) => setSettings({ ...settings, watched_folder_path: e.target.value })}
+                  placeholder="/path/to/watched/folder"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Files dropped here are auto-ingested and moved to a "processed" subfolder.
+                </p>
+              </div>
+              <div>
+                <Label>Poll Interval (seconds)</Label>
+                <Input
+                  type="number"
+                  value={settings.watched_folder_poll_interval ?? 10}
+                  onBlur={(e) => save({ watched_folder_poll_interval: parseInt(e.target.value) || 10 })}
+                  onChange={(e) => setSettings({ ...settings, watched_folder_poll_interval: e.target.value })}
+                />
+              </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
         <TabsContent value="llm" className="space-y-4">
