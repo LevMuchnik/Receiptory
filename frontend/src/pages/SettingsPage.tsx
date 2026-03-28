@@ -15,11 +15,14 @@ export default function SettingsPage() {
   const [costs, setCosts] = useState<any>(null);
   const [testResult, setTestResult] = useState<string | null>(null);
   const [telegramStatus, setTelegramStatus] = useState<any>(null);
+  const [gmailStatus, setGmailStatus] = useState<any>(null);
+  const [gmailPollResult, setGmailPollResult] = useState<string | null>(null);
 
   useEffect(() => {
     api.get("/settings").then(setSettings);
     api.get("/stats/processing-costs").then(setCosts);
     api.get("/settings/telegram-status").then(setTelegramStatus).catch(() => {});
+    api.get("/settings/gmail-status").then(setGmailStatus).catch(() => {});
   }, []);
 
   const save = async (updates: Record<string, any>) => {
@@ -36,6 +39,26 @@ export default function SettingsPage() {
       setTestResult(`Connected to ${res.model}. Response: ${reply}`);
     } catch (e: any) {
       setTestResult(`Failed: ${e.message}`);
+    }
+  };
+
+  const checkGmail = async () => {
+    setGmailStatus({ status: "checking" });
+    try {
+      const res = await api.get("/settings/gmail-status");
+      setGmailStatus(res);
+    } catch (e: any) {
+      setGmailStatus({ status: "error", message: e.message });
+    }
+  };
+
+  const pollGmailNow = async () => {
+    setGmailPollResult("Polling...");
+    try {
+      const res: any = await api.post("/settings/gmail-poll-now");
+      setGmailPollResult(`Polled: ${res.polled} message(s) processed`);
+    } catch (e: any) {
+      setGmailPollResult(`Failed: ${e.message}`);
     }
   };
 
@@ -57,6 +80,7 @@ export default function SettingsPage() {
           <TabsTrigger value="general">General</TabsTrigger>
           <TabsTrigger value="llm">LLM</TabsTrigger>
           <TabsTrigger value="telegram">Telegram</TabsTrigger>
+          <TabsTrigger value="gmail">Gmail</TabsTrigger>
           <TabsTrigger value="categories">Categories</TabsTrigger>
           <TabsTrigger value="backup">Backup</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
@@ -170,6 +194,76 @@ export default function SettingsPage() {
                   </span>
                 )}
               </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="gmail" className="space-y-4">
+          <Card>
+            <CardHeader><CardTitle>Gmail Integration (IMAP)</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              <div>
+                <Label>Gmail Address</Label>
+                <Input
+                  value={settings.gmail_address || ""}
+                  onBlur={(e) => save({ gmail_address: e.target.value })}
+                  onChange={(e) => setSettings({ ...settings, gmail_address: e.target.value })}
+                  placeholder="your-receipts@gmail.com"
+                />
+              </div>
+              <div>
+                <Label>App Password</Label>
+                <Input
+                  type="password"
+                  value={settings.gmail_app_password || ""}
+                  onBlur={(e) => { if (e.target.value && !e.target.value.includes("***")) save({ gmail_app_password: e.target.value }); }}
+                  onChange={(e) => setSettings({ ...settings, gmail_app_password: e.target.value })}
+                  placeholder="16-character App Password from Google"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Generate at <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer" className="underline">myaccount.google.com/apppasswords</a> (requires 2FA enabled)
+                </p>
+              </div>
+              <div>
+                <Label>Poll Interval (seconds)</Label>
+                <Input
+                  type="number"
+                  value={settings.gmail_poll_interval ?? 300}
+                  onBlur={(e) => save({ gmail_poll_interval: parseInt(e.target.value) || 300 })}
+                  onChange={(e) => setSettings({ ...settings, gmail_poll_interval: e.target.value })}
+                />
+              </div>
+              <div>
+                <Label>Authorized Senders (semicolon-separated, use @domain.com for domain rules, leave empty for all)</Label>
+                <Input
+                  value={Array.isArray(settings.gmail_authorized_senders) ? settings.gmail_authorized_senders.join("; ") : (settings.gmail_authorized_senders ?? "")}
+                  onBlur={(e) => save({ gmail_authorized_senders: e.target.value.split(";").map((s: string) => s.trim()).filter(Boolean) })}
+                  onChange={(e) => setSettings({ ...settings, gmail_authorized_senders: e.target.value })}
+                  placeholder="user@example.com; @company.com"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" onClick={checkGmail}>Test Connection</Button>
+                {gmailStatus && (
+                  <span className="flex items-center gap-2 text-sm">
+                    <Badge variant={
+                      gmailStatus.status === "connected" ? "default" :
+                      gmailStatus.status === "checking" ? "secondary" :
+                      "destructive"
+                    }>
+                      {gmailStatus.status}
+                    </Badge>
+                    {gmailStatus.email && <span>{gmailStatus.email} ({gmailStatus.unread} unread)</span>}
+                    {gmailStatus.message && <span className="text-muted-foreground">{gmailStatus.message}</span>}
+                  </span>
+                )}
+              </div>
+              {gmailStatus?.status === "connected" && (
+                <div className="flex items-center gap-2">
+                  <Button variant="outline" onClick={pollGmailNow}>Poll Now</Button>
+                  {gmailPollResult && <span className="text-sm">{gmailPollResult}</span>}
+                </div>
+              )}
             </CardContent>
           </Card>
         </TabsContent>

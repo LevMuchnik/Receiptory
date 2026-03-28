@@ -5,6 +5,8 @@ Self-hosted receipt, invoice, and document management system for self-employed p
 ## Features
 
 - **Web upload** with drag-and-drop, SHA-256 deduplication
+- **Telegram bot** — send or forward photos/documents to a bot for processing
+- **Gmail ingestion** — polls a dedicated Gmail inbox for forwarded receipts and bills
 - **LLM extraction** via litellm (Gemini, OpenAI, Anthropic) — OCR, field extraction, classification in one pass
 - **Document browser** with full-text search (FTS5), filters, sorting, pagination
 - **Document detail view** with rendered page images and editable metadata
@@ -36,8 +38,36 @@ All settings are configurable via the admin UI (Settings page). Environment vari
 | `RECEIPTORY_AUTH_PASSWORD` | `admin` | Initial password (set via UI after first login) |
 | `RECEIPTORY_DATA_DIR` | `./data` | Data directory (DB, files, logs) |
 | `RECEIPTORY_SECRET_KEY` | (default) | Session signing key — change in production |
+| `RECEIPTORY_TELEGRAM_BOT_TOKEN` | (empty) | Telegram bot token from @BotFather |
+| `RECEIPTORY_GMAIL_ADDRESS` | (empty) | Gmail address to poll |
+| `RECEIPTORY_GMAIL_APP_PASSWORD` | (empty) | Gmail App Password (16 chars) |
 | `RECEIPTORY_BACKUP_DESTINATION` | (empty) | rclone remote path (e.g., `gcs:my-bucket/receiptory`) |
 | `RECEIPTORY_BACKUP_SCHEDULE` | `0 2 * * *` | Backup cron schedule |
+
+## Telegram Bot Setup
+
+1. Message [@BotFather](https://t.me/BotFather) on Telegram
+2. Send `/newbot`, follow prompts to create a bot
+3. Copy the bot token into `.env` as `RECEIPTORY_TELEGRAM_BOT_TOKEN` (or set via Settings > Telegram)
+4. Restart the backend
+5. Optionally restrict access: add your Telegram user ID to "Authorized User IDs" in Settings > Telegram (message [@userinfobot](https://t.me/userinfobot) to find your ID). Leave empty to allow anyone.
+6. Send photos or documents to your bot — they'll appear in the Documents page
+
+## Gmail Ingestion Setup
+
+Uses IMAP with a Gmail App Password — no Google Cloud project needed.
+
+1. **Enable 2-Step Verification** on the Gmail account: [myaccount.google.com/security](https://myaccount.google.com/security) > 2-Step Verification > turn on
+2. **Generate an App Password**: [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
+   - Select app: "Mail", select device: "Other" (enter "Receiptory")
+   - Copy the 16-character password (e.g., `abcd efgh ijkl mnop`)
+3. In Receiptory Settings > Gmail (or `.env`):
+   - Set the Gmail address and App Password
+   - Optionally set authorized senders (e.g., `invoice@company.com; @utility.co.il`)
+4. Click **Test Connection** to verify
+5. The poller runs automatically (default: every 5 minutes). Use "Poll Now" for immediate check.
+
+Unread emails with PDF/image attachments are ingested automatically. HTML-only emails (e.g., digital receipts) are saved as HTML for processing. Emails from unauthorized senders are flagged for review.
 
 ## Development Setup
 
@@ -69,7 +99,7 @@ npm install
 npm run dev
 ```
 
-In dev mode, the frontend proxies API calls to `http://localhost:8080`. Both servers need to be running.
+In dev mode, the frontend proxies API calls to `http://localhost:8080`. Both servers need to be running. Set `RECEIPTORY_DEV=1` in `.env` to prevent the backend from serving static files.
 
 ### Running Tests
 
@@ -100,6 +130,7 @@ receiptory/
 │   ├── models.py            # Pydantic models
 │   ├── api/                 # REST endpoints
 │   ├── processing/          # LLM pipeline, queue
+│   ├── ingestion/           # Telegram bot, Gmail poller
 │   └── backup/              # Scheduler, runner, rclone
 ├── frontend/                # React + Vite + shadcn/ui
 ├── migrations/              # Numbered SQL files

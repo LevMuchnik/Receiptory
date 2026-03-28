@@ -27,16 +27,20 @@ DEFAULTS: dict[str, Any] = {
     "backup_retention_monthly": 3,
     "telegram_bot_token": "",
     "telegram_authorized_users": [],
+    "gmail_address": "",
+    "gmail_app_password": "",
+    "gmail_poll_interval": 300,
+    "gmail_authorized_senders": [],
 }
 
-SENSITIVE_KEYS = {"llm_api_key", "auth_password_hash", "telegram_bot_token"}
+SENSITIVE_KEYS = {"llm_api_key", "auth_password_hash", "telegram_bot_token", "gmail_app_password"}
 
 
 def get_setting(key: str) -> Any:
     """Get a setting value. Precedence: env > db > default."""
     env_key = f"RECEIPTORY_{key.upper()}"
     env_val = os.environ.get(env_key)
-    if env_val is not None:
+    if env_val is not None and env_val != "":
         return _parse_value(key, env_val)
     with get_connection() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()

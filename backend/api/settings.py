@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.auth import require_auth
 from backend.config import get_all_settings_masked, set_setting, get_setting
@@ -70,3 +70,19 @@ async def telegram_status(username: str = Depends(require_auth)):
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+@router.get("/settings/gmail-status")
+def gmail_status(username: str = Depends(require_auth)):
+    """Check Gmail IMAP connection status."""
+    from backend.ingestion.gmail import test_connection
+    return test_connection()
+
+
+@router.post("/settings/gmail-poll-now")
+def gmail_poll_now(request: Request, username: str = Depends(require_auth)):
+    """Trigger an immediate Gmail poll."""
+    from backend.ingestion.gmail import poll_gmail
+    data_dir = request.app.state.data_dir
+    results = poll_gmail(data_dir)
+    return {"polled": len(results), "results": results}

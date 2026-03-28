@@ -89,6 +89,16 @@ export default function DocumentsPage() {
     }
   };
 
+  const handleBatchDelete = async () => {
+    if (selected.size === 0) return;
+    if (!confirm(`Delete ${selected.size} document(s)?`)) return;
+    for (const id of selected) {
+      await api.delete(`/documents/${id}`);
+    }
+    setSelected(new Set());
+    fetchDocs();
+  };
+
   const totalPages = Math.ceil(total / pageSize);
 
   return (
@@ -107,6 +117,9 @@ export default function DocumentsPage() {
               </Button>
               <Button variant="outline" onClick={handleBatchReprocess}>
                 Reprocess ({selected.size})
+              </Button>
+              <Button variant="destructive" onClick={handleBatchDelete}>
+                Delete ({selected.size})
               </Button>
             </>
           )}

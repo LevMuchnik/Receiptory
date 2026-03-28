@@ -47,9 +47,11 @@ def create_app(data_dir: str | None = None, run_background: bool = True) -> Fast
             from backend.processing.queue import run_queue_loop
             from backend.backup.scheduler import run_backup_scheduler
             from backend.ingestion.telegram import start_telegram_bot, stop_telegram_bot
+            from backend.ingestion.gmail import run_gmail_poller
             queue_task = asyncio.create_task(run_queue_loop(data_dir))
             backup_task = asyncio.create_task(run_backup_scheduler(data_dir))
-            background_tasks.extend([queue_task, backup_task])
+            gmail_task = asyncio.create_task(run_gmail_poller(data_dir))
+            background_tasks.extend([queue_task, backup_task, gmail_task])
             await start_telegram_bot(data_dir)
 
         app.state.data_dir = data_dir
@@ -112,6 +114,9 @@ def create_app(data_dir: str | None = None, run_background: bool = True) -> Fast
     app.include_router(backup_router, prefix="/api", tags=["backup"])
 
     # Serve frontend static files in production (skip in dev when Vite handles frontend)
+    # Use override=False so test fixtures that clear env vars aren't clobbered
+    import dotenv
+    dotenv.load_dotenv(override=False)
     if not os.environ.get("RECEIPTORY_DEV"):
         frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
         if os.path.exists(frontend_dir):
