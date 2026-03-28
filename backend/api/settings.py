@@ -47,3 +47,26 @@ def test_llm(username: str = Depends(require_auth)):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LLM test failed: {e}")
+
+
+@router.get("/settings/telegram-status")
+async def telegram_status(username: str = Depends(require_auth)):
+    """Check Telegram bot connection status."""
+    from backend.ingestion.telegram import _app
+
+    token = get_setting("telegram_bot_token")
+    if not token:
+        return {"status": "not_configured", "message": "No bot token set"}
+
+    if _app is None:
+        return {"status": "stopped", "message": "Bot not running. Restart the server after setting the token."}
+
+    try:
+        bot_info = await _app.bot.get_me()
+        return {
+            "status": "running",
+            "bot_username": f"@{bot_info.username}",
+            "bot_name": bot_info.first_name,
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}

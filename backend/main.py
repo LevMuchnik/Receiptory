@@ -46,12 +46,18 @@ def create_app(data_dir: str | None = None, run_background: bool = True) -> Fast
         if run_background:
             from backend.processing.queue import run_queue_loop
             from backend.backup.scheduler import run_backup_scheduler
+            from backend.ingestion.telegram import start_telegram_bot, stop_telegram_bot
             queue_task = asyncio.create_task(run_queue_loop(data_dir))
             backup_task = asyncio.create_task(run_backup_scheduler(data_dir))
             background_tasks.extend([queue_task, backup_task])
+            await start_telegram_bot(data_dir)
 
         app.state.data_dir = data_dir
         yield
+
+        if run_background:
+            from backend.ingestion.telegram import stop_telegram_bot
+            await stop_telegram_bot()
 
         for task in background_tasks:
             task.cancel()

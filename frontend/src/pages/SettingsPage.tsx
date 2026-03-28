@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import CategoryManager from "@/components/CategoryManager";
 import BackupPanel from "@/components/BackupPanel";
 import LogViewer from "@/components/LogViewer";
@@ -13,10 +14,12 @@ export default function SettingsPage() {
   const [settings, setSettings] = useState<any>({});
   const [costs, setCosts] = useState<any>(null);
   const [testResult, setTestResult] = useState<string | null>(null);
+  const [telegramStatus, setTelegramStatus] = useState<any>(null);
 
   useEffect(() => {
     api.get("/settings").then(setSettings);
     api.get("/stats/processing-costs").then(setCosts);
+    api.get("/settings/telegram-status").then(setTelegramStatus).catch(() => {});
   }, []);
 
   const save = async (updates: Record<string, any>) => {
@@ -36,6 +39,16 @@ export default function SettingsPage() {
     }
   };
 
+  const checkTelegram = async () => {
+    setTelegramStatus({ status: "checking" });
+    try {
+      const res = await api.get("/settings/telegram-status");
+      setTelegramStatus(res);
+    } catch (e: any) {
+      setTelegramStatus({ status: "error", message: e.message });
+    }
+  };
+
   return (
     <div className="space-y-4">
       <h1 className="text-2xl font-bold">Settings</h1>
@@ -43,6 +56,7 @@ export default function SettingsPage() {
         <TabsList>
           <TabsTrigger value="general">General</TabsTrigger>
           <TabsTrigger value="llm">LLM</TabsTrigger>
+          <TabsTrigger value="telegram">Telegram</TabsTrigger>
           <TabsTrigger value="categories">Categories</TabsTrigger>
           <TabsTrigger value="backup">Backup</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
@@ -113,6 +127,51 @@ export default function SettingsPage() {
               </CardContent>
             </Card>
           )}
+        </TabsContent>
+
+        <TabsContent value="telegram" className="space-y-4">
+          <Card>
+            <CardHeader><CardTitle>Telegram Bot</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              <div>
+                <Label>Bot Token</Label>
+                <Input
+                  type="password"
+                  value={settings.telegram_bot_token || ""}
+                  onBlur={(e) => { if (e.target.value && !e.target.value.includes("***")) save({ telegram_bot_token: e.target.value }); }}
+                  onChange={(e) => setSettings({ ...settings, telegram_bot_token: e.target.value })}
+                  placeholder="Get from @BotFather on Telegram"
+                />
+              </div>
+              <div>
+                <Label>Authorized User IDs (semicolon-separated, leave empty to allow all)</Label>
+                <Input
+                  value={Array.isArray(settings.telegram_authorized_users) ? settings.telegram_authorized_users.join("; ") : (settings.telegram_authorized_users ?? "")}
+                  onBlur={(e) => save({ telegram_authorized_users: e.target.value.split(";").map((s: string) => s.trim()).filter(Boolean) })}
+                  onChange={(e) => setSettings({ ...settings, telegram_authorized_users: e.target.value })}
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  To find your user ID, message @userinfobot on Telegram. Restart the server after changing the token.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" onClick={checkTelegram}>Check Status</Button>
+                {telegramStatus && (
+                  <span className="flex items-center gap-2 text-sm">
+                    <Badge variant={
+                      telegramStatus.status === "running" ? "default" :
+                      telegramStatus.status === "checking" ? "secondary" :
+                      "destructive"
+                    }>
+                      {telegramStatus.status}
+                    </Badge>
+                    {telegramStatus.bot_username && <span>{telegramStatus.bot_username} ({telegramStatus.bot_name})</span>}
+                    {telegramStatus.message && <span className="text-muted-foreground">{telegramStatus.message}</span>}
+                  </span>
+                )}
+              </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
         <TabsContent value="categories"><CategoryManager /></TabsContent>

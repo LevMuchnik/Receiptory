@@ -25,9 +25,11 @@ DEFAULTS: dict[str, Any] = {
     "backup_retention_daily": 7,
     "backup_retention_weekly": 4,
     "backup_retention_monthly": 3,
+    "telegram_bot_token": "",
+    "telegram_authorized_users": [],
 }
 
-SENSITIVE_KEYS = {"llm_api_key", "auth_password_hash"}
+SENSITIVE_KEYS = {"llm_api_key", "auth_password_hash", "telegram_bot_token"}
 
 
 def get_setting(key: str) -> Any:
