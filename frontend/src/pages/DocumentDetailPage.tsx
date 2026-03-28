@@ -21,6 +21,11 @@ export default function DocumentDetailPage() {
     setDoc(updated);
   };
 
+  const handleApprove = async () => {
+    const updated = await api.patch(`/documents/${id}`, { status: "processed" });
+    setDoc(updated);
+  };
+
   const handleReprocess = async () => {
     await api.post(`/documents/${id}/reprocess`);
     const updated = await api.get(`/documents/${id}`);
@@ -37,6 +42,9 @@ export default function DocumentDetailPage() {
       <div className="flex justify-between items-center">
         <h1 className="text-xl font-bold">{doc.original_filename}</h1>
         <div className="flex gap-2">
+          {doc.status === "needs_review" && (
+            <Button onClick={handleApprove}>Approve</Button>
+          )}
           <Button variant="outline" onClick={handleReprocess}>Reprocess</Button>
           <Button variant="destructive" onClick={handleDelete}>Delete</Button>
         </div>

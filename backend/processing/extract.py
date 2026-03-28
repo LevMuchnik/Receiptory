@@ -92,6 +92,7 @@ def parse_llm_response(response_text: str) -> ExtractionResult:
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
+        logger.error(f"LLM returned invalid JSON. Raw response:\n{text[:2000]}")
         raise ValueError(f"Failed to parse LLM response as JSON: {e}")
     return ExtractionResult(
         receipt_date=data.get("receipt_date"), document_title=data.get("document_title"),
@@ -113,12 +114,14 @@ def litellm_completion(**kwargs):
     return litellm.completion(**kwargs)
 
 
-def extract_document(page_images: list[bytes], model: str, api_key: str, business_names: list[str], business_addresses: list[str], business_tax_ids: list[str], categories: list[dict[str, str]]) -> LLMExtractionResult:
+def extract_document(page_images: list[bytes], model: str, api_key: str, business_names: list[str], business_addresses: list[str], business_tax_ids: list[str], categories: list[dict[str, str]], temperature: float = 0.0, max_tokens: int = 8192) -> LLMExtractionResult:
     prompt = build_extraction_prompt(business_names=business_names, business_addresses=business_addresses, business_tax_ids=business_tax_ids, categories=categories)
     content: list[dict] = [{"type": "text", "text": prompt}]
     for img_bytes in page_images:
         b64 = base64.b64encode(img_bytes).decode("utf-8")
         content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
-    response = litellm_completion(model=model, api_key=api_key, messages=[{"role": "user", "content": content}], temperature=0.0, max_tokens=4096)
-    extraction = parse_llm_response(response.choices[0].message.content)
+    response = litellm_completion(model=model, api_key=api_key, messages=[{"role": "user", "content": content}], temperature=temperature, max_tokens=max_tokens)
+    raw_content = response.choices[0].message.content
+    logger.debug(f"LLM response ({response.usage.completion_tokens} tokens):\n{raw_content[:500]}")
+    extraction = parse_llm_response(raw_content)
     return LLMExtractionResult(extraction=extraction, tokens_in=response.usage.prompt_tokens, tokens_out=response.usage.completion_tokens, model=model)

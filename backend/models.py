@@ -125,6 +125,7 @@ class DocumentUpdate(BaseModel):
     currency: str | None = None
     category_id: int | None = None
     document_type: str | None = None
+    status: str | None = None
     user_notes: str | None = None
 
 

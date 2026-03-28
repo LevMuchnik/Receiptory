@@ -14,6 +14,8 @@ DEFAULTS: dict[str, Any] = {
     "reference_currency": "ILS",
     "llm_model": "gemini/gemini-3-flash-preview",
     "llm_api_key": "",
+    "llm_temperature": 0.0,
+    "llm_max_tokens": 8192,
     "llm_sleep_interval": 0.0,
     "confidence_threshold": 0.7,
     "auth_username": "admin",

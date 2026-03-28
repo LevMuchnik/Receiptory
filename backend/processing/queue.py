@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 def get_next_pending():
     with get_connection() as conn:
-        row = conn.execute("SELECT * FROM documents WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1").fetchone()
+        row = conn.execute("SELECT * FROM documents WHERE status = 'pending' AND is_deleted = 0 ORDER BY created_at ASC LIMIT 1").fetchone()
     return row
 
 

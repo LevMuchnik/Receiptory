@@ -48,7 +48,9 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
     with get_connection() as conn:
         cats = conn.execute("SELECT name, description FROM categories WHERE is_deleted = 0 AND is_system = 0").fetchall()
     categories = [{"name": c["name"], "description": c["description"] or ""} for c in cats]
-    llm_result = extract_document(page_images=page_images, model=model, api_key=api_key, business_names=business_names, business_addresses=business_addresses, business_tax_ids=business_tax_ids, categories=categories)
+    temperature = get_setting("llm_temperature")
+    max_tokens = get_setting("llm_max_tokens")
+    llm_result = extract_document(page_images=page_images, model=model, api_key=api_key, business_names=business_names, business_addresses=business_addresses, business_tax_ids=business_tax_ids, categories=categories, temperature=temperature, max_tokens=max_tokens)
     ext = llm_result.extraction
     doc_type = ext.document_type
     if ext.vendor_tax_id and ext.vendor_tax_id in business_tax_ids:

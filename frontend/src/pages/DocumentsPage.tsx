@@ -93,6 +93,15 @@ export default function DocumentsPage() {
     }
   };
 
+  const handleBatchApprove = async () => {
+    if (selected.size === 0) return;
+    for (const id of selected) {
+      await api.patch(`/documents/${id}`, { status: "processed" });
+    }
+    setSelected(new Set());
+    fetchDocs();
+  };
+
   const handleBatchDelete = async () => {
     if (selected.size === 0) return;
     if (!confirm(`Delete ${selected.size} document(s)?`)) return;
@@ -116,6 +125,9 @@ export default function DocumentsPage() {
           </label>
           {selected.size > 0 && (
             <>
+              <Button onClick={handleBatchApprove}>
+                Approve ({selected.size})
+              </Button>
               <Button variant="outline" onClick={handleExportSelected} disabled={exporting}>
                 {exporting ? "Exporting..." : `Export (${selected.size})`}
               </Button>
