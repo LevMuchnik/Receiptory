@@ -4,6 +4,7 @@ import LoginPage from "@/pages/LoginPage";
 import DashboardPage from "@/pages/DashboardPage";
 import DocumentsPage from "@/pages/DocumentsPage";
 import DocumentDetailPage from "@/pages/DocumentDetailPage";
+import ExportPage from "@/pages/ExportPage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { username, loading } = useAuth();
@@ -47,7 +48,7 @@ export default function App() {
           <Route path="/" element={<ProtectedRoute><AppLayout><DashboardPage /></AppLayout></ProtectedRoute>} />
           <Route path="/documents" element={<ProtectedRoute><AppLayout><DocumentsPage /></AppLayout></ProtectedRoute>} />
           <Route path="/documents/:id" element={<ProtectedRoute><AppLayout><DocumentDetailPage /></AppLayout></ProtectedRoute>} />
-          <Route path="/export" element={<ProtectedRoute><AppLayout><Placeholder name="Export" /></AppLayout></ProtectedRoute>} />
+          <Route path="/export" element={<ProtectedRoute><AppLayout><ExportPage /></AppLayout></ProtectedRoute>} />
           <Route path="/settings" element={<ProtectedRoute><AppLayout><Placeholder name="Settings" /></AppLayout></ProtectedRoute>} />
         </Routes>
       </AuthProvider>
