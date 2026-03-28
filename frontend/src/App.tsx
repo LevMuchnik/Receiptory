@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import LoginPage from "@/pages/LoginPage";
 import DashboardPage from "@/pages/DashboardPage";
+import DocumentsPage from "@/pages/DocumentsPage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { username, loading } = useAuth();
@@ -43,7 +44,7 @@ export default function App() {
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/" element={<ProtectedRoute><AppLayout><DashboardPage /></AppLayout></ProtectedRoute>} />
-          <Route path="/documents" element={<ProtectedRoute><AppLayout><Placeholder name="Documents" /></AppLayout></ProtectedRoute>} />
+          <Route path="/documents" element={<ProtectedRoute><AppLayout><DocumentsPage /></AppLayout></ProtectedRoute>} />
           <Route path="/documents/:id" element={<ProtectedRoute><AppLayout><Placeholder name="Document Detail" /></AppLayout></ProtectedRoute>} />
           <Route path="/export" element={<ProtectedRoute><AppLayout><Placeholder name="Export" /></AppLayout></ProtectedRoute>} />
           <Route path="/settings" element={<ProtectedRoute><AppLayout><Placeholder name="Settings" /></AppLayout></ProtectedRoute>} />
