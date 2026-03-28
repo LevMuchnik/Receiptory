@@ -1,0 +1,12 @@
+services:
+  receiptory:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    restart: unless-stopped
+    environment:
+      - RECEIPTORY_DATA_DIR=/app/data
