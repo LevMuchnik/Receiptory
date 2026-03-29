@@ -39,6 +39,21 @@ DEFAULTS: dict[str, Any] = {
     "gmail_authorized_senders": [],
     "watched_folder_path": "",
     "watched_folder_poll_interval": 10,
+    "base_url": "",
+    "notify_from_name": "Receiptory",
+    "notify_email_to": "",
+    "notify_telegram_ingested": False,
+    "notify_telegram_processed": False,
+    "notify_telegram_failed": True,
+    "notify_telegram_needs_review": True,
+    "notify_telegram_backup_ok": False,
+    "notify_telegram_backup_failed": True,
+    "notify_email_ingested": False,
+    "notify_email_processed": False,
+    "notify_email_failed": True,
+    "notify_email_needs_review": True,
+    "notify_email_backup_ok": False,
+    "notify_email_backup_failed": True,
 }
 
 SENSITIVE_KEYS = {"llm_api_key", "auth_password_hash", "telegram_bot_token", "gmail_app_password"}
