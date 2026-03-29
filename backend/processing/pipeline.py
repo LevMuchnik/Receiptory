@@ -25,6 +25,20 @@ def process_document(doc_id: int, data_dir: str) -> None:
         logger.error(f"Processing failed for document {doc_id}: {e}")
         with get_connection() as conn:
             conn.execute("""UPDATE documents SET status = 'failed', processing_error = ?, processing_attempts = processing_attempts + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?""", (str(e), doc_id))
+        try:
+            from backend.notifications.notifier import notify
+            with get_connection() as conn:
+                failed_doc = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+            if failed_doc:
+                notify("failed", {
+                    "id": doc_id,
+                    "original_filename": failed_doc["original_filename"],
+                    "file_hash": failed_doc["file_hash"],
+                    "processing_error": str(e),
+                    "processing_attempts": (failed_doc["processing_attempts"] or 0) + 1,
+                })
+        except Exception:
+            pass
 
 
 def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
@@ -71,6 +85,23 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
         conn.execute("""UPDATE documents SET document_type = ?, stored_filename = ?, page_count = ?, receipt_date = ?, document_title = ?, vendor_name = ?, vendor_tax_id = ?, vendor_receipt_id = ?, client_name = ?, client_tax_id = ?, description = ?, line_items = ?, subtotal = ?, tax_amount = ?, total_amount = ?, currency = ?, payment_method = ?, payment_identifier = ?, language = ?, additional_fields = ?, raw_extracted_text = ?, category_id = ?, status = ?, extraction_confidence = ?, processing_model = ?, processing_tokens_in = ?, processing_tokens_out = ?, processing_cost_usd = ?, processing_date = ?, processing_attempts = processing_attempts + 1, processing_error = NULL, updated_at = ? WHERE id = ?""",
             (doc_type, stored_filename, page_count, ext.receipt_date, ext.document_title, ext.vendor_name, ext.vendor_tax_id, ext.vendor_receipt_id, ext.client_name, ext.client_tax_id, ext.description, json.dumps(ext.line_items) if ext.line_items else None, ext.subtotal, ext.tax_amount, ext.total_amount, ext.currency, ext.payment_method, ext.payment_identifier, ext.language, json.dumps(ext.additional_fields) if ext.additional_fields else None, ext.raw_extracted_text, category_id, status, ext.extraction_confidence, llm_result.model, llm_result.tokens_in, llm_result.tokens_out, _estimate_cost(llm_result.model, llm_result.tokens_in, llm_result.tokens_out), now, now, doc_id))
     logger.info(f"Document {doc_id} processed successfully: {status}")
+    try:
+        from backend.notifications.notifier import notify
+        notify(status, {
+            "id": doc_id,
+            "original_filename": doc["original_filename"],
+            "file_hash": file_hash,
+            "vendor_name": ext.vendor_name,
+            "receipt_date": ext.receipt_date,
+            "total_amount": ext.total_amount,
+            "currency": ext.currency,
+            "category_name": ext.category_name,
+            "extraction_confidence": ext.extraction_confidence,
+            "submission_channel": doc["submission_channel"],
+            "sender_identifier": doc["sender_identifier"],
+        })
+    except Exception:
+        pass
 
 
 def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:

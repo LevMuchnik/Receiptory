@@ -112,6 +112,17 @@ async def _ingest_file(
         os.unlink(tmp_path)
         await update.message.reply_text(f"Received! Document #{doc_id} queued for processing.")
         logger.info(f"Telegram: ingested {filename} as document #{doc_id} from {sender}")
+        try:
+            from backend.notifications.notifier import notify
+            notify("ingested", {
+                "id": doc_id,
+                "original_filename": filename,
+                "file_hash": file_hash,
+                "submission_channel": "telegram",
+                "sender_identifier": sender,
+            })
+        except Exception:
+            pass
 
     except Exception as e:
         logger.error(f"Telegram ingestion failed: {e}")

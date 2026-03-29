@@ -41,6 +41,17 @@ def _ingest_file(file_path: str, data_dir: str) -> dict:
         doc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     logger.info(f"Watched folder: ingested {filename} as document #{doc_id}")
+    try:
+        from backend.notifications.notifier import notify
+        notify("ingested", {
+            "id": doc_id,
+            "original_filename": filename,
+            "file_hash": file_hash,
+            "submission_channel": "watched_folder",
+            "sender_identifier": None,
+        })
+    except Exception:
+        pass
     return {"filename": filename, "status": "ingested", "doc_id": doc_id}
 
 

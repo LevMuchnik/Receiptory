@@ -86,3 +86,22 @@ def gmail_poll_now(request: Request, username: str = Depends(require_auth)):
     data_dir = request.app.state.data_dir
     results = poll_gmail(data_dir)
     return {"polled": len(results), "results": results}
+
+
+@router.post("/settings/test-notification")
+def test_notification(username: str = Depends(require_auth)):
+    """Send a test notification via all enabled channels."""
+    from backend.notifications.notifier import notify
+    notify("processed", {
+        "id": 0,
+        "original_filename": "test_notification.pdf",
+        "vendor_name": "Test Vendor",
+        "receipt_date": "2026-01-01",
+        "total_amount": 42.00,
+        "currency": "ILS",
+        "category_name": "test",
+        "extraction_confidence": 0.99,
+        "submission_channel": "web_upload",
+        "sender_identifier": None,
+    })
+    return {"message": "Test notification sent"}

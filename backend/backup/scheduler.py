@@ -87,6 +87,15 @@ async def run_backup(data_dir: str, trigger: str = "manual") -> int:
                 (size, backup_dir, backup_id),
             )
         logger.info(f"Backup {backup_id} completed ({size} bytes)")
+        try:
+            from backend.notifications.notifier import notify
+            notify("backup_ok", {
+                "backup_type": backup_type,
+                "size_bytes": size,
+                "destination": destination,
+            })
+        except Exception:
+            pass
 
     except Exception as e:
         logger.error(f"Backup {backup_id} failed: {e}")
@@ -99,6 +108,11 @@ async def run_backup(data_dir: str, trigger: str = "manual") -> int:
                 WHERE id = ?""",
                 (str(e), backup_id),
             )
+        try:
+            from backend.notifications.notifier import notify
+            notify("backup_failed", {"error": str(e)})
+        except Exception:
+            pass
 
     return backup_id
 

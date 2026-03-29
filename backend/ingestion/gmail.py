@@ -207,6 +207,17 @@ def _ingest_attachment(content: bytes, filename: str, sender_email: str, data_di
 
         os.unlink(tmp_path)
         logger.info(f"Email: ingested {filename} as document #{doc_id} from {sender_email} (authorized={authorized})")
+        try:
+            from backend.notifications.notifier import notify
+            notify("ingested", {
+                "id": doc_id,
+                "original_filename": filename,
+                "file_hash": file_hash,
+                "submission_channel": "email",
+                "sender_identifier": f"email:{sender_email}",
+            })
+        except Exception:
+            pass
         return {"filename": filename, "status": "ingested", "doc_id": doc_id, "authorized": authorized}
 
     except Exception as e:

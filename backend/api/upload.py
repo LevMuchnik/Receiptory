@@ -68,6 +68,17 @@ async def upload_files(
                 "file_hash": doc["file_hash"],
                 "status": doc["status"],
             })
+            try:
+                from backend.notifications.notifier import notify
+                notify("ingested", {
+                    "id": doc["id"],
+                    "original_filename": doc["original_filename"],
+                    "file_hash": doc["file_hash"],
+                    "submission_channel": "web_upload",
+                    "sender_identifier": None,
+                })
+            except Exception:
+                pass
 
         finally:
             os.unlink(tmp_path)
