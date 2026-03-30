@@ -18,6 +18,10 @@ def _get_serializer() -> URLSafeTimedSerializer:
 
 
 def verify_password(password: str) -> bool:
+    # Support plain-text password via RECEIPTORY_AUTH_PASSWORD env var
+    env_password = os.environ.get("RECEIPTORY_AUTH_PASSWORD")
+    if env_password:
+        return password == env_password
     stored_hash = get_setting("auth_password_hash")
     if not stored_hash:
         return False

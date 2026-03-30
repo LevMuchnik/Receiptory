@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { useFileDrop } from "@/lib/useFileDrop";
 
 interface DashboardData {
   processed_this_month: number;
@@ -39,7 +39,14 @@ export default function DashboardPage() {
   const [queue, setQueue] = useState<QueueData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [backingUp, setBackingUp] = useState(false);
-  const navigate = useNavigate();
+  const [uploadCount, setUploadCount] = useState<number | null>(null);
+
+  const handleDrop = useCallback(async (files: File[]) => {
+    await api.upload(files);
+    setUploadCount(files.length);
+    setTimeout(() => setUploadCount(null), 3000);
+  }, []);
+  const { dragging, ...dropHandlers } = useFileDrop(handleDrop);
 
   useEffect(() => {
     api.get<DashboardData>("/stats/dashboard")
@@ -242,21 +249,34 @@ export default function DashboardPage() {
 
       {/* ── Quick Actions ────────────────────────────────────────────────── */}
       <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <button
-          onClick={() => navigate("/documents")}
-          className="flex items-center justify-between p-6 bg-primary text-white rounded-xl hover:opacity-95 active:scale-[0.98] transition-all group"
+        <label
+          {...dropHandlers}
+          className={`flex items-center justify-between p-6 rounded-xl transition-all group cursor-pointer ${
+            dragging
+              ? "bg-primary/80 text-white ring-2 ring-white ring-offset-2 ring-offset-primary scale-[1.02]"
+              : "bg-primary text-white hover:opacity-95 active:scale-[0.98]"
+          }`}
         >
           <div className="flex items-center gap-4">
             <div className="p-3 bg-white/10 rounded-lg group-hover:scale-110 transition-transform">
-              <span className="material-symbols-outlined">upload_file</span>
+              <span className="material-symbols-outlined">{dragging ? "file_download" : "upload_file"}</span>
             </div>
             <div className="text-left">
-              <h4 className="font-bold font-headline">Quick Upload</h4>
-              <p className="text-sm text-white/70">Drag and drop receipts or invoices</p>
+              <h4 className="font-bold font-headline">
+                {uploadCount ? `${uploadCount} file${uploadCount > 1 ? "s" : ""} uploaded!` : dragging ? "Drop files here" : "Quick Upload"}
+              </h4>
+              <p className="text-sm text-white/70">
+                {dragging ? "Release to upload" : "Drag and drop or click to browse"}
+              </p>
             </div>
           </div>
-          <span className="material-symbols-outlined text-white/50">chevron_right</span>
-        </button>
+          <span className="material-symbols-outlined text-white/50">{dragging ? "file_download" : "chevron_right"}</span>
+          <input type="file" multiple className="hidden" accept=".pdf,.jpg,.jpeg,.png,.html,.htm" onChange={async (e) => {
+            if (!e.target.files) return;
+            await handleDrop(Array.from(e.target.files));
+            e.target.value = "";
+          }} />
+        </label>
 
         <button
           onClick={triggerBackup}

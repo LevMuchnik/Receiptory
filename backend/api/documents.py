@@ -78,8 +78,19 @@ def list_documents(
         conditions.append("d.submission_channel = ?")
         params.append(channel)
     if search:
-        conditions.append("d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?)")
-        params.append(search)
+        # Build FTS5 query with prefix matching for partial/case-insensitive search
+        terms = search.strip().split()
+        if terms:
+            fts_query = " AND ".join(f'"{t}"*' for t in terms)
+            like_pattern = f"%{search.strip()}%"
+            conditions.append(
+                "(d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?)"
+                " OR d.original_filename LIKE ? COLLATE NOCASE"
+                " OR d.vendor_tax_id LIKE ? COLLATE NOCASE"
+                " OR d.currency LIKE ? COLLATE NOCASE"
+                " OR CAST(d.total_amount AS TEXT) LIKE ?)"
+            )
+            params.extend([fts_query, like_pattern, like_pattern, like_pattern, like_pattern])
     if missing_info:
         conditions.append("(d.receipt_date IS NULL OR d.vendor_receipt_id IS NULL)")
 

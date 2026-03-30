@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
+import { useFileDrop } from "@/lib/useFileDrop";
 
 const NAV_ITEMS = [
   { to: "/", icon: "dashboard",    label: "Dashboard",       exact: true },
@@ -21,18 +22,30 @@ function UploadDialog({ onClose, onUpload }: UploadDialogProps) {
       onClose();
     }
   };
+  const handleDrop = useCallback((files: File[]) => {
+    const dt = new DataTransfer();
+    files.forEach((f) => dt.items.add(f));
+    onUpload(dt.files);
+    onClose();
+  }, [onUpload, onClose]);
+  const { dragging, ...dropHandlers } = useFileDrop(handleDrop);
+
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-white rounded-xl shadow-2xl p-6 w-96 max-w-full mx-4" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-white rounded-xl shadow-2xl p-6 w-96 max-w-full mx-4" onClick={(e) => e.stopPropagation()} {...dropHandlers}>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-headline font-bold text-primary">Upload Document</h2>
           <button onClick={onClose} className="p-1 hover:bg-[#f2f4f6] rounded-lg transition-colors">
             <span className="material-symbols-outlined text-[#43474c]">close</span>
           </button>
         </div>
-        <label className="flex flex-col items-center justify-center border-2 border-dashed border-[#c4c6cd] rounded-xl p-8 cursor-pointer hover:border-primary hover:bg-[#f7f9fb] transition-all group">
-          <span className="material-symbols-outlined text-4xl text-[#43474c] group-hover:text-primary mb-2">upload_file</span>
-          <span className="text-sm font-semibold text-[#191c1e]">Drag & drop or click to upload</span>
+        <label className={`flex flex-col items-center justify-center border-2 border-dashed rounded-xl p-8 cursor-pointer transition-all group ${
+          dragging ? "border-primary bg-primary/5 scale-[1.02]" : "border-[#c4c6cd] hover:border-primary hover:bg-[#f7f9fb]"
+        }`}>
+          <span className={`material-symbols-outlined text-4xl mb-2 ${dragging ? "text-primary" : "text-[#43474c] group-hover:text-primary"}`}>
+            {dragging ? "file_download" : "upload_file"}
+          </span>
+          <span className="text-sm font-semibold text-[#191c1e]">{dragging ? "Drop files here" : "Drag & drop or click to upload"}</span>
           <span className="text-xs text-[#43474c] mt-1">PDF, JPG, PNG, HTML supported</span>
           <input type="file" multiple className="hidden" onChange={handleChange} accept=".pdf,.jpg,.jpeg,.png,.html,.htm" />
         </label>
@@ -56,6 +69,13 @@ export default function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
     await api.upload(Array.from(files));
     navigate("/documents");
   };
+
+  const handleButtonDrop = useCallback(async (files: File[]) => {
+    const { api } = await import("@/lib/api");
+    await api.upload(files);
+    navigate("/documents");
+  }, [navigate]);
+  const { dragging: btnDragging, ...btnDropHandlers } = useFileDrop(handleButtonDrop);
 
   const sidebarContent = (
     <div className="flex flex-col h-full">
@@ -121,10 +141,13 @@ export default function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
       {/* Upload button */}
       <button
         onClick={() => setShowUpload(true)}
-        className="w-full cta-gradient text-white py-3 rounded-xl font-bold flex items-center justify-center gap-2 shadow-lg hover:opacity-90 active:scale-95 transition-all font-headline"
+        {...btnDropHandlers}
+        className={`w-full cta-gradient text-white py-3 rounded-xl font-bold flex items-center justify-center gap-2 shadow-lg transition-all font-headline ${
+          btnDragging ? "ring-2 ring-white ring-offset-2 scale-[1.03] opacity-90" : "hover:opacity-90 active:scale-95"
+        }`}
       >
-        <span className="material-symbols-outlined text-sm">add_circle</span>
-        <span>Upload Document</span>
+        <span className="material-symbols-outlined text-sm">{btnDragging ? "file_download" : "add_circle"}</span>
+        <span>{btnDragging ? "Drop to Upload" : "Upload Document"}</span>
       </button>
     </div>
   );

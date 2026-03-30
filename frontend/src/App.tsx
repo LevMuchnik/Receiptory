@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { useState, useCallback } from "react";
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import LoginPage from "@/pages/LoginPage";
 import DashboardPage from "@/pages/DashboardPage";
@@ -27,6 +27,15 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
 function AppLayout({ children }: { children: React.ReactNode }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const [headerSearch, setHeaderSearch] = useState(searchParams.get("search") || "");
+
+  const handleHeaderSearch = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && headerSearch.trim()) {
+      navigate(`/documents?search=${encodeURIComponent(headerSearch.trim())}`);
+    }
+  }, [headerSearch, navigate]);
 
   return (
     <div className="min-h-screen bg-[#f2f4f6]">
@@ -49,6 +58,9 @@ function AppLayout({ children }: { children: React.ReactNode }) {
             <input
               className="w-full pl-10 pr-4 py-2 bg-[#eceef0] border-none rounded-lg text-sm focus:ring-2 focus:ring-primary/20 placeholder:text-[#74777d] outline-none transition-all"
               placeholder="Search documents, vendors..."
+              value={headerSearch}
+              onChange={(e) => setHeaderSearch(e.target.value)}
+              onKeyDown={handleHeaderSearch}
             />
           </div>
         </div>

@@ -179,20 +179,23 @@
   --radius-2xl:  1rem;
 
   /* shadcn tokens */
-  --color-background:         #f2f4f6;
-  --color-foreground:         #191c1e;
-  --color-card:               #ffffff;
-  --color-card-foreground:    #191c1e;
-  --color-popover:            #ffffff;
-  --color-popover-foreground: #191c1e;
-  --color-muted:              #eceef0;
-  --color-muted-foreground:   #43474c;
-  --color-accent:             #e6e8ea;
-  --color-accent-foreground:  #191c1e;
-  --color-destructive:        #ba1a1a;
-  --color-border:             rgba(116,119,125,0.15);
-  --color-input:              #e6e8ea;
-  --color-ring:               #162839;
+  --color-background:             #f2f4f6;
+  --color-foreground:             #191c1e;
+  --color-card:                   #ffffff;
+  --color-card-foreground:        #191c1e;
+  --color-popover:                #ffffff;
+  --color-popover-foreground:     #191c1e;
+  --color-primary-foreground:     #ffffff;
+  --color-secondary-foreground:   #191c1e;
+  --color-muted:                  #eceef0;
+  --color-muted-foreground:       #43474c;
+  --color-accent:                 #e6e8ea;
+  --color-accent-foreground:      #191c1e;
+  --color-destructive:            #ba1a1a;
+  --color-destructive-foreground: #ffffff;
+  --color-border:                 rgba(116,119,125,0.15);
+  --color-input:                  #e6e8ea;
+  --color-ring:                   #162839;
 
   --color-sidebar:                    #f7f9fb;
   --color-sidebar-foreground:         #191c1e;

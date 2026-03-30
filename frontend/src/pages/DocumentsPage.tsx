@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api";
+import { useFileDrop } from "@/lib/useFileDrop";
 import { Button } from "@/components/ui/button";
 import FilterBar, { type Filters, defaultFilters } from "@/components/FilterBar";
 import DocumentTable from "@/components/DocumentTable";
 
 export default function DocumentsPage() {
-  const [filters, setFilters] = useState<Filters>(defaultFilters);
+  const [searchParams] = useSearchParams();
+  const urlSearch = searchParams.get("search") || "";
+  const [filters, setFilters] = useState<Filters>({ ...defaultFilters, search: urlSearch });
   const [documents, setDocuments] = useState<any[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -40,6 +44,13 @@ export default function DocumentsPage() {
 
   useEffect(() => { fetchDocs(); }, [fetchDocs]);
 
+  // Sync URL search param into filters
+  useEffect(() => {
+    if (urlSearch && urlSearch !== filters.search) {
+      setFilters((f) => ({ ...f, search: urlSearch }));
+    }
+  }, [urlSearch]);
+
   // Auto-refresh when documents are pending/processing
   useEffect(() => {
     const hasPending = documents.some((d) => d.status === "pending" || d.status === "processing");
@@ -69,6 +80,12 @@ export default function DocumentsPage() {
     fetchDocs();
     e.target.value = "";
   };
+
+  const handleDropUpload = useCallback(async (files: File[]) => {
+    await api.upload(files);
+    fetchDocs();
+  }, [fetchDocs]);
+  const { dragging, ...dropHandlers } = useFileDrop(handleDropUpload);
 
   const handleBatchReprocess = async () => {
     if (selected.size === 0) return;
@@ -122,7 +139,18 @@ export default function DocumentsPage() {
   ];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative" {...dropHandlers}>
+      {/* ── Drop overlay ──────────────────────────────────────────────── */}
+      {dragging && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-primary/10 backdrop-blur-sm pointer-events-none">
+          <div className="bg-white rounded-2xl shadow-2xl p-10 flex flex-col items-center gap-3 border-2 border-dashed border-primary">
+            <span className="material-symbols-outlined text-5xl text-primary">file_download</span>
+            <p className="text-lg font-bold font-headline text-primary">Drop files to upload</p>
+            <p className="text-sm text-[#43474c]">PDF, JPG, PNG, HTML supported</p>
+          </div>
+        </div>
+      )}
+
       {/* ── Header ────────────────────────────────────────────────────── */}
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div className="space-y-1">
