@@ -8,16 +8,25 @@ from backend.config import get_setting
 logger = logging.getLogger(__name__)
 
 
+def _rclone_env() -> dict:
+    """Return env dict with RCLONE_CONFIG pointing to persistent volume."""
+    data_dir = os.environ.get("RECEIPTORY_DATA_DIR", "/app/data")
+    return {**os.environ, "RCLONE_CONFIG": os.path.join(data_dir, "rclone.conf")}
+
+
 def upload_backup(backup_dir: str, destination: str, backup_type: str, backup_date: date) -> None:
     """Upload backup directory to rclone destination."""
     remote_path = f"{destination}/{backup_date.isoformat()}-{backup_type}"
     cmd = ["rclone", "copy", backup_dir, remote_path, "--progress"]
 
     logger.info(f"Uploading backup to {remote_path}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=_rclone_env())
     if result.returncode != 0:
         raise RuntimeError(f"rclone upload failed: {result.stderr}")
     logger.info("Backup upload complete")
+
+    # Sync refreshed tokens back to DB
+    _sync_tokens_if_cloud(destination)
 
 
 def apply_retention(destination: str, data_dir: str) -> None:
@@ -28,7 +37,7 @@ def apply_retention(destination: str, data_dir: str) -> None:
 
     # List remote directories
     cmd = ["rclone", "lsf", destination, "--dirs-only"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=_rclone_env())
     if result.returncode != 0:
         logger.warning(f"Failed to list backups for retention: {result.stderr}")
         return
@@ -60,5 +69,16 @@ def apply_retention(destination: str, data_dir: str) -> None:
             logger.info(f"Deleting expired backup: {dirname}")
             subprocess.run(
                 ["rclone", "purge", f"{destination}/{dirname}"],
-                capture_output=True,
+                capture_output=True, env=_rclone_env(),
             )
+
+
+def _sync_tokens_if_cloud(destination: str) -> None:
+    """After rclone operations, sync any refreshed tokens back to DB."""
+    try:
+        from backend.backup.cloud_auth import sync_token_from_rclone
+        for provider in ("gdrive", "onedrive"):
+            if destination.startswith(f"receiptory_{provider}:"):
+                sync_token_from_rclone(provider)
+    except Exception as e:
+        logger.debug(f"Token sync skipped: {e}")

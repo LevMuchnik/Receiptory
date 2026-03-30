@@ -40,6 +40,19 @@ DEFAULTS: dict[str, Any] = {
     "watched_folder_path": "",
     "watched_folder_poll_interval": 10,
     "base_url": "",
+    "gdrive_client_id": "",
+    "gdrive_client_secret": "",
+    "onedrive_client_id": "",
+    "onedrive_client_secret": "",
+    "cloud_auth_gdrive_token": "",
+    "cloud_auth_gdrive_email": "",
+    "cloud_auth_gdrive_folder": "",
+    "cloud_auth_onedrive_token": "",
+    "cloud_auth_onedrive_email": "",
+    "cloud_auth_onedrive_folder": "",
+    "cloud_auth_onedrive_drive_id": "",
+    "cloud_auth_gdrive_drive_id": "",
+    "cloud_auth_state": "",
     "notify_from_name": "Receiptory",
     "notify_email_to": "",
     "notify_telegram_ingested": False,
@@ -56,7 +69,11 @@ DEFAULTS: dict[str, Any] = {
     "notify_email_backup_failed": True,
 }
 
-SENSITIVE_KEYS = {"llm_api_key", "auth_password_hash", "telegram_bot_token", "gmail_app_password"}
+SENSITIVE_KEYS = {
+    "llm_api_key", "auth_password_hash", "telegram_bot_token", "gmail_app_password",
+    "gdrive_client_secret", "onedrive_client_secret",
+    "cloud_auth_gdrive_token", "cloud_auth_onedrive_token", "cloud_auth_state",
+}
 
 
 def get_setting(key: str) -> Any:

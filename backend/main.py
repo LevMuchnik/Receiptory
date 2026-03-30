@@ -44,6 +44,13 @@ def create_app(data_dir: str | None = None, run_background: bool = True) -> Fast
             ],
         )
 
+        # Restore rclone config from stored OAuth tokens
+        try:
+            from backend.backup.cloud_auth import restore_rclone_config
+            restore_rclone_config()
+        except Exception as e:
+            logger.warning(f"Failed to restore rclone config: {e}")
+
         if run_background:
             from backend.processing.queue import run_queue_loop
             from backend.backup.scheduler import run_backup_scheduler
@@ -115,6 +122,9 @@ def create_app(data_dir: str | None = None, run_background: bool = True) -> Fast
 
     from backend.api.backup import router as backup_router
     app.include_router(backup_router, prefix="/api", tags=["backup"])
+
+    from backend.api.cloud_auth import router as cloud_auth_router
+    app.include_router(cloud_auth_router, prefix="/api", tags=["cloud-auth"])
 
     # Serve frontend static files in production (skip in dev when Vite handles frontend)
     # Use override=False so test fixtures that clear env vars aren't clobbered

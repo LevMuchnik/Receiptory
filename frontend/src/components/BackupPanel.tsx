@@ -11,9 +11,12 @@ interface Backup {
   error: string | null;
 }
 
+const INITIAL_SHOW = 10;
+
 export default function BackupPanel() {
   const [backups, setBackups] = useState<Backup[]>([]);
   const [triggering, setTriggering] = useState(false);
+  const [showAll, setShowAll] = useState(false);
 
   const load = () => api.get<Backup[]>("/backup/history").then(setBackups);
   useEffect(() => { load(); }, []);
@@ -34,6 +37,15 @@ export default function BackupPanel() {
     return "text-[#3323cc] font-bold";
   };
 
+  const statusIcon = (status: string) => {
+    if (status === "completed") return "check_circle";
+    if (status === "failed") return "error";
+    return "pending";
+  };
+
+  const visible = showAll ? backups : backups.slice(0, INITIAL_SHOW);
+  const hasMore = backups.length > INITIAL_SHOW;
+
   return (
     <div className="space-y-4">
       <button
@@ -49,28 +61,49 @@ export default function BackupPanel() {
         {backups.length === 0 ? (
           <p className="text-sm text-[#43474c]">No backups yet</p>
         ) : (
-          backups.map((b) => (
-            <div key={b.id} className="flex items-center justify-between text-xs py-2">
-              <div className="flex items-center gap-3">
-                <span className="material-symbols-outlined text-sm text-[#43474c]">
-                  {b.status === "completed" ? "check_circle" : b.status === "failed" ? "error" : "pending"}
-                </span>
-                <div>
-                  <p className="font-mono text-[#191c1e]">{b.started_at}</p>
-                  <p className="text-[#74777d]">{b.backup_type}</p>
+          <>
+            <p className="text-[10px] font-bold text-[#74777d] uppercase tracking-wider mb-2">
+              {backups.length} backup{backups.length !== 1 ? "s" : ""} total
+            </p>
+            {visible.map((b) => (
+              <div key={b.id} className="flex items-center justify-between text-xs py-2">
+                <div className="flex items-center gap-3">
+                  <span className="material-symbols-outlined text-sm text-[#43474c]">
+                    {statusIcon(b.status)}
+                  </span>
+                  <div>
+                    <p className="font-mono text-[#191c1e]">{b.started_at}</p>
+                    <p className="text-[#74777d]">{b.backup_type}</p>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className={statusColor(b.status)}>{b.status.toUpperCase()}</span>
+                  {b.size_bytes != null && b.size_bytes > 0 && (
+                    <p className="text-[#74777d]">{(b.size_bytes / 1024 / 1024).toFixed(1)} MB</p>
+                  )}
+                  {b.error && (
+                    <p className="text-[#93000a] text-[10px] max-w-[200px] truncate" title={b.error}>{b.error}</p>
+                  )}
                 </div>
               </div>
-              <div className="text-right">
-                <span className={statusColor(b.status)}>{b.status.toUpperCase()}</span>
-                {b.size_bytes && (
-                  <p className="text-[#74777d]">{(b.size_bytes / 1024 / 1024).toFixed(1)} MB</p>
-                )}
-                {b.error && (
-                  <p className="text-[#93000a] text-[10px] max-w-[200px] truncate">{b.error}</p>
-                )}
-              </div>
-            </div>
-          ))
+            ))}
+            {hasMore && !showAll && (
+              <button
+                onClick={() => setShowAll(true)}
+                className="text-xs text-primary font-medium hover:underline mt-2"
+              >
+                Show all {backups.length} backups
+              </button>
+            )}
+            {showAll && hasMore && (
+              <button
+                onClick={() => setShowAll(false)}
+                className="text-xs text-[#74777d] font-medium hover:underline mt-2"
+              >
+                Show less
+              </button>
+            )}
+          </>
         )}
       </div>
     </div>

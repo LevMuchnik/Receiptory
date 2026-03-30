@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import CategoryManager from "@/components/CategoryManager";
 import BackupPanel from "@/components/BackupPanel";
+import CloudBackupPanel from "@/components/CloudBackupPanel";
 import LogViewer from "@/components/LogViewer";
 
 type SettingsTab = "general" | "llm" | "telegram" | "email" | "categories" | "backup" | "notifications" | "logs";
@@ -49,7 +51,11 @@ function FieldGroup({ label, children }: { label: string; children: React.ReactN
 const inputCls = "bg-[#eceef0] border-none rounded-lg text-sm focus-visible:ring-primary/20 h-10";
 
 export default function SettingsPage() {
-  const [activeTab, setActiveTab] = useState<SettingsTab>("general");
+  const [searchParams] = useSearchParams();
+  const tabParam = searchParams.get("tab");
+  const [activeTab, setActiveTab] = useState<SettingsTab>(
+    tabParam && TABS.some((t) => t.key === tabParam) ? (tabParam as SettingsTab) : "general"
+  );
   const [settings, setSettings] = useState<any>({});
   const [costs, setCosts] = useState<any>(null);
   const [testResult, setTestResult] = useState<string | null>(null);
@@ -514,17 +520,12 @@ export default function SettingsPage() {
       {activeTab === "backup" && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           <div className="lg:col-span-8 space-y-6">
-            <SectionCard title="Resilience & Backup" icon="backup">
+            <SectionCard title="Cloud Storage" icon="cloud">
+              <CloudBackupPanel settings={settings} save={save} />
+            </SectionCard>
+
+            <SectionCard title="Backup Schedule" icon="schedule">
               <div className="space-y-4">
-                <FieldGroup label="Rclone Destination">
-                  <Input
-                    className={inputCls}
-                    value={settings.backup_destination || ""}
-                    onBlur={(e) => save({ backup_destination: e.target.value })}
-                    onChange={(e) => setSettings({ ...settings, backup_destination: e.target.value })}
-                    placeholder="s3:my-bucket/backups"
-                  />
-                </FieldGroup>
                 <FieldGroup label="Schedule (cron expression)">
                   <Input
                     className={inputCls}
@@ -535,6 +536,65 @@ export default function SettingsPage() {
                   />
                   <p className="text-xs text-[#43474c]">Daily at 02:00 AM: <code className="bg-[#eceef0] px-1 rounded">0 2 * * *</code></p>
                 </FieldGroup>
+                <FieldGroup label="Current Destination">
+                  <p className="text-sm font-mono text-[#43474c] bg-[#eceef0] px-3 py-2 rounded-lg">
+                    {settings.backup_destination || "(not configured)"}
+                  </p>
+                </FieldGroup>
+                <FieldGroup label="Retention Policy">
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="space-y-1">
+                      <Label className="text-[10px] font-bold text-[#74777d] uppercase tracking-wider">Daily (days)</Label>
+                      <Input
+                        className={inputCls}
+                        type="number"
+                        min={1}
+                        value={settings.backup_retention_daily ?? 7}
+                        onBlur={(e) => save({ backup_retention_daily: parseInt(e.target.value) || 7 })}
+                        onChange={(e) => setSettings({ ...settings, backup_retention_daily: e.target.value })}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-[10px] font-bold text-[#74777d] uppercase tracking-wider">Weekly (weeks)</Label>
+                      <Input
+                        className={inputCls}
+                        type="number"
+                        min={1}
+                        value={settings.backup_retention_weekly ?? 4}
+                        onBlur={(e) => save({ backup_retention_weekly: parseInt(e.target.value) || 4 })}
+                        onChange={(e) => setSettings({ ...settings, backup_retention_weekly: e.target.value })}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-[10px] font-bold text-[#74777d] uppercase tracking-wider">Monthly (months)</Label>
+                      <Input
+                        className={inputCls}
+                        type="number"
+                        min={1}
+                        value={settings.backup_retention_monthly ?? 3}
+                        onBlur={(e) => save({ backup_retention_monthly: parseInt(e.target.value) || 3 })}
+                        onChange={(e) => setSettings({ ...settings, backup_retention_monthly: e.target.value })}
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-[#43474c] mt-1">Quarterly backups (Jan/Apr/Jul/Oct 1st) are never auto-deleted.</p>
+                </FieldGroup>
+                <details className="text-sm">
+                  <summary className="cursor-pointer text-[#74777d] font-medium hover:text-primary transition-colors">
+                    Advanced: Custom rclone destination
+                  </summary>
+                  <div className="mt-3">
+                    <FieldGroup label="Rclone Destination (overrides cloud storage)">
+                      <Input
+                        className={inputCls}
+                        value={settings.backup_destination || ""}
+                        onBlur={(e) => save({ backup_destination: e.target.value })}
+                        onChange={(e) => setSettings({ ...settings, backup_destination: e.target.value })}
+                        placeholder="s3:my-bucket/backups"
+                      />
+                    </FieldGroup>
+                  </div>
+                </details>
               </div>
             </SectionCard>
 

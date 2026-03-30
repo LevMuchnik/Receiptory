@@ -72,8 +72,13 @@ async def run_backup(data_dir: str, trigger: str = "manual") -> int:
         backup_dir = await loop.run_in_executor(None, build_backup, data_dir)
 
         if destination:
-            await loop.run_in_executor(None, upload_backup, backup_dir, destination, backup_type, today)
-            await loop.run_in_executor(None, apply_retention, destination, data_dir)
+            destinations = [d.strip() for d in destination.split(",") if d.strip()]
+            for dest in destinations:
+                try:
+                    await loop.run_in_executor(None, upload_backup, backup_dir, dest, backup_type, today)
+                    await loop.run_in_executor(None, apply_retention, dest, data_dir)
+                except Exception as upload_err:
+                    logger.error(f"Failed to upload to {dest}: {upload_err}")
 
         size = _dir_size(backup_dir)
         with get_connection() as conn:

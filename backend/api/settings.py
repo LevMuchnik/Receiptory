@@ -90,9 +90,11 @@ def gmail_poll_now(request: Request, username: str = Depends(require_auth)):
 
 @router.post("/settings/test-notification")
 def test_notification(username: str = Depends(require_auth)):
-    """Send a test notification via all enabled channels."""
-    from backend.notifications.notifier import notify
-    notify("processed", {
+    """Send a test notification via ALL channels, ignoring toggle settings."""
+    from backend.notifications.notifier import _send_telegram, _send_email
+    from backend.notifications.templates import format_processed
+
+    payload = {
         "id": 0,
         "original_filename": "test_notification.pdf",
         "vendor_name": "Test Vendor",
@@ -103,5 +105,24 @@ def test_notification(username: str = Depends(require_auth)):
         "extraction_confidence": 0.99,
         "submission_channel": "web_upload",
         "sender_identifier": None,
-    })
-    return {"message": "Test notification sent"}
+    }
+    base_url = get_setting("base_url") or ""
+    content = format_processed(payload, base_url)
+
+    results = {}
+
+    # Always try Telegram
+    try:
+        _send_telegram(content["caption"], None)
+        results["telegram"] = "sent"
+    except Exception as e:
+        results["telegram"] = f"failed: {e}"
+
+    # Always try Email
+    try:
+        _send_email(content["subject"], content["html"], None)
+        results["email"] = "sent"
+    except Exception as e:
+        results["email"] = f"failed: {e}"
+
+    return {"message": "Test notification sent", "results": results}
