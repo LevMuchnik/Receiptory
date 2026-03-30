@@ -2,7 +2,7 @@ services:
   receiptory:
     build: .
     ports:
-      - "8080:8080"
+      - "${RECEIPTORY_PORT:-8484}:${RECEIPTORY_PORT:-8484}"
     volumes:
       - ./data:/app/data
     env_file:

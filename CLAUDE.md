@@ -38,7 +38,7 @@ tests/                  # pytest test suite
 ```bash
 # Backend
 uv sync --all-extras                    # Install dependencies
-uv run uvicorn backend.main:create_app --factory --reload --port 8080
+uv run uvicorn backend.main:create_app --factory --reload --port 8484
 
 # Frontend (separate terminal)
 cd frontend && npm install && npm run dev

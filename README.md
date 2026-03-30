@@ -24,7 +24,7 @@ cp .env.example .env
 docker compose up -d
 ```
 
-Open http://localhost:8080. Login with `admin` / `admin`, then change the password in Settings.
+Open http://localhost:8484. Login with `admin` / `admin`, then change the password in Settings.
 
 ## Configuration
 
@@ -84,7 +84,7 @@ Unread emails with PDF/image attachments are ingested automatically. HTML-only e
 uv sync --all-extras
 
 # Run the backend (port 8080)
-uv run uvicorn backend.main:create_app --factory --reload --port 8080
+uv run uvicorn backend.main:create_app --factory --reload --port 8484
 ```
 
 ### Frontend
@@ -99,7 +99,7 @@ npm install
 npm run dev
 ```
 
-In dev mode, the frontend proxies API calls to `http://localhost:8080`. Both servers need to be running. Set `RECEIPTORY_DEV=1` in `.env` to prevent the backend from serving static files.
+In dev mode, the frontend proxies API calls to `http://localhost:8484`. Both servers need to be running. Set `RECEIPTORY_DEV=1` in `.env` to prevent the backend from serving static files.
 
 ### Running Tests
 
@@ -114,7 +114,7 @@ uv run pytest tests/ -v
 cd frontend && npm run build && cd ..
 
 # The FastAPI app serves frontend/dist/ as static files
-uv run uvicorn backend.main:create_app --factory --host 0.0.0.0 --port 8080
+uv run uvicorn backend.main:create_app --factory --host 0.0.0.0 --port 8484
 ```
 
 ## Project Structure

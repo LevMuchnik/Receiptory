@@ -36,6 +36,6 @@ COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 RUN mkdir -p /app/data/storage/originals /app/data/storage/converted \
     /app/data/storage/filed /app/data/storage/page_cache /app/data/logs
 
-EXPOSE 8080
+EXPOSE ${RECEIPTORY_PORT:-8484}
 
-CMD ["uv", "run", "uvicorn", "backend.main:create_app", "--host", "0.0.0.0", "--port", "8080", "--factory"]
+CMD ["sh", "-c", "uv run uvicorn backend.main:create_app --host 0.0.0.0 --port ${RECEIPTORY_PORT:-8484} --factory"]
