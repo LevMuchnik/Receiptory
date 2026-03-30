@@ -3,8 +3,9 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.database import init_db
@@ -122,6 +123,16 @@ def create_app(data_dir: str | None = None, run_background: bool = True) -> Fast
     if not os.environ.get("RECEIPTORY_DEV"):
         frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
         if os.path.exists(frontend_dir):
-            app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
+            index_html = os.path.join(frontend_dir, "index.html")
+            app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dir, "assets")), name="static-assets")
+
+            @app.get("/{full_path:path}")
+            async def serve_spa(request: Request, full_path: str):
+                """Serve index.html for all non-API routes (SPA catch-all)."""
+                # Serve static files directly if they exist
+                file_path = os.path.join(frontend_dir, full_path)
+                if full_path and os.path.isfile(file_path):
+                    return FileResponse(file_path)
+                return FileResponse(index_html)
 
     return app
