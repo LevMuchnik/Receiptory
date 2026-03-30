@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import LoginPage from "@/pages/LoginPage";
@@ -6,31 +7,66 @@ import DocumentsPage from "@/pages/DocumentsPage";
 import DocumentDetailPage from "@/pages/DocumentDetailPage";
 import ExportPage from "@/pages/ExportPage";
 import SettingsPage from "@/pages/SettingsPage";
+import Sidebar from "@/components/Sidebar";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { username, loading } = useAuth();
-  if (loading) return <div className="flex items-center justify-center h-screen">Loading...</div>;
+  if (loading) return (
+    <div className="flex items-center justify-center h-screen bg-[#f2f4f6]">
+      <div className="flex flex-col items-center gap-3">
+        <div className="w-10 h-10 bg-primary flex items-center justify-center rounded-xl">
+          <span className="material-symbols-outlined text-white" style={{ fontVariationSettings: "'FILL' 1" }}>receipt_long</span>
+        </div>
+        <p className="text-sm font-medium text-[#43474c]">Loading...</p>
+      </div>
+    </div>
+  );
   if (!username) return <Navigate to="/login" />;
   return <>{children}</>;
 }
 
 function AppLayout({ children }: { children: React.ReactNode }) {
-  const { username, logout } = useAuth();
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
   return (
-    <div className="min-h-screen bg-background">
-      <header className="border-b px-6 py-3 flex items-center justify-between">
-        <nav className="flex gap-4">
-          <a href="/" className="font-semibold">Receiptory</a>
-          <a href="/documents" className="text-muted-foreground hover:text-foreground">Documents</a>
-          <a href="/export" className="text-muted-foreground hover:text-foreground">Export</a>
-          <a href="/settings" className="text-muted-foreground hover:text-foreground">Settings</a>
-        </nav>
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-muted-foreground">{username}</span>
-          <button onClick={logout} className="text-sm underline">Logout</button>
+    <div className="min-h-screen bg-[#f2f4f6]">
+      <Sidebar mobileOpen={mobileMenuOpen} onMobileClose={() => setMobileMenuOpen(false)} />
+
+      {/* Top header — only visible on mobile for hamburger */}
+      <header className="fixed top-0 right-0 left-0 md:left-64 z-40 flex justify-between items-center px-4 md:px-6 h-16 glass-header shadow-[0_2px_8px_rgba(25,28,30,0.04)] font-body text-sm">
+        {/* Mobile: hamburger */}
+        <button
+          className="md:hidden p-2 text-[#43474c] hover:text-primary transition-colors"
+          onClick={() => setMobileMenuOpen(true)}
+        >
+          <span className="material-symbols-outlined">menu</span>
+        </button>
+
+        {/* Search bar */}
+        <div className="flex items-center gap-4 flex-1 md:flex-initial md:w-auto">
+          <div className="relative w-full max-w-md hidden md:block">
+            <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-[#74777d] text-lg">search</span>
+            <input
+              className="w-full pl-10 pr-4 py-2 bg-[#eceef0] border-none rounded-lg text-sm focus:ring-2 focus:ring-primary/20 placeholder:text-[#74777d] outline-none transition-all"
+              placeholder="Search documents, vendors..."
+            />
+          </div>
+        </div>
+
+        {/* Right side */}
+        <div className="flex items-center gap-3">
+          <button className="p-2 text-[#43474c] hover:text-primary transition-colors opacity-80 hover:opacity-100">
+            <span className="material-symbols-outlined">notifications</span>
+          </button>
         </div>
       </header>
-      <main className="p-6">{children}</main>
+
+      {/* Main content */}
+      <main className="md:ml-64 pt-16 pb-20 md:pb-8 min-h-screen">
+        <div className="px-4 md:px-8 py-6 max-w-7xl mx-auto">
+          {children}
+        </div>
+      </main>
     </div>
   );
 }

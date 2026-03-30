@@ -85,7 +85,7 @@ cd frontend && npm run build
 
 - Design spec: `docs/superpowers/specs/2026-03-28-receiptory-v1-design.md`
 - Implementation plan: `docs/superpowers/plans/2026-03-28-receiptory-v1.md`
-- Original requirements: `initial_specifications.md`
+- Original requirements: `docs/initial_specifications.md`
 
 ## Gotchas
 

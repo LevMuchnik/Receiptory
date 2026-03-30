@@ -23,7 +23,9 @@
       "Bash(curl -s -b /tmp/cookies http://localhost:8080/api/queue/status)",
       "Bash(curl -s http://localhost:8080/api/stats/dashboard)",
       "Bash(curl -s http://localhost:5173/)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(unzip -l \"docs/stitch_receiptory.zip\")",
+      "Bash(unzip -o \"docs/stitch_receiptory.zip\" -d \"docs/\")"
     ]
   }
 }

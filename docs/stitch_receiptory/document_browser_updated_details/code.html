@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Receiptory | Document Browser</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&amp;family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              "primary": "#162839",
+              "on-secondary-container": "#007239",
+              "inverse-on-surface": "#eff1f3",
+              "on-secondary-fixed-variant": "#005228",
+              "error-container": "#ffdad6",
+              "surface-dim": "#d8dadc",
+              "primary-fixed-dim": "#b5c8df",
+              "on-primary": "#ffffff",
+              "on-secondary-fixed": "#00210c",
+              "on-background": "#191c1e",
+              "on-error-container": "#93000a",
+              "inverse-surface": "#2d3133",
+              "surface-variant": "#e0e3e5",
+              "on-surface-variant": "#43474c",
+              "surface-bright": "#f7f9fb",
+              "tertiary-fixed": "#e2dfff",
+              "surface-tint": "#4e6073",
+              "error": "#ba1a1a",
+              "on-tertiary-container": "#9f9dff",
+              "on-primary-container": "#96a9be",
+              "surface": "#f7f9fb",
+              "surface-container-high": "#e6e8ea",
+              "primary-container": "#2c3e50",
+              "secondary-container": "#7bf8a1",
+              "surface-container-low": "#f2f4f6",
+              "on-tertiary": "#ffffff",
+              "on-error": "#ffffff",
+              "outline": "#74777d",
+              "on-primary-fixed-variant": "#36485b",
+              "inverse-primary": "#b5c8df",
+              "on-secondary": "#ffffff",
+              "primary-fixed": "#d1e4fb",
+              "secondary-fixed": "#7efba4",
+              "secondary": "#006d37",
+              "on-tertiary-fixed": "#0f0069",
+              "background": "#f7f9fb",
+              "surface-container-highest": "#e0e3e5",
+              "surface-container": "#eceef0",
+              "tertiary-fixed-dim": "#c3c0ff",
+              "surface-container-lowest": "#ffffff",
+              "outline-variant": "#c4c6cd",
+              "secondary-fixed-dim": "#61de8a",
+              "on-tertiary-fixed-variant": "#3323cc",
+              "on-surface": "#191c1e",
+              "tertiary": "#16008a",
+              "tertiary-container": "#270ac3",
+              "on-primary-fixed": "#091d2e"
+            },
+            fontFamily: {
+              "headline": ["Manrope"],
+              "body": ["Inter"],
+              "label": ["Inter"]
+            },
+            borderRadius: {"DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem"},
+          },
+        },
+      }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            vertical-align: middle;
+        }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        
+        /* Accordion custom styling */
+        details summary::-webkit-details-marker { display:none; }
+        details[open] summary .toggle-icon { transform: rotate(180deg); }
+    </style>
+</head>
+<body class="bg-surface text-on-surface font-body antialiased">
+<!-- Side Navigation Bar -->
+<aside class="fixed left-0 top-0 h-full w-64 hidden md:flex flex-col p-4 bg-slate-50 dark:bg-slate-900 font-['Manrope'] font-semibold tracking-tight z-50">
+<div class="flex items-center gap-3 px-2 mb-10">
+<div class="w-10 h-10 bg-primary rounded-xl flex items-center justify-center text-white shadow-lg">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">receipt_long</span>
+</div>
+<div>
+<h1 class="text-xl font-bold text-[#162839] dark:text-white leading-tight">Receiptory</h1>
+<p class="text-[10px] uppercase tracking-widest text-slate-500 font-bold">Precision Management</p>
+</div>
+</div>
+<nav class="flex-1 space-y-1">
+<a class="flex items-center gap-3 px-4 py-3 text-slate-500 dark:text-slate-400 hover:text-[#162839] dark:hover:text-white hover:bg-[#e0e3e5] dark:hover:bg-slate-700 transition-colors duration-200 rounded-lg group" href="#">
+<span class="material-symbols-outlined group-active:scale-90 transition-transform">dashboard</span>
+<span>Dashboard</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-[#162839] dark:text-white font-bold bg-[#f2f4f6] dark:bg-slate-800 rounded-lg group" href="#">
+<span class="material-symbols-outlined group-active:scale-90 transition-transform" style="font-variation-settings: 'FILL' 1;">folder_open</span>
+<span>Documents</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-slate-500 dark:text-slate-400 hover:text-[#162839] dark:hover:text-white hover:bg-[#e0e3e5] dark:hover:bg-slate-700 transition-colors duration-200 rounded-lg group" href="#">
+<span class="material-symbols-outlined group-active:scale-90 transition-transform">ios_share</span>
+<span>Export</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-slate-500 dark:text-slate-400 hover:text-[#162839] dark:hover:text-white hover:bg-[#e0e3e5] dark:hover:bg-slate-700 transition-colors duration-200 rounded-lg group" href="#">
+<span class="material-symbols-outlined group-active:scale-90 transition-transform">settings</span>
+<span>Administration</span>
+</a>
+</nav>
+<div class="mt-auto">
+<button class="w-full py-3 bg-gradient-to-br from-primary to-primary-container text-white rounded-xl font-bold shadow-md hover:shadow-xl transition-all active:scale-95 flex items-center justify-center gap-2">
+<span class="material-symbols-outlined text-sm">add_circle</span>
+                Upload Document
+            </button>
+</div>
+</aside>
+<!-- Top Navigation Bar -->
+<header class="fixed top-0 right-0 left-0 md:left-64 z-40 flex justify-between items-center px-6 h-16 bg-white/85 dark:bg-slate-900/85 backdrop-blur-md shadow-sm font-['Inter'] text-sm">
+<div class="flex items-center gap-4 flex-1">
+<div class="relative w-full max-w-md">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant">search</span>
+<input class="w-full bg-surface-container-high border-none rounded-full py-2 pl-10 pr-4 focus:ring-2 focus:ring-primary/20 text-sm placeholder:text-slate-400" placeholder="Full-text search documents..." type="text"/>
+</div>
+</div>
+<div class="flex items-center gap-4">
+<button class="p-2 text-slate-500 hover:text-[#162839] opacity-80 hover:opacity-100 transition-opacity">
+<span class="material-symbols-outlined">notifications</span>
+</button>
+<div class="h-8 w-8 rounded-full overflow-hidden border border-slate-200">
+<img alt="User Avatar" data-alt="portrait of a professional accountant in a modern office setting, soft natural lighting" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDA52t4mTkCOZNWXnCH4fxTajr6JoemX3KSRyE48pAF62-4H1bPp2ejr082qxA-21CXHeLZ4R-C7ICpkL-2HOUh6bXxqNzdvIT8ORgOfauObsTQlB-sefmOxLV0wTVeIwTJDh5Y-CbsN0bI8xbX4QWCjnY-Rcpj-bVV1qfx4IXei1EE3PpGUxKUh-ZIlPhRgPAtnW-OclzzEJnJmU5n2nhBpuwbe72HNkNlYJE0ekyhqZRDvxpWKAoPxuxcTmfYbWRsLJuHuJ6FFN0"/>
+</div>
+</div>
+</header>
+<!-- Main Content Canvas -->
+<main class="md:ml-64 pt-20 pb-24 px-6 min-h-screen">
+<div class="max-w-7xl mx-auto space-y-8">
+<!-- Header Section -->
+<div class="flex flex-col md:flex-row md:items-end justify-between gap-4">
+<div class="space-y-1">
+<h2 class="text-3xl font-headline font-extrabold tracking-tight text-primary">Document Browser</h2>
+<p class="text-on-surface-variant font-medium">Manage and review extracted receipt data</p>
+</div>
+<div class="flex items-center gap-3">
+<button class="px-4 py-2 bg-surface-container-highest text-primary font-semibold rounded-lg text-sm hover:bg-slate-200 transition-colors flex items-center gap-2">
+<span class="material-symbols-outlined text-base">filter_list</span>
+                        Advanced Filters
+                    </button>
+<button class="px-4 py-2 bg-primary text-white font-semibold rounded-lg text-sm flex items-center gap-2 shadow-sm">
+<span class="material-symbols-outlined text-base">file_download</span>
+                        Batch Export
+                    </button>
+</div>
+</div>
+<!-- Filters Bar -->
+<div class="grid grid-cols-2 md:grid-cols-5 gap-4">
+<div class="space-y-1.5">
+<label class="text-[10px] font-bold text-slate-500 uppercase tracking-wider ml-1">Status</label>
+<select class="w-full bg-surface-container-lowest border-none rounded-lg text-sm font-medium focus:ring-primary/20 shadow-sm">
+<option>All Statuses</option>
+<option>Processed</option>
+<option>Pending</option>
+<option>Failed</option>
+</select>
+</div>
+<div class="space-y-1.5">
+<label class="text-[10px] font-bold text-slate-500 uppercase tracking-wider ml-1">Category</label>
+<select class="w-full bg-surface-container-lowest border-none rounded-lg text-sm font-medium focus:ring-primary/20 shadow-sm">
+<option>Business Expenses</option>
+<option>Travel</option>
+<option>Utilities</option>
+</select>
+</div>
+<div class="space-y-1.5">
+<label class="text-[10px] font-bold text-slate-500 uppercase tracking-wider ml-1">Doc Type</label>
+<select class="w-full bg-surface-container-lowest border-none rounded-lg text-sm font-medium focus:ring-primary/20 shadow-sm">
+<option>Receipt</option>
+<option>Invoice</option>
+<option>Credit Note</option>
+</select>
+</div>
+<div class="space-y-1.5">
+<label class="text-[10px] font-bold text-slate-500 uppercase tracking-wider ml-1">Submission</label>
+<select class="w-full bg-surface-container-lowest border-none rounded-lg text-sm font-medium focus:ring-primary/20 shadow-sm">
+<option>Mobile App</option>
+<option>Email</option>
+<option>Web Upload</option>
+</select>
+</div>
+<div class="space-y-1.5">
+<label class="text-[10px] font-bold text-slate-500 uppercase tracking-wider ml-1">Date Range</label>
+<button class="w-full bg-surface-container-lowest text-left px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-between text-on-surface">
+                        Last 30 Days
+                        <span class="material-symbols-outlined text-lg">calendar_today</span>
+</button>
+</div>
+</div>
+<!-- Documents Table -->
+<div class="bg-surface-container-low rounded-2xl p-6 space-y-4">
+<div class="flex items-center justify-between border-b border-outline-variant/15 pb-4">
+<div class="flex items-center gap-4">
+<input class="rounded text-primary focus:ring-primary border-slate-300" type="checkbox"/>
+<span class="text-xs font-bold text-slate-400 uppercase tracking-widest">3 Documents Selected</span>
+</div>
+<div class="flex items-center gap-2">
+<button class="p-2 hover:bg-white rounded-lg transition-colors"><span class="material-symbols-outlined text-slate-400">grid_view</span></button>
+<button class="p-2 bg-white rounded-lg shadow-sm text-primary"><span class="material-symbols-outlined">view_list</span></button>
+</div>
+</div>
+<div class="space-y-2">
+<div class="grid grid-cols-12 gap-4 px-4 py-2 text-[11px] font-bold text-slate-500 uppercase tracking-widest">
+<div class="col-span-1"></div>
+<div class="col-span-4">Vendor &amp; Date</div>
+<div class="col-span-2">Total Amount</div>
+<div class="col-span-2">Status</div>
+<div class="col-span-2">Category</div>
+<div class="col-span-1 text-right">Action</div>
+</div>
+<!-- Row 1 -->
+<div class="grid grid-cols-12 gap-4 items-center bg-surface-container-lowest p-4 rounded-xl border border-transparent hover:border-primary/10 transition-all group cursor-pointer shadow-sm">
+<div class="col-span-1 flex items-center"><input checked="" class="rounded text-primary focus:ring-primary border-slate-300" type="checkbox"/></div>
+<div class="col-span-4 flex items-center gap-4">
+<div class="w-10 h-10 bg-slate-100 rounded-lg flex items-center justify-center text-slate-400"><span class="material-symbols-outlined">receipt</span></div>
+<div>
+<p class="font-bold text-primary">Starbucks Coffee</p>
+<p class="text-xs text-on-surface-variant">Oct 12, 2023 • 14:32</p>
+</div>
+</div>
+<div class="col-span-2"><p class="font-headline font-bold">$12.45</p><p class="text-[10px] text-slate-400 font-medium">USD</p></div>
+<div class="col-span-2"><span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-secondary-container text-on-secondary-container">PROCESSED</span></div>
+<div class="col-span-2"><span class="text-xs font-medium text-on-surface-variant px-2 py-1 bg-slate-100 rounded">Meals &amp; Ent.</span></div>
+<div class="col-span-1 text-right"><button class="p-2 opacity-0 group-hover:opacity-100 transition-opacity"><span class="material-symbols-outlined text-slate-400 hover:text-primary">open_in_new</span></button></div>
+</div>
+<!-- Row 2 -->
+<div class="grid grid-cols-12 gap-4 items-center bg-surface-container-lowest p-4 rounded-xl border border-transparent hover:border-primary/10 transition-all group cursor-pointer shadow-sm">
+<div class="col-span-1 flex items-center"><input class="rounded text-primary focus:ring-primary border-slate-300" type="checkbox"/></div>
+<div class="col-span-4 flex items-center gap-4">
+<div class="w-10 h-10 bg-slate-100 rounded-lg flex items-center justify-center text-slate-400"><span class="material-symbols-outlined">description</span></div>
+<div>
+<p class="font-bold text-primary">Shell Station #492</p>
+<p class="text-xs text-on-surface-variant">Oct 14, 2023 • 09:15</p>
+</div>
+</div>
+<div class="col-span-2"><p class="font-headline font-bold">$64.20</p><p class="text-[10px] text-slate-400 font-medium">USD</p></div>
+<div class="col-span-2"><span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-tertiary-fixed text-on-tertiary-fixed-variant">PENDING</span></div>
+<div class="col-span-2"><span class="text-xs font-medium text-on-surface-variant px-2 py-1 bg-slate-100 rounded">Travel</span></div>
+<div class="col-span-1 text-right"><button class="p-2 opacity-0 group-hover:opacity-100 transition-opacity"><span class="material-symbols-outlined text-slate-400 hover:text-primary">open_in_new</span></button></div>
+</div>
+<!-- Row 3 -->
+<div class="grid grid-cols-12 gap-4 items-center bg-surface-container-lowest p-4 rounded-xl border border-transparent hover:border-primary/10 transition-all group cursor-pointer shadow-sm">
+<div class="col-span-1 flex items-center"><input class="rounded text-primary focus:ring-primary border-slate-300" type="checkbox"/></div>
+<div class="col-span-4 flex items-center gap-4">
+<div class="w-10 h-10 bg-error-container/30 rounded-lg flex items-center justify-center text-error"><span class="material-symbols-outlined">error</span></div>
+<div>
+<p class="font-bold text-primary">Amazon Business</p>
+<p class="text-xs text-on-surface-variant">Oct 10, 2023 • 11:45</p>
+</div>
+</div>
+<div class="col-span-2"><p class="font-headline font-bold text-slate-400">—</p><p class="text-[10px] text-slate-400 font-medium">USD</p></div>
+<div class="col-span-2"><span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-error-container text-on-error-container">FAILED</span></div>
+<div class="col-span-2"><span class="text-xs font-medium text-on-surface-variant px-2 py-1 bg-slate-100 rounded">Supplies</span></div>
+<div class="col-span-1 text-right"><button class="p-2 opacity-0 group-hover:opacity-100 transition-opacity"><span class="material-symbols-outlined text-slate-400 hover:text-primary">open_in_new</span></button></div>
+</div>
+</div>
+</div>
+</div>
+</main>
+<!-- Document Detail Drawer (Updated with Collapsible Sections) -->
+<div class="fixed inset-y-0 right-0 w-full max-w-2xl bg-white shadow-2xl z-[60] flex flex-col transform translate-x-0 transition-transform duration-300 border-l border-slate-100">
+<div class="p-6 border-b border-slate-50 flex items-center justify-between">
+<div class="flex items-center gap-4">
+<button class="p-2 hover:bg-slate-100 rounded-full transition-colors">
+<span class="material-symbols-outlined">chevron_left</span>
+</button>
+<h3 class="text-xl font-headline font-bold text-primary">Document Details</h3>
+</div>
+<div class="flex gap-2">
+<button class="p-2 text-on-surface-variant hover:text-primary"><span class="material-symbols-outlined">share</span></button>
+<button class="p-2 text-on-surface-variant hover:text-error"><span class="material-symbols-outlined">delete</span></button>
+</div>
+</div>
+<div class="flex-1 overflow-y-auto no-scrollbar">
+<!-- Top Section: Visual Preview (Always Visible) -->
+<div class="p-8 pb-4">
+<div class="grid grid-cols-1 md:grid-cols-2 gap-8 items-start">
+<div class="space-y-4">
+<label class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Document Source</label>
+<div class="aspect-[3/4] rounded-xl bg-slate-100 overflow-hidden relative group border border-slate-200">
+<img class="w-full h-full object-cover" data-alt="high contrast macro shot of a printed paper receipt with sharp black text on white background" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBv6p_QxsKxElc4hluElDCBvelWKNF4f4AnQfJOBLyM1bZaDzKSu-5QZnbLzIKGw3v4UQMASTXGjvelpNBNJjuju7t7bYobgZrq30e0Dw8B9_LrcfvAJxiJr90t6BienwtHnMcZVnXuePKZLzcbgW2JPVD4-rB5ykG4-uMzR_pE_TYTRIM_VRxEsMOIbApn5bGpslcfB8rA-P3Tnq4UuU1tfsApRQQoSaFibIoMfVUf9cwIwOQOIryE-RbIkRC-Hh6KDAck57r9IjI"/>
+<div class="absolute inset-0 bg-primary/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+<button class="px-4 py-2 bg-white text-primary rounded-lg font-bold shadow-lg flex items-center gap-2">
+<span class="material-symbols-outlined">zoom_in</span>
+                                    Full Preview
+                                </button>
+</div>
+</div>
+</div>
+<!-- Metadata: Core Fields (Primary View) -->
+<div class="space-y-6">
+<label class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Core Metadata</label>
+<div class="space-y-4">
+<div class="space-y-1">
+<label class="text-[10px] font-medium text-on-surface-variant ml-1">Vendor Name</label>
+<input class="w-full bg-surface-container border-none border-b-2 border-transparent focus:border-primary rounded-md py-2 px-3 text-sm font-semibold" type="text" value="Starbucks Coffee"/>
+</div>
+<div class="grid grid-cols-2 gap-4">
+<div class="space-y-1">
+<label class="text-[10px] font-medium text-on-surface-variant ml-1">Receipt Date</label>
+<input class="w-full bg-surface-container border-none border-b-2 border-transparent focus:border-primary rounded-md py-2 px-3 text-sm font-semibold" type="text" value="2023-10-12"/>
+</div>
+<div class="space-y-1">
+<label class="text-[10px] font-medium text-on-surface-variant ml-1">Currency</label>
+<select class="w-full bg-surface-container border-none border-b-2 border-transparent focus:border-primary rounded-md py-2 px-3 text-sm font-semibold">
+<option>USD</option>
+<option>EUR</option>
+<option>GBP</option>
+</select>
+</div>
+</div>
+<div class="space-y-1 pt-2">
+<label class="text-[10px] font-medium text-on-surface-variant ml-1">Total Amount</label>
+<div class="relative">
+<span class="absolute left-3 top-1/2 -translate-y-1/2 font-bold text-primary">$</span>
+<input class="w-full bg-primary-fixed border-none border-b-2 border-primary rounded-md py-3 pl-7 pr-3 text-lg font-headline font-extrabold text-primary" type="text" value="12.45"/>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Accordion Sections -->
+<div class="px-8 pb-12 space-y-4">
+<!-- Line Items Section (Collapsible) -->
+<details class="group border border-slate-200 rounded-xl bg-white overflow-hidden" open="">
+<summary class="flex items-center justify-between p-4 cursor-pointer hover:bg-slate-50 transition-colors list-none">
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-primary">list_alt</span>
+<span class="font-bold text-sm tracking-tight text-primary">Line Items Extracted</span>
+</div>
+<span class="material-symbols-outlined toggle-icon text-slate-400 transition-transform">expand_more</span>
+</summary>
+<div class="p-4 border-t border-slate-100">
+<table class="w-full text-left text-xs">
+<thead>
+<tr class="text-slate-400 font-bold uppercase tracking-widest border-b border-slate-50">
+<th class="pb-2 font-bold">Description</th>
+<th class="pb-2 text-center w-12">Qty</th>
+<th class="pb-2 text-right">Unit Price</th>
+<th class="pb-2 text-right">Total</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-slate-50">
+<tr>
+<td class="py-3 font-medium text-primary">Caffe Latte (Grande)</td>
+<td class="py-3 text-center">1</td>
+<td class="py-3 text-right">$4.95</td>
+<td class="py-3 text-right font-semibold">$4.95</td>
+</tr>
+<tr>
+<td class="py-3 font-medium text-primary">Blueberry Muffin</td>
+<td class="py-3 text-center">1</td>
+<td class="py-3 text-right">$3.75</td>
+<td class="py-3 text-right font-semibold">$3.75</td>
+</tr>
+<tr>
+<td class="py-3 font-medium text-primary">Breakfast Sandwich</td>
+<td class="py-3 text-center">1</td>
+<td class="py-3 text-right">$2.80</td>
+<td class="py-3 text-right font-semibold">$2.80</td>
+</tr>
+</tbody>
+</table>
+</div>
+</details>
+<!-- Processing & Confidence (Collapsible) -->
+<details class="group border border-slate-200 rounded-xl bg-white overflow-hidden">
+<summary class="flex items-center justify-between p-4 cursor-pointer hover:bg-slate-50 transition-colors list-none">
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-primary">query_stats</span>
+<span class="font-bold text-sm tracking-tight text-primary">Processing &amp; Confidence</span>
+</div>
+<span class="material-symbols-outlined toggle-icon text-slate-400 transition-transform">expand_more</span>
+</summary>
+<div class="p-5 border-t border-slate-100 bg-slate-50/30">
+<div class="grid grid-cols-2 gap-6">
+<div class="space-y-4">
+<div class="flex items-center justify-between">
+<span class="text-xs text-on-surface-variant">OCR Confidence</span>
+<span class="text-xs font-bold text-green-600">0.992</span>
+</div>
+<div class="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden">
+<div class="bg-green-500 h-full w-[99%]"></div>
+</div>
+<div class="flex items-center justify-between">
+<span class="text-xs text-on-surface-variant">Model Used</span>
+<code class="text-[10px] px-1.5 py-0.5 bg-slate-100 rounded font-semibold text-primary">GPT-4o</code>
+</div>
+</div>
+<div class="space-y-3">
+<div class="flex justify-between text-xs">
+<span class="text-on-surface-variant">Input Tokens</span>
+<span class="font-medium">1,248</span>
+</div>
+<div class="flex justify-between text-xs">
+<span class="text-on-surface-variant">Output Tokens</span>
+<span class="font-medium">312</span>
+</div>
+<div class="pt-2 border-t border-slate-200 flex justify-between text-xs">
+<span class="font-bold text-primary">Total Cost</span>
+<span class="font-bold text-primary">$0.0062</span>
+</div>
+</div>
+</div>
+</div>
+</details>
+<!-- Audit & History (Collapsible) -->
+<details class="group border border-slate-200 rounded-xl bg-white overflow-hidden">
+<summary class="flex items-center justify-between p-4 cursor-pointer hover:bg-slate-50 transition-colors list-none">
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-primary">history</span>
+<span class="font-bold text-sm tracking-tight text-primary">Audit &amp; History</span>
+</div>
+<span class="material-symbols-outlined toggle-icon text-slate-400 transition-transform">expand_more</span>
+</summary>
+<div class="p-4 border-t border-slate-100 space-y-4">
+<div class="space-y-3">
+<div class="flex gap-3 items-start">
+<div class="w-1 bg-primary/20 rounded-full self-stretch"></div>
+<div class="flex-1">
+<p class="text-xs font-bold text-primary">Metadata Edited</p>
+<p class="text-[10px] text-slate-400">Oct 12, 15:45 • Admin User</p>
+<p class="text-[11px] mt-1 text-on-surface-variant">Changed 'Vendor Name' from 'Starbucks' to 'Starbucks Coffee'</p>
+</div>
+</div>
+<div class="flex gap-3 items-start">
+<div class="w-1 bg-primary/20 rounded-full self-stretch"></div>
+<div class="flex-1">
+<p class="text-xs font-bold text-primary">Document Uploaded</p>
+<p class="text-[10px] text-slate-400">Oct 12, 14:32 • System</p>
+</div>
+</div>
+</div>
+<div class="pt-2">
+<label class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 block">User Notes</label>
+<textarea class="w-full text-xs bg-slate-50 border-slate-200 rounded-lg focus:ring-primary/20" placeholder="Add private notes regarding this document..." rows="2"></textarea>
+</div>
+</div>
+</details>
+<!-- Technical Metadata (Collapsible) -->
+<details class="group border border-slate-200 rounded-xl bg-white overflow-hidden">
+<summary class="flex items-center justify-between p-4 cursor-pointer hover:bg-slate-50 transition-colors list-none">
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-primary">terminal</span>
+<span class="font-bold text-sm tracking-tight text-primary">Technical Metadata</span>
+</div>
+<span class="material-symbols-outlined toggle-icon text-slate-400 transition-transform">expand_more</span>
+</summary>
+<div class="p-4 border-t border-slate-100 bg-slate-50/10">
+<div class="grid grid-cols-1 gap-3">
+<div>
+<span class="text-[10px] font-bold text-slate-400 uppercase block mb-0.5">SHA-256 Hash</span>
+<code class="text-[10px] break-all bg-white p-2 border border-slate-100 rounded block font-mono text-slate-600">8f3e5b1...4a2c91d</code>
+</div>
+<div class="grid grid-cols-2 gap-4">
+<div>
+<span class="text-[10px] font-bold text-slate-400 uppercase block mb-0.5">Original Filename</span>
+<span class="text-xs font-medium text-primary truncate block">IMG_20231012_1432.jpg</span>
+</div>
+<div>
+<span class="text-[10px] font-bold text-slate-400 uppercase block mb-0.5">Channel</span>
+<span class="text-xs font-medium text-primary block">Mobile App (v2.4.1)</span>
+</div>
+</div>
+</div>
+</div>
+</details>
+</div>
+</div>
+<!-- Footer Actions -->
+<div class="p-6 bg-surface-container-low flex items-center justify-between gap-4 border-t border-slate-100">
+<button class="px-6 py-3 border border-outline-variant text-primary font-bold rounded-xl text-sm hover:bg-white transition-colors">Mark as Deleted</button>
+<div class="flex items-center gap-3">
+<button class="px-6 py-3 bg-white text-primary border border-slate-200 font-bold rounded-xl text-sm flex items-center gap-2 hover:shadow-md transition-all">
+<span class="material-symbols-outlined text-sm">refresh</span>
+                    Reprocess
+                </button>
+<button class="px-8 py-3 bg-gradient-to-br from-primary to-primary-container text-white font-bold rounded-xl text-sm shadow-lg hover:scale-[1.02] active:scale-95 transition-all">
+                    Save Metadata
+                </button>
+</div>
+</div>
+</div>
+<!-- Bottom Navigation Bar (Mobile Only) -->
+<nav class="fixed bottom-0 left-0 w-full h-16 flex justify-around items-center px-4 md:hidden z-50 bg-white dark:bg-slate-900 shadow-[0_-4px_12px_rgba(0,0,0,0.05)] border-t border-slate-100 dark:border-slate-800">
+<a class="text-slate-400 dark:text-slate-500 p-2 flex flex-col items-center" href="#">
+<span class="material-symbols-outlined">dashboard</span>
+<span class="text-[10px] font-medium font-['Inter']">Home</span>
+</a>
+<a class="text-[#162839] dark:text-white bg-[#f2f4f6] dark:bg-slate-800 rounded-xl p-2 flex flex-col items-center" href="#">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">folder</span>
+<span class="text-[10px] font-medium font-['Inter']">Files</span>
+</a>
+<a class="text-slate-400 dark:text-slate-500 p-2 flex flex-col items-center" href="#">
+<span class="material-symbols-outlined">ios_share</span>
+<span class="text-[10px] font-medium font-['Inter']">Export</span>
+</a>
+<a class="text-slate-400 dark:text-slate-500 p-2 flex flex-col items-center" href="#">
+<span class="material-symbols-outlined">settings</span>
+<span class="text-[10px] font-medium font-['Inter']">Admin</span>
+</a>
+</nav>
+</body></html>
