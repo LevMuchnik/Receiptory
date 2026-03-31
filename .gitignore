@@ -5,6 +5,7 @@ data/
 .env
 node_modules/
 frontend/dist/
+frontend/public/opencv/
 *.egg-info/
 .pytest_cache/
 test_documents/

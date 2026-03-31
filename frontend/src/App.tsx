@@ -7,9 +7,11 @@ import DocumentsPage from "@/pages/DocumentsPage";
 import DocumentDetailPage from "@/pages/DocumentDetailPage";
 import ExportPage from "@/pages/ExportPage";
 import SettingsPage from "@/pages/SettingsPage";
+import ScannerPage from "@/pages/ScannerPage";
 import Sidebar from "@/components/Sidebar";
+import { isAndroid } from "@/lib/platform";
 
-function ProtectedRoute({ children }: { children: React.ReactNode }) {
+function ProtectedRoute({ children, redirectAndroid }: { children: React.ReactNode; redirectAndroid?: boolean }) {
   const { username, loading } = useAuth();
   if (loading) return (
     <div className="flex items-center justify-center h-screen bg-[#f2f4f6]">
@@ -22,6 +24,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     </div>
   );
   if (!username) return <Navigate to="/login" />;
+  if (redirectAndroid && isAndroid()) return <Navigate to="/scan" />;
   return <>{children}</>;
 }
 
@@ -90,11 +93,12 @@ export default function App() {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
-          <Route path="/" element={<ProtectedRoute><AppLayout><DashboardPage /></AppLayout></ProtectedRoute>} />
+          <Route path="/" element={<ProtectedRoute redirectAndroid><AppLayout><DashboardPage /></AppLayout></ProtectedRoute>} />
           <Route path="/documents" element={<ProtectedRoute><AppLayout><DocumentsPage /></AppLayout></ProtectedRoute>} />
           <Route path="/documents/:id" element={<ProtectedRoute><AppLayout><DocumentDetailPage /></AppLayout></ProtectedRoute>} />
           <Route path="/export" element={<ProtectedRoute><AppLayout><ExportPage /></AppLayout></ProtectedRoute>} />
           <Route path="/settings" element={<ProtectedRoute><AppLayout><SettingsPage /></AppLayout></ProtectedRoute>} />
+          <Route path="/scan" element={<ProtectedRoute><ScannerPage /></ProtectedRoute>} />
         </Routes>
       </AuthProvider>
     </BrowserRouter>

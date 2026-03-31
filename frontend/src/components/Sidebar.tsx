@@ -6,6 +6,7 @@ import { useFileDrop } from "@/lib/useFileDrop";
 const NAV_ITEMS = [
   { to: "/", icon: "dashboard",    label: "Dashboard",       exact: true },
   { to: "/documents", icon: "folder_open", label: "Documents",  exact: false },
+  { to: "/scan",     icon: "document_scanner", label: "Scan",  exact: false },
   { to: "/export",    icon: "ios_share",   label: "Export",     exact: false },
   { to: "/settings",  icon: "settings",    label: "Administration", exact: false },
 ];
