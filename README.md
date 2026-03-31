@@ -14,7 +14,7 @@ Self-hosted receipt, invoice, and document management system for self-employed p
 - **Cloud backup** via rclone with configurable retention policy
 - **Single-user auth** with session cookies
 
-## Quick Start (Docker)
+## Quick Start (Docker Compose)
 
 ```bash
 cp .env.example .env
@@ -25,6 +25,108 @@ docker compose up -d
 ```
 
 Open http://localhost:8484. Login with `admin` / `admin`, then change the password in Settings.
+
+## Unraid Setup
+
+### Installation
+
+1. Open the Unraid web UI and go to the terminal (or SSH into your server)
+
+2. Create the app directory and clone the repo:
+   ```bash
+   mkdir -p /mnt/user/appdata/Receiptory
+   cd /mnt/user/appdata/Receiptory
+   git clone https://github.com/LevMuchnik/Receiptory.git .
+   ```
+
+3. Create and edit the environment file:
+   ```bash
+   cp .env.example .env
+   nano .env
+   ```
+   At minimum, set:
+   ```env
+   RECEIPTORY_LLM_API_KEY=your-api-key-here
+   RECEIPTORY_LLM_MODEL=gemini/gemini-3-flash-preview
+   RECEIPTORY_AUTH_USERNAME=admin
+   RECEIPTORY_AUTH_PASSWORD=your-password
+   RECEIPTORY_PORT=8484
+   ```
+
+4. Build and start the container:
+   ```bash
+   cd /mnt/user/appdata/Receiptory
+   docker compose up -d --build
+   ```
+
+5. Open `http://your-nas-ip:8484` in your browser
+
+### Updating
+
+```bash
+cd /mnt/user/appdata/Receiptory
+git pull
+docker compose up -d --build
+```
+
+### Data Persistence
+
+All data is stored in `/mnt/user/appdata/Receiptory/data/` which is mounted into the container. This directory survives container rebuilds and contains:
+
+- `receiptory.db` — SQLite database
+- `storage/` — uploaded and processed document files
+- `logs/` — application logs
+- `rclone.conf` — cloud backup credentials (auto-generated from OAuth tokens)
+
+### Cloud Backup (Google Drive / OneDrive)
+
+Receiptory can back up to Google Drive and/or OneDrive via OAuth. Both can be active simultaneously.
+
+#### Google Drive Setup
+
+1. Go to [Google Cloud Console > Credentials](https://console.cloud.google.com/apis/credentials)
+2. Create a project if you don't have one (any name, e.g. "Receiptory")
+3. Click **+ Create Credentials** > **OAuth client ID**
+4. If prompted, configure the consent screen: choose **External**, fill in app name and email, save
+5. Select **Web application** as the application type
+6. Under **Authorized redirect URIs**, add:
+   ```
+   http://your-nas-ip:8484/api/cloud-auth/callback/gdrive
+   ```
+7. Click **Create** and copy the **Client ID** and **Client Secret**
+8. Go to [APIs & Services > Library](https://console.cloud.google.com/apis/library/drive.googleapis.com), search for **Google Drive API**, and click **Enable**
+9. In Receiptory: go to **Administration > Resilience**, paste the Client ID and Secret into the Google Drive section, then click **Connect Google Drive**
+
+#### OneDrive Setup
+
+1. Go to [Azure Portal > App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps)
+2. Click **+ New registration**
+   - Name: "Receiptory" (or anything)
+   - Supported account types: **Accounts in any organizational directory and personal Microsoft accounts**
+   - Redirect URI: select **Web** and enter:
+     ```
+     http://your-nas-ip:8484/api/cloud-auth/callback/onedrive
+     ```
+3. Click **Register**. Copy the **Application (client) ID**
+4. Go to **Certificates & secrets** > **+ New client secret**. Copy the **Value** (not the Secret ID — the value is only shown once)
+5. Go to **API permissions** > **+ Add a permission** > **Microsoft Graph** > **Delegated permissions**. Add:
+   - `Files.ReadWrite.All`
+   - `User.Read`
+   - `offline_access`
+6. In Receiptory: go to **Administration > Resilience**, paste the Client ID and Secret into the OneDrive section, then click **Connect OneDrive**
+
+#### Backup Retention
+
+Old backups are automatically cleaned up after each run:
+
+| Type | When | Default Retention |
+|---|---|---|
+| Daily | Every day | 7 days |
+| Weekly | Sundays | 4 weeks |
+| Monthly | 1st of month | 3 months |
+| Quarterly | Jan/Apr/Jul/Oct 1st | Never deleted |
+
+Retention periods are configurable in **Administration > Resilience > Backup Schedule**.
 
 ## Configuration
 
