@@ -8,6 +8,22 @@ Receiptory is a single-container web application that ingests receipts and invoi
 
 ---
 
+## Screenshots
+
+| Dashboard | Document Browser |
+|:---------:|:----------------:|
+| ![Dashboard](docs/screenshots/Dashboard.jpg) | ![Document Browser](docs/screenshots/Document%20View.jpg) |
+
+| Document Detail | Administration |
+|:---------------:|:--------------:|
+| ![Document Detail](docs/screenshots/Document%20Detail.jpg) | ![Administration](docs/screenshots/System%20Administration.jpg) |
+
+| Dark Mode |
+|:---------:|
+| ![Dark Mode](docs/screenshots/Dark%20Mode.jpg) |
+
+---
+
 ## Features
 
 **Ingestion**
