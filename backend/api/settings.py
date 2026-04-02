@@ -14,9 +14,11 @@ def get_settings(username: str = Depends(require_auth)):
 
 @router.patch("/settings")
 def patch_settings(body: SettingsUpdate, username: str = Depends(require_auth)):
+    from backend.config import DEFAULTS
     for key, value in body.settings.items():
+        if key not in DEFAULTS:
+            continue  # Reject unknown setting keys
         if key == "auth_password_hash":
-            # Password changes should be handled specially
             import bcrypt
             value = bcrypt.hashpw(value.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
         set_setting(key, value)

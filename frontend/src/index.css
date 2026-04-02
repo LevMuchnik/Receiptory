@@ -82,94 +82,153 @@
   --shadow-ambient: 0 8px 32px rgba(25, 28, 30, 0.06);
   --shadow-card:    0 2px 8px  rgba(25, 28, 30, 0.04);
 
-  /* shadcn/ui mappings — keep components working */
-  --background:           var(--color-surface-container-low);
-  --foreground:           var(--color-on-surface);
-  --card:                 var(--color-surface-container-lowest);
-  --card-foreground:      var(--color-on-surface);
-  --popover:              var(--color-surface-container-lowest);
-  --popover-foreground:   var(--color-on-surface);
-  --primary:              var(--color-primary);
-  --primary-foreground:   var(--color-on-primary);
-  --secondary:            var(--color-surface-container);
-  --secondary-foreground: var(--color-on-surface);
-  --muted:                var(--color-surface-container);
-  --muted-foreground:     var(--color-on-surface-variant);
-  --accent:               var(--color-surface-container-high);
-  --accent-foreground:    var(--color-on-surface);
-  --destructive:          var(--color-error);
-  --border:               rgba(116, 119, 125, 0.15);
-  --input:                var(--color-surface-container-high);
-  --ring:                 var(--color-primary);
+  /* shadcn/ui mappings — Tailwind utilities use --color-X, set them here */
+  --color-background:             var(--color-surface-container-low);
+  --color-foreground:             var(--color-on-surface);
+  --color-card:                   var(--color-surface-container-lowest);
+  --color-card-foreground:        var(--color-on-surface);
+  --color-popover:                var(--color-surface-container-lowest);
+  --color-popover-foreground:     var(--color-on-surface);
+  --color-primary-foreground:     var(--color-on-primary);
+  --color-secondary-foreground:   var(--color-on-surface);
+  --color-muted:                  var(--color-surface-container);
+  --color-muted-foreground:       var(--color-on-surface-variant);
+  --color-accent:                 var(--color-surface-container-high);
+  --color-accent-foreground:      var(--color-on-surface);
+  --color-destructive:            var(--color-error);
+  --color-destructive-foreground: #ffffff;
+  --color-border:                 rgba(116, 119, 125, 0.15);
+  --color-input:                  var(--color-surface-container-high);
+  --color-ring:                   var(--color-primary);
 
   /* Sidebar */
-  --sidebar:                    #f7f9fb;
-  --sidebar-foreground:         var(--color-on-surface);
-  --sidebar-primary:            var(--color-primary);
-  --sidebar-primary-foreground: var(--color-on-primary);
-  --sidebar-accent:             var(--color-surface-container-high);
-  --sidebar-accent-foreground:  var(--color-on-surface);
-  --sidebar-border:             transparent;
-  --sidebar-ring:               var(--color-primary);
+  --color-sidebar:                    var(--color-surface);
+  --color-sidebar-foreground:         var(--color-on-surface);
+  --color-sidebar-primary:            var(--color-primary);
+  --color-sidebar-primary-foreground: var(--color-on-primary);
+  --color-sidebar-accent:             var(--color-surface-container-high);
+  --color-sidebar-accent-foreground:  var(--color-on-surface);
+  --color-sidebar-border:             transparent;
+  --color-sidebar-ring:               var(--color-primary);
+
+  /* Legacy aliases for shadcn components that use --background etc. */
+  --background:           var(--color-background);
+  --foreground:           var(--color-foreground);
+  --card:                 var(--color-card);
+  --card-foreground:      var(--color-card-foreground);
+  --popover:              var(--color-popover);
+  --popover-foreground:   var(--color-popover-foreground);
+  --primary:              var(--color-primary);
+  --primary-foreground:   var(--color-primary-foreground);
+  --secondary:            var(--color-surface-container);
+  --secondary-foreground: var(--color-secondary-foreground);
+  --muted:                var(--color-muted);
+  --muted-foreground:     var(--color-muted-foreground);
+  --accent:               var(--color-accent);
+  --accent-foreground:    var(--color-accent-foreground);
+  --destructive:          var(--color-destructive);
+  --destructive-foreground: var(--color-destructive-foreground);
+  --border:               var(--color-border);
+  --input:                var(--color-input);
+  --ring:                 var(--color-ring);
+  --sidebar:              var(--color-sidebar);
+  --sidebar-foreground:   var(--color-sidebar-foreground);
+  --sidebar-primary:      var(--color-sidebar-primary);
+  --sidebar-primary-foreground: var(--color-sidebar-primary-foreground);
+  --sidebar-accent:       var(--color-sidebar-accent);
+  --sidebar-accent-foreground: var(--color-sidebar-accent-foreground);
+  --sidebar-border:       var(--color-sidebar-border);
+  --sidebar-ring:         var(--color-sidebar-ring);
+}
+
+/* ── Dark theme overrides ───────────────────────────────────────────────── */
+.dark {
+  --color-primary: #b5c8df;
+  --color-primary-container: #36485b;
+  --color-on-primary: #091d2e;
+  --color-on-primary-container: #d1e4fb;
+  --color-primary-fixed: #d1e4fb;
+  --color-primary-fixed-dim: #b5c8df;
+  --color-on-primary-fixed-variant: #36485b;
+  --color-inverse-primary: #162839;
+
+  --color-secondary: #61de8a;
+  --color-secondary-container: #005228;
+  --color-on-secondary: #00210c;
+  --color-on-secondary-container: #7bf8a1;
+
+  --color-tertiary: #c3c0ff;
+  --color-tertiary-container: #3323cc;
+  --color-on-tertiary: #00106a;
+  --color-on-tertiary-container: #e2dfff;
+
+  --color-error: #ffb4ab;
+  --color-error-container: #93000a;
+  --color-on-error: #690005;
+  --color-on-error-container: #ffdad6;
+
+  --color-background: #111416;
+  --color-surface: #111416;
+  --color-surface-bright: #363a3c;
+  --color-surface-dim: #111416;
+  --color-surface-container-lowest: #0c0e10;
+  --color-surface-container-low: #191c1e;
+  --color-surface-container: #1d2022;
+  --color-surface-container-high: #272a2d;
+  --color-surface-container-highest: #323537;
+  --color-surface-variant: #43474c;
+  --color-surface-tint: #b5c8df;
+
+  --color-on-surface: #e1e3e5;
+  --color-on-background: #e1e3e5;
+  --color-on-surface-variant: #c4c6cd;
+  --color-inverse-surface: #e1e3e5;
+  --color-inverse-on-surface: #2d3133;
+
+  --color-outline: #8e9199;
+  --color-outline-variant: #43474c;
+
+  --shadow-ambient: 0 8px 32px rgba(0, 0, 0, 0.3);
+  --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.2);
+
+  /* Tailwind --color-X overrides for dark mode */
+  --color-background:             var(--color-surface-container-low);
+  --color-foreground:             var(--color-on-surface);
+  --color-card:                   var(--color-surface-container);
+  --color-card-foreground:        var(--color-on-surface);
+  --color-popover:                var(--color-surface-container);
+  --color-popover-foreground:     var(--color-on-surface);
+  --color-primary-foreground:     var(--color-on-primary);
+  --color-secondary-foreground:   var(--color-on-surface);
+  --color-muted:                  var(--color-surface-container-high);
+  --color-muted-foreground:       var(--color-on-surface-variant);
+  --color-accent:                 var(--color-surface-container-highest);
+  --color-accent-foreground:      var(--color-on-surface);
+  --color-destructive:            #ffb4ab;
+  --color-destructive-foreground: #690005;
+  --color-border:                 rgba(196, 198, 205, 0.15);
+  --color-input:                  var(--color-surface-container-high);
+  --color-ring:                   var(--color-primary);
+
+  --color-sidebar:                    #151819;
+  --color-sidebar-foreground:         var(--color-on-surface);
+  --color-sidebar-primary:            var(--color-primary);
+  --color-sidebar-primary-foreground: var(--color-on-primary);
+  --color-sidebar-accent:             var(--color-surface-container-high);
+  --color-sidebar-accent-foreground:  var(--color-on-surface);
+  --color-sidebar-border:             transparent;
+  --color-sidebar-ring:               var(--color-primary);
 }
 
 /* ── Tailwind v4 theme extension ────────────────────────────────────────── */
-@theme inline {
+/* Default (light) values for Tailwind utility registration.
+   Actual runtime values come from :root and .dark blocks above via CSS cascade. */
+@theme {
   /* Fonts */
-  --font-headline: var(--font-headline);
-  --font-body:     var(--font-body);
   --font-sans:     'Inter', sans-serif;
   --font-heading:  'Manrope', sans-serif;
-
-  /* Brand colours as Tailwind utilities */
-  --color-primary:                   #162839;
-  --color-primary-container:         #2c3e50;
-  --color-on-primary:                #ffffff;
-  --color-on-primary-container:      #96a9be;
-  --color-primary-fixed:             #d1e4fb;
-  --color-primary-fixed-dim:         #b5c8df;
-  --color-on-primary-fixed-variant:  #36485b;
-  --color-inverse-primary:           #b5c8df;
-
-  --color-secondary-ds:              #006d37;
-  --color-secondary-container:       #7bf8a1;
-  --color-on-secondary:              #ffffff;
-  --color-on-secondary-container:    #007239;
-  --color-secondary-fixed:           #7efba4;
-  --color-on-secondary-fixed-variant:#005228;
-
-  --color-tertiary:                  #16008a;
-  --color-tertiary-container:        #270ac3;
-  --color-on-tertiary:               #ffffff;
-  --color-tertiary-fixed:            #e2dfff;
-  --color-tertiary-fixed-dim:        #c3c0ff;
-  --color-on-tertiary-fixed:         #00106a;
-  --color-on-tertiary-fixed-variant: #3323cc;
-
-  --color-error-ds:                  #ba1a1a;
-  --color-error-container:           #ffdad6;
-  --color-on-error:                  #ffffff;
-  --color-on-error-container:        #93000a;
-
-  --color-surface:                   #f7f9fb;
-  --color-surface-dim:               #d8dadc;
-  --color-surface-bright:            #f7f9fb;
-  --color-surface-container-lowest:  #ffffff;
-  --color-surface-container-low:     #f2f4f6;
-  --color-surface-container:         #eceef0;
-  --color-surface-container-high:    #e6e8ea;
-  --color-surface-container-highest: #e0e3e5;
-  --color-surface-variant:           #e0e3e5;
-  --color-surface-tint:              #4e6073;
-
-  --color-on-surface:                #191c1e;
-  --color-on-background:             #191c1e;
-  --color-on-surface-variant:        #43474c;
-  --color-inverse-surface:           #2d3133;
-  --color-inverse-on-surface:        #eff1f3;
-
-  --color-outline:                   #74777d;
-  --color-outline-variant:           #c4c6cd;
+  --font-headline: 'Manrope', sans-serif;
+  --font-body:     'Inter', sans-serif;
 
   /* Radius */
   --radius-sm:   0.25rem;
@@ -178,7 +237,16 @@
   --radius-xl:   0.75rem;
   --radius-2xl:  1rem;
 
-  /* shadcn tokens */
+  /* Brand colors (light defaults) */
+  --color-primary:                   #162839;
+  --color-on-primary:                #ffffff;
+  --color-on-surface:                #191c1e;
+  --color-on-surface-variant:        #43474c;
+  --color-surface-container:         #eceef0;
+  --color-surface-container-high:    #e6e8ea;
+  --color-outline:                   #74777d;
+
+  /* shadcn tokens (light defaults — overridden by :root/.dark at runtime) */
   --color-background:             #f2f4f6;
   --color-foreground:             #191c1e;
   --color-card:                   #ffffff;
@@ -215,8 +283,8 @@
   }
 
   body {
-    background-color: #f2f4f6;
-    color: #191c1e;
+    background-color: var(--color-background);
+    color: var(--color-on-surface);
     font-family: 'Inter', sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -248,6 +316,10 @@
 .cta-gradient {
   background: linear-gradient(135deg, #162839 0%, #2c3e50 100%);
 }
+.dark .cta-gradient {
+  background: linear-gradient(135deg, #b5c8df 0%, #96a9be 100%);
+  color: #091d2e;
+}
 
 /* Terminal scrollbar */
 .terminal-scroll::-webkit-scrollbar { width: 6px; }
@@ -263,6 +335,9 @@
   background: rgba(255, 255, 255, 0.85);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
+}
+.dark .glass-header {
+  background: rgba(17, 20, 22, 0.85);
 }
 
 /* Status chips */
@@ -317,6 +392,11 @@
   display: inline-flex;
   align-items: center;
 }
+
+.dark .chip-processed { background-color: #005228; color: #7bf8a1; }
+.dark .chip-pending { background-color: #1a0066; color: #c3c0ff; }
+.dark .chip-failed { background-color: #690005; color: #ffb4ab; }
+.dark .chip-review { background-color: #3d2e00; color: #ffd666; }
 
 /* Accordion details */
 details summary::-webkit-details-marker { display: none; }

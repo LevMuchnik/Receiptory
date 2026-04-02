@@ -1,3 +1,4 @@
+import { useNavigate } from "react-router-dom";
 import { Checkbox } from "@/components/ui/checkbox";
 
 interface Document {
@@ -43,6 +44,7 @@ const statusIconName = (status: string) => {
 };
 
 export default function DocumentTable({ documents, selected, onSelect, onSelectAll, sortBy, sortOrder, onSort }: Props) {
+  const navigate = useNavigate();
   const sortIcon = (field: string) => {
     if (sortBy !== field) return <span className="material-symbols-outlined text-sm text-[#c4c6cd]">unfold_more</span>;
     return <span className="material-symbols-outlined text-sm text-primary">{sortOrder === "asc" ? "arrow_upward" : "arrow_downward"}</span>;
@@ -50,7 +52,7 @@ export default function DocumentTable({ documents, selected, onSelect, onSelectA
 
   if (documents.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-[#43474c]">
+      <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
         <span className="material-symbols-outlined text-5xl text-[#c4c6cd] mb-3">folder_open</span>
         <p className="font-semibold">No documents found</p>
         <p className="text-sm mt-1">Try adjusting your filters</p>
@@ -87,8 +89,8 @@ export default function DocumentTable({ documents, selected, onSelect, onSelectA
       {documents.map((doc) => (
         <div
           key={doc.id}
-          className="grid grid-cols-12 gap-3 items-center bg-white px-4 py-3 rounded-xl border border-transparent hover:border-primary/10 transition-all group cursor-pointer shadow-[0_1px_4px_rgba(25,28,30,0.04)]"
-          onClick={() => window.location.href = `/documents/${doc.id}`}
+          className="grid grid-cols-12 gap-3 items-center bg-card px-4 py-3 rounded-xl border border-transparent hover:border-primary/10 transition-all group cursor-pointer shadow-[0_1px_4px_rgba(25,28,30,0.04)]"
+          onClick={() => navigate(`/documents/${doc.id}`)}
         >
           {/* Checkbox */}
           <div className="col-span-1 flex items-center" onClick={(e) => e.stopPropagation()}>
@@ -101,13 +103,13 @@ export default function DocumentTable({ documents, selected, onSelect, onSelectA
           {/* Vendor & date */}
           <div className="col-span-4 flex items-center gap-3">
             <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${
-              doc.status === "failed" ? "bg-[#ffdad6] text-[#93000a]" : "bg-[#eceef0] text-[#43474c]"
+              doc.status === "failed" ? "bg-[#ffdad6] text-[#93000a]" : "bg-muted text-muted-foreground"
             }`}>
               <span className="material-symbols-outlined text-base">{statusIconName(doc.status)}</span>
             </div>
             <div className="min-w-0">
               <p className="font-bold text-primary text-sm truncate">{doc.vendor_name || doc.original_filename}</p>
-              <p className="text-xs text-[#43474c]">{doc.receipt_date || doc.submission_date || "—"}</p>
+              <p className="text-xs text-muted-foreground">{doc.receipt_date || doc.submission_date || "—"}</p>
             </div>
           </div>
 
@@ -127,7 +129,7 @@ export default function DocumentTable({ documents, selected, onSelect, onSelectA
           {/* Category */}
           <div className="col-span-2">
             {doc.category_name ? (
-              <span className="text-xs font-medium text-[#43474c] px-2 py-1 bg-[#eceef0] rounded-md">{doc.category_name}</span>
+              <span className="text-xs font-medium text-muted-foreground px-2 py-1 bg-muted rounded-md">{doc.category_name}</span>
             ) : (
               <span className="text-xs text-slate-400">—</span>
             )}
@@ -136,10 +138,10 @@ export default function DocumentTable({ documents, selected, onSelect, onSelectA
           {/* Open icon */}
           <div className="col-span-1 text-right">
             <button
-              className="p-1.5 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-[#f2f4f6] rounded-lg"
-              onClick={(e) => { e.stopPropagation(); window.location.href = `/documents/${doc.id}`; }}
+              className="p-1.5 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-muted rounded-lg"
+              onClick={(e) => { e.stopPropagation(); navigate(`/documents/${doc.id}`); }}
             >
-              <span className="material-symbols-outlined text-[#43474c] hover:text-primary text-base">open_in_new</span>
+              <span className="material-symbols-outlined text-muted-foreground hover:text-primary text-base">open_in_new</span>
             </button>
           </div>
         </div>

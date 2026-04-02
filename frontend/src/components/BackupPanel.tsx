@@ -57,29 +57,29 @@ export default function BackupPanel() {
         {triggering ? "Running..." : "Trigger Backup Now"}
       </button>
 
-      <div className="space-y-2 border-t border-[rgba(116,119,125,0.1)] pt-4">
+      <div className="space-y-2 border-t border-border pt-4">
         {backups.length === 0 ? (
-          <p className="text-sm text-[#43474c]">No backups yet</p>
+          <p className="text-sm text-muted-foreground">No backups yet</p>
         ) : (
           <>
-            <p className="text-[10px] font-bold text-[#74777d] uppercase tracking-wider mb-2">
+            <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider mb-2">
               {backups.length} backup{backups.length !== 1 ? "s" : ""} total
             </p>
             {visible.map((b) => (
               <div key={b.id} className="flex items-center justify-between text-xs py-2">
                 <div className="flex items-center gap-3">
-                  <span className="material-symbols-outlined text-sm text-[#43474c]">
+                  <span className="material-symbols-outlined text-sm text-muted-foreground">
                     {statusIcon(b.status)}
                   </span>
                   <div>
-                    <p className="font-mono text-[#191c1e]">{b.started_at}</p>
-                    <p className="text-[#74777d]">{b.backup_type}</p>
+                    <p className="font-mono text-foreground">{b.started_at}</p>
+                    <p className="text-muted-foreground">{b.backup_type}</p>
                   </div>
                 </div>
                 <div className="text-right">
                   <span className={statusColor(b.status)}>{b.status.toUpperCase()}</span>
                   {b.size_bytes != null && b.size_bytes > 0 && (
-                    <p className="text-[#74777d]">{(b.size_bytes / 1024 / 1024).toFixed(1)} MB</p>
+                    <p className="text-muted-foreground">{(b.size_bytes / 1024 / 1024).toFixed(1)} MB</p>
                   )}
                   {b.error && (
                     <p className="text-[#93000a] text-[10px] max-w-[200px] truncate" title={b.error}>{b.error}</p>
@@ -98,7 +98,7 @@ export default function BackupPanel() {
             {showAll && hasMore && (
               <button
                 onClick={() => setShowAll(false)}
-                className="text-xs text-[#74777d] font-medium hover:underline mt-2"
+                className="text-xs text-muted-foreground font-medium hover:underline mt-2"
               >
                 Show less
               </button>

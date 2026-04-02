@@ -3,8 +3,8 @@
 import json
 import logging
 import os
+import secrets
 import subprocess
-import time
 
 import httpx
 
@@ -59,7 +59,7 @@ def get_authorize_url(provider: str) -> str:
         raise ValueError(f"No client ID configured for {provider}")
 
     # Generate state token
-    state = f"{provider}:{int(time.time())}"
+    state = secrets.token_urlsafe(32)
     set_setting("cloud_auth_state", state)
 
     params = {

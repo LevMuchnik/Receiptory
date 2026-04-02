@@ -1,50 +1,74 @@
 # Receiptory
 
-Self-hosted receipt, invoice, and document management system for self-employed professionals. Uses LLM-powered extraction to process scanned and digital documents.
+**Self-hosted receipt, invoice, and document management for self-employed professionals.**
+
+Receiptory is a single-container web application that ingests receipts and invoices from multiple channels — web upload, email, Telegram, mobile camera, or a watched folder — and uses LLM-powered extraction to automatically classify, parse, and organize them. Built for running on a home NAS or any Docker host.
+
+![License](https://img.shields.io/badge/license-AGPL--3.0-blue)
+
+---
 
 ## Features
 
-- **Web upload** with drag-and-drop, SHA-256 deduplication
-- **Telegram bot** — send or forward photos/documents to a bot for processing
-- **Gmail ingestion** — polls a dedicated Gmail inbox for forwarded receipts and bills
-- **LLM extraction** via litellm (Gemini, OpenAI, Anthropic) — OCR, field extraction, classification in one pass
-- **Document browser** with full-text search (FTS5), filters, sorting, pagination
-- **Document detail view** with rendered page images and editable metadata
-- **Export** filtered documents as zip (category folders + CSV metadata)
-- **Cloud backup** via rclone with configurable retention policy
-- **Single-user auth** with session cookies
+**Ingestion**
+- Drag-and-drop web upload with SHA-256 deduplication
+- Mobile document scanner with live boundary detection and perspective correction
+- Telegram bot — forward photos or documents for automatic processing
+- Gmail IMAP polling — auto-ingests receipts from labeled emails
+- Watched folder — drop files on a network share for hands-free ingestion
 
-## Quick Start (Docker Compose)
+**Processing**
+- LLM-powered extraction via [litellm](https://github.com/BerriAI/litellm) (Gemini, OpenAI, Anthropic, and more)
+- Single-pass OCR, field extraction, and classification
+- Automatic vendor detection, amount parsing, tax ID matching
+- Confidence scoring with human review queue for uncertain extractions
+
+**Management**
+- Document browser with full-text search (SQLite FTS5), filters, sorting, and pagination
+- Document detail view with rendered page images and editable metadata
+- Custom categories with LLM-guided classification
+- Export to ZIP with category-organized PDFs, CSV, and Excel metadata
+
+**Infrastructure**
+- Cloud backup to Google Drive and/or OneDrive via OAuth (or any rclone remote)
+- Configurable retention policy (daily/weekly/monthly/quarterly)
+- Dark theme with light/dark/system toggle
+- Notification alerts via Telegram and email
+- Single-user session auth
+
+---
+
+## Quick Start
 
 ```bash
+git clone https://github.com/LevMuchnik/Receiptory.git
+cd Receiptory
 cp .env.example .env
-# Edit .env — at minimum set your LLM API key:
-#   RECEIPTORY_LLM_API_KEY=your-key-here
+# Edit .env — at minimum set RECEIPTORY_LLM_API_KEY
 
-docker compose up -d
+docker compose up -d --build
 ```
 
-Open http://localhost:8484. Login with `admin` / `admin`, then change the password in Settings.
+Open `http://localhost:8484`. Log in with `admin` / `admin`, then change the password in **Administration > General**.
+
+---
 
 ## Unraid Setup
 
 ### Installation
 
-1. Open the Unraid web UI and go to the terminal (or SSH into your server)
+1. Open the Unraid terminal (or SSH into your server)
 
-2. Create the app directory and clone the repo:
+2. Clone and configure:
    ```bash
    mkdir -p /mnt/user/appdata/Receiptory
    cd /mnt/user/appdata/Receiptory
    git clone https://github.com/LevMuchnik/Receiptory.git .
-   ```
-
-3. Create and edit the environment file:
-   ```bash
    cp .env.example .env
    nano .env
    ```
-   At minimum, set:
+
+3. Set at minimum:
    ```env
    RECEIPTORY_LLM_API_KEY=your-api-key-here
    RECEIPTORY_LLM_MODEL=gemini/gemini-3-flash-preview
@@ -53,13 +77,12 @@ Open http://localhost:8484. Login with `admin` / `admin`, then change the passwo
    RECEIPTORY_PORT=8484
    ```
 
-4. Build and start the container:
+4. Build and start:
    ```bash
-   cd /mnt/user/appdata/Receiptory
    docker compose up -d --build
    ```
 
-5. Open `http://your-nas-ip:8484` in your browser
+5. Open `http://your-nas-ip:8484`
 
 ### Updating
 
@@ -71,186 +94,193 @@ docker compose up -d --build
 
 ### Data Persistence
 
-All data is stored in `/mnt/user/appdata/Receiptory/data/` which is mounted into the container. This directory survives container rebuilds and contains:
+All data lives in `data/` (mounted as a Docker volume) and survives container rebuilds:
 
-- `receiptory.db` — SQLite database
-- `storage/` — uploaded and processed document files
-- `logs/` — application logs
-- `rclone.conf` — cloud backup credentials (auto-generated from OAuth tokens)
+| Path | Contents |
+|------|----------|
+| `data/receiptory.db` | SQLite database |
+| `data/storage/` | Document files (originals, converted, filed) |
+| `data/logs/` | Application logs |
+| `data/rclone.conf` | Cloud backup credentials (auto-generated) |
 
-### Cloud Backup (Google Drive / OneDrive)
+---
 
-Receiptory can back up to Google Drive and/or OneDrive via OAuth. Both can be active simultaneously.
+## Configuration
 
-#### Google Drive Setup
+All settings are configurable via the admin UI. Environment variables take precedence over database values.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RECEIPTORY_LLM_API_KEY` | — | API key for your LLM provider (required) |
+| `RECEIPTORY_LLM_MODEL` | `gemini/gemini-3-flash-preview` | [litellm model string](https://docs.litellm.ai/docs/providers) |
+| `RECEIPTORY_AUTH_USERNAME` | `admin` | Web UI username |
+| `RECEIPTORY_AUTH_PASSWORD` | `admin` | Web UI password |
+| `RECEIPTORY_SECRET_KEY` | (random) | Session signing key — set for persistent sessions across restarts |
+| `RECEIPTORY_PORT` | `8484` | HTTP port |
+| `RECEIPTORY_DATA_DIR` | `./data` | Data directory (DB, files, logs) |
+| `RECEIPTORY_TELEGRAM_BOT_TOKEN` | — | Telegram bot token from @BotFather |
+| `RECEIPTORY_GMAIL_ADDRESS` | — | Gmail address to poll via IMAP |
+| `RECEIPTORY_GMAIL_APP_PASSWORD` | — | Gmail App Password (16 chars) |
+| `RECEIPTORY_BACKUP_SCHEDULE` | `0 2 * * *` | Backup cron schedule |
+| `RECEIPTORY_THEME` | `light` | Default theme: `light`, `dark`, or `system` |
+| `RECEIPTORY_DEV` | `0` | Set to `1` when running with Vite dev server |
+
+See `.env.example` for the full list with descriptions.
+
+---
+
+## Ingestion Channels
+
+### Telegram Bot
+
+1. Message [@BotFather](https://t.me/BotFather) on Telegram, send `/newbot`
+2. Copy the bot token to `.env` as `RECEIPTORY_TELEGRAM_BOT_TOKEN` (or set via Administration > Telegram)
+3. Restart the container
+4. Optionally restrict access by adding your Telegram user ID (message [@userinfobot](https://t.me/userinfobot) to find it)
+5. Send or forward photos/documents to your bot
+
+### Gmail
+
+Uses IMAP with a Gmail App Password — no Google Cloud project needed.
+
+1. Enable 2-Step Verification: [myaccount.google.com/security](https://myaccount.google.com/security)
+2. Generate an App Password: [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
+3. In Administration > Email, enter the Gmail address and App Password
+4. Click **Test Connection** to verify
+
+Unread emails with PDF/image attachments are ingested automatically. HTML-only emails (e.g., digital receipts) are converted to PDF. Emails from unauthorized senders are flagged for review.
+
+### Mobile Scanner
+
+On Android devices, the app opens directly to a camera-based document scanner with:
+- Live document boundary detection and perspective correction
+- Image enhancement (contrast, brightness optimization)
+- Multi-page scanning with PDF assembly
+- Requires HTTPS or a Chrome flag for camera access on LAN
+
+### Watched Folder
+
+Set `RECEIPTORY_WATCHED_FOLDER_PATH` to a directory. Files dropped there are auto-ingested and moved to a `processed/` subfolder.
+
+---
+
+## Cloud Backup
+
+Receiptory backs up to Google Drive and/or OneDrive via OAuth. Both can be active simultaneously. Backups are scheduled via cron and include the database, all document files, and metadata exports (JSONL + CSV + Excel).
+
+### Google Drive
 
 1. Go to [Google Cloud Console > Credentials](https://console.cloud.google.com/apis/credentials)
-2. Create a project if you don't have one (any name, e.g. "Receiptory")
-3. Click **+ Create Credentials** > **OAuth client ID**
-4. If prompted, configure the consent screen: choose **External**, fill in app name and email, save
-5. Select **Web application** as the application type
-6. Under **Authorized redirect URIs**, add:
-   ```
-   http://your-nas-ip:8484/api/cloud-auth/callback/gdrive
-   ```
-7. Click **Create** and copy the **Client ID** and **Client Secret**
-8. Go to [APIs & Services > Library](https://console.cloud.google.com/apis/library/drive.googleapis.com), search for **Google Drive API**, and click **Enable**
-9. In Receiptory: go to **Administration > Resilience**, paste the Client ID and Secret into the Google Drive section, then click **Connect Google Drive**
+2. Create a project if needed, then **+ Create Credentials > OAuth client ID**
+3. Configure consent screen (External), select **Web application**
+4. Add redirect URI: `http://your-nas-ip:8484/api/cloud-auth/callback/gdrive`
+5. Copy Client ID and Secret
+6. Enable the [Google Drive API](https://console.cloud.google.com/apis/library/drive.googleapis.com)
+7. In Receiptory: Administration > Resilience > paste credentials > **Connect Google Drive**
 
-#### OneDrive Setup
+### OneDrive
 
 1. Go to [Azure Portal > App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps)
-2. Click **+ New registration**
-   - Name: "Receiptory" (or anything)
-   - Supported account types: **Accounts in any organizational directory and personal Microsoft accounts**
-   - Redirect URI: select **Web** and enter:
-     ```
-     http://your-nas-ip:8484/api/cloud-auth/callback/onedrive
-     ```
-3. Click **Register**. Copy the **Application (client) ID**
-4. Go to **Certificates & secrets** > **+ New client secret**. Copy the **Value** (not the Secret ID — the value is only shown once)
-5. Go to **API permissions** > **+ Add a permission** > **Microsoft Graph** > **Delegated permissions**. Add:
-   - `Files.ReadWrite.All`
-   - `User.Read`
-   - `offline_access`
-6. In Receiptory: go to **Administration > Resilience**, paste the Client ID and Secret into the OneDrive section, then click **Connect OneDrive**
+2. **+ New registration** — select "Accounts in any organizational directory and personal Microsoft accounts"
+3. Add redirect URI (Web): `http://your-nas-ip:8484/api/cloud-auth/callback/onedrive`
+4. Copy Application (client) ID
+5. Under Certificates & secrets, create a new secret and copy the **Value**
+6. Under API permissions, add: `Files.ReadWrite.All`, `User.Read`, `offline_access`
+7. In Receiptory: Administration > Resilience > paste credentials > **Connect OneDrive**
 
-#### Backup Retention
+### Retention Policy
 
-Old backups are automatically cleaned up after each run:
-
-| Type | When | Default Retention |
-|---|---|---|
+| Type | Schedule | Default Retention |
+|------|----------|-------------------|
 | Daily | Every day | 7 days |
 | Weekly | Sundays | 4 weeks |
 | Monthly | 1st of month | 3 months |
 | Quarterly | Jan/Apr/Jul/Oct 1st | Never deleted |
 
-Retention periods are configurable in **Administration > Resilience > Backup Schedule**.
+Configurable in Administration > Resilience > Backup Schedule.
 
-## Configuration
+---
 
-All settings are configurable via the admin UI (Settings page). Environment variables override DB values.
-
-| Variable | Default | Description |
-|---|---|---|
-| `RECEIPTORY_LLM_API_KEY` | (empty) | API key for your LLM provider |
-| `RECEIPTORY_LLM_MODEL` | `gemini/gemini-3-flash-preview` | litellm model string |
-| `RECEIPTORY_AUTH_USERNAME` | `admin` | Web UI username |
-| `RECEIPTORY_AUTH_PASSWORD` | `admin` | Initial password (set via UI after first login) |
-| `RECEIPTORY_DATA_DIR` | `./data` | Data directory (DB, files, logs) |
-| `RECEIPTORY_SECRET_KEY` | (default) | Session signing key — change in production |
-| `RECEIPTORY_TELEGRAM_BOT_TOKEN` | (empty) | Telegram bot token from @BotFather |
-| `RECEIPTORY_GMAIL_ADDRESS` | (empty) | Gmail address to poll |
-| `RECEIPTORY_GMAIL_APP_PASSWORD` | (empty) | Gmail App Password (16 chars) |
-| `RECEIPTORY_BACKUP_DESTINATION` | (empty) | rclone remote path (e.g., `gcs:my-bucket/receiptory`) |
-| `RECEIPTORY_BACKUP_SCHEDULE` | `0 2 * * *` | Backup cron schedule |
-
-## Telegram Bot Setup
-
-1. Message [@BotFather](https://t.me/BotFather) on Telegram
-2. Send `/newbot`, follow prompts to create a bot
-3. Copy the bot token into `.env` as `RECEIPTORY_TELEGRAM_BOT_TOKEN` (or set via Settings > Telegram)
-4. Restart the backend
-5. Optionally restrict access: add your Telegram user ID to "Authorized User IDs" in Settings > Telegram (message [@userinfobot](https://t.me/userinfobot) to find your ID). Leave empty to allow anyone.
-6. Send photos or documents to your bot — they'll appear in the Documents page
-
-## Gmail Ingestion Setup
-
-Uses IMAP with a Gmail App Password — no Google Cloud project needed.
-
-1. **Enable 2-Step Verification** on the Gmail account: [myaccount.google.com/security](https://myaccount.google.com/security) > 2-Step Verification > turn on
-2. **Generate an App Password**: [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
-   - Select app: "Mail", select device: "Other" (enter "Receiptory")
-   - Copy the 16-character password (e.g., `abcd efgh ijkl mnop`)
-3. In Receiptory Settings > Gmail (or `.env`):
-   - Set the Gmail address and App Password
-   - Optionally set authorized senders (e.g., `invoice@company.com; @utility.co.il`)
-4. Click **Test Connection** to verify
-5. The poller runs automatically (default: every 5 minutes). Use "Poll Now" for immediate check.
-
-Unread emails with PDF/image attachments are ingested automatically. HTML-only emails (e.g., digital receipts) are saved as HTML for processing. Emails from unauthorized senders are flagged for review.
-
-## Development Setup
+## Development
 
 ### Prerequisites
 
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/) (Python package manager)
+- Python 3.12+, [uv](https://docs.astral.sh/uv/)
 - Node.js 20+
 
 ### Backend
 
 ```bash
-# Install dependencies
 uv sync --all-extras
-
-# Run the backend (port 8080)
-uv run uvicorn backend.main:create_app --factory --reload --port 8484
+RECEIPTORY_DEV=1 uv run uvicorn backend.main:create_app --factory --reload --port 8484
 ```
 
 ### Frontend
 
 ```bash
-cd frontend
-
-# Install dependencies
-npm install
-
-# Run dev server with HMR (port 5173)
-npm run dev
+cd frontend && npm install && npm run dev
 ```
 
-In dev mode, the frontend proxies API calls to `http://localhost:8484`. Both servers need to be running. Set `RECEIPTORY_DEV=1` in `.env` to prevent the backend from serving static files.
+The Vite dev server runs on port 5173 with API proxy to localhost:8484. Set `RECEIPTORY_DEV=1` to prevent the backend from serving static files.
 
-### Running Tests
+### Tests
 
 ```bash
 uv run pytest tests/ -v
 ```
 
-### Building for Production
+### Production Build
 
 ```bash
-# Build frontend
 cd frontend && npm run build && cd ..
-
-# The FastAPI app serves frontend/dist/ as static files
 uv run uvicorn backend.main:create_app --factory --host 0.0.0.0 --port 8484
 ```
+
+---
 
 ## Project Structure
 
 ```
 receiptory/
 ├── backend/
-│   ├── main.py              # FastAPI app, lifespan
-│   ├── config.py            # Settings (env > db > defaults)
-│   ├── auth.py              # Session auth
-│   ├── database.py          # SQLite + migrations
-│   ├── storage.py           # File I/O, page rendering
-│   ├── models.py            # Pydantic models
-│   ├── api/                 # REST endpoints
-│   ├── processing/          # LLM pipeline, queue
-│   ├── ingestion/           # Telegram bot, Gmail poller
-│   └── backup/              # Scheduler, runner, rclone
-├── frontend/                # React + Vite + shadcn/ui
-├── migrations/              # Numbered SQL files
-├── tests/                   # pytest suite
-├── Dockerfile               # Multi-stage build
+│   ├── main.py                # FastAPI app factory, lifespan
+│   ├── config.py              # Settings (env > db > defaults)
+│   ├── auth.py                # Session-based authentication
+│   ├── database.py            # SQLite WAL + migration runner
+│   ├── storage.py             # File I/O, page rendering
+│   ├── models.py              # Pydantic request/response models
+│   ├── api/                   # REST endpoint routers
+│   ├── processing/            # LLM extraction pipeline, queue
+│   ├── ingestion/             # Telegram bot, Gmail poller, watched folder
+│   ├── backup/                # Scheduler, runner, rclone, OAuth
+│   └── notifications/         # Telegram + email notification dispatch
+├── frontend/src/
+│   ├── pages/                 # Page components
+│   ├── components/            # Reusable UI components
+│   ├── components/scanner/    # Mobile document scanner
+│   ├── contexts/              # Auth + Theme providers
+│   └── lib/                   # API client, hooks, utilities
+├── migrations/                # Numbered SQL migration files
+├── tests/                     # pytest test suite
+├── Dockerfile                 # Multi-stage build
 └── docker-compose.yml
 ```
 
-## Data & Backups
+---
 
-All data lives in the `data/` directory (Docker volume mount):
+## Tech Stack
 
-- `data/receiptory.db` — SQLite database
-- `data/storage/` — document files (originals, converted PDFs, filed copies)
-- `data/logs/` — application logs
+| Layer | Technology |
+|-------|-----------|
+| Backend | Python 3.12, FastAPI, SQLite (WAL + FTS5), litellm |
+| Frontend | React 18, TypeScript, Vite, Tailwind CSS v4, shadcn/ui |
+| Document processing | PyMuPDF, Pillow, WeasyPrint |
+| Mobile scanner | Scanic (WASM), jsPDF |
+| Cloud backup | rclone (Google Drive, OneDrive, S3, etc.) |
+| Deployment | Docker Compose, single container |
 
-Backups include all files, the database, a JSONL metadata export (app-independent), and settings. Backups are usable without Receiptory.
+---
 
 ## License
 
-Private project.
+This project is licensed under the [GNU Affero General Public License v3.0](LICENSE).

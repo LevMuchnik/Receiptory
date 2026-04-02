@@ -130,7 +130,8 @@ def create_app(data_dir: str | None = None, run_background: bool = True) -> Fast
     # Use override=False so test fixtures that clear env vars aren't clobbered
     import dotenv
     dotenv.load_dotenv(override=False)
-    if not os.environ.get("RECEIPTORY_DEV"):
+    dev_mode = os.environ.get("RECEIPTORY_DEV", "").lower() in ("1", "true", "yes")
+    if not dev_mode:
         frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
         if os.path.exists(frontend_dir):
             index_html = os.path.join(frontend_dir, "index.html")

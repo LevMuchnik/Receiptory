@@ -35,8 +35,9 @@ def build_backup(data_dir: str) -> str:
     # Export JSONL metadata
     _export_jsonl(os.path.join(backup_dir, "metadata.jsonl"))
 
-    # Export settings
-    settings = get_all_settings()
+    # Export settings (with sensitive values masked)
+    from backend.config import get_all_settings_masked
+    settings = get_all_settings_masked()
     with open(os.path.join(backup_dir, "settings.json"), "w") as f:
         json.dump(settings, f, indent=2, default=str)
 

@@ -20,6 +20,7 @@ DEFAULTS: dict[str, Any] = {
     "confidence_threshold": 0.7,
     "auth_username": "admin",
     "auth_password_hash": "",
+    "theme": "light",
     "log_level": "INFO",
     "page_render_dpi": 200,
     "backup_destination": "",

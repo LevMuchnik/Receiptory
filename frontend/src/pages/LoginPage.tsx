@@ -24,11 +24,11 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen bg-[#f2f4f6]">
+    <div className="flex min-h-screen bg-background">
       {/* Left panel — branding */}
       <div className="hidden lg:flex lg:w-1/2 cta-gradient flex-col items-center justify-center p-12 relative overflow-hidden">
         <div className="relative z-10 text-white text-center">
-          <div className="w-16 h-16 bg-white/10 rounded-2xl flex items-center justify-center mb-6 mx-auto shadow-lg">
+          <div className="w-16 h-16 bg-card/10 rounded-2xl flex items-center justify-center mb-6 mx-auto shadow-lg">
             <span className="material-symbols-outlined text-white text-3xl" style={{ fontVariationSettings: "'FILL' 1" }}>receipt_long</span>
           </div>
           <h1 className="text-4xl font-headline font-extrabold mb-3 tracking-tight">Receiptory</h1>
@@ -41,7 +41,7 @@ export default function LoginPage() {
               { icon: "folder_zip",  label: "Smart Export" },
               { icon: "cloud_sync",  label: "Auto Backup" },
             ].map((f) => (
-              <div key={f.label} className="bg-white/10 rounded-xl p-4">
+              <div key={f.label} className="bg-card/10 rounded-xl p-4">
                 <span className="material-symbols-outlined text-white/80 block mb-1">{f.icon}</span>
                 <span className="text-xs font-semibold text-white/80">{f.label}</span>
               </div>
@@ -49,8 +49,8 @@ export default function LoginPage() {
           </div>
         </div>
         {/* Background decoration */}
-        <div className="absolute -bottom-16 -right-16 w-64 h-64 rounded-full bg-white/5" />
-        <div className="absolute -top-8 -left-8 w-48 h-48 rounded-full bg-white/5" />
+        <div className="absolute -bottom-16 -right-16 w-64 h-64 rounded-full bg-card/5" />
+        <div className="absolute -top-8 -left-8 w-48 h-48 rounded-full bg-card/5" />
       </div>
 
       {/* Right panel — login form */}
@@ -63,31 +63,31 @@ export default function LoginPage() {
             </div>
             <div>
               <h1 className="text-xl font-headline font-bold text-primary">Receiptory</h1>
-              <p className="text-[10px] uppercase tracking-widest text-[#74777d] font-bold">Precision Management</p>
+              <p className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">Precision Management</p>
             </div>
           </div>
 
-          <div className="bg-white rounded-2xl shadow-[0_8px_32px_rgba(25,28,30,0.06)] p-8">
+          <div className="bg-card rounded-2xl shadow-[0_8px_32px_rgba(25,28,30,0.06)] p-8">
             <h2 className="text-2xl font-headline font-extrabold text-primary mb-1 tracking-tight">Sign in</h2>
-            <p className="text-sm text-[#43474c] mb-6">Enter your credentials to access Receiptory</p>
+            <p className="text-sm text-muted-foreground mb-6">Enter your credentials to access Receiptory</p>
 
             <form onSubmit={handleSubmit} className="space-y-5">
               <div className="space-y-1.5">
-                <Label htmlFor="username" className="text-xs font-bold text-[#74777d] uppercase tracking-wider">
+                <Label htmlFor="username" className="text-xs font-bold text-muted-foreground uppercase tracking-wider">
                   Username
                 </Label>
                 <Input
                   id="username"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  className="bg-[#eceef0] border-none rounded-lg h-11 focus-visible:ring-2 focus-visible:ring-primary/30"
+                  className="bg-muted border-none rounded-lg h-11 focus-visible:ring-2 focus-visible:ring-primary/30"
                   placeholder="admin"
                   autoComplete="username"
                 />
               </div>
 
               <div className="space-y-1.5">
-                <Label htmlFor="password" className="text-xs font-bold text-[#74777d] uppercase tracking-wider">
+                <Label htmlFor="password" className="text-xs font-bold text-muted-foreground uppercase tracking-wider">
                   Password
                 </Label>
                 <Input
@@ -95,7 +95,7 @@ export default function LoginPage() {
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="bg-[#eceef0] border-none rounded-lg h-11 focus-visible:ring-2 focus-visible:ring-primary/30"
+                  className="bg-muted border-none rounded-lg h-11 focus-visible:ring-2 focus-visible:ring-primary/30"
                   placeholder="••••••••"
                   autoComplete="current-password"
                 />

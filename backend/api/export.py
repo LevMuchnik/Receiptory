@@ -106,6 +106,25 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
             writer.writerow({f: row[f] for f in EXPORT_CSV_FIELDS if f in row.keys()})
         zf.writestr("metadata.csv", csv_buf.getvalue())
 
+        # Add Excel metadata
+        try:
+            from openpyxl import Workbook
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Documents"
+            ws.append(EXPORT_CSV_FIELDS)
+            for row in rows:
+                ws.append([row[f] if f in row.keys() else None for f in EXPORT_CSV_FIELDS])
+            # Auto-size columns
+            for col in ws.columns:
+                max_len = max((len(str(cell.value or "")) for cell in col), default=10)
+                ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 40)
+            xlsx_buf = io.BytesIO()
+            wb.save(xlsx_buf)
+            zf.writestr("metadata.xlsx", xlsx_buf.getvalue())
+        except Exception as e:
+            logger.warning(f"Excel export failed, skipping: {e}")
+
     # Update last_exported_date
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     doc_ids = [row["id"] for row in rows]

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api";
+import { useTheme } from "@/contexts/ThemeContext";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -24,10 +25,10 @@ const TABS: { key: SettingsTab; label: string; icon: string }[] = [
 
 function SectionCard({ title, icon, children, badge }: { title: string; icon: string; children: React.ReactNode; badge?: string }) {
   return (
-    <div className="bg-white rounded-xl shadow-[0_8px_32px_rgba(25,28,30,0.06)] p-6">
+    <div className="bg-card rounded-xl shadow-[0_8px_32px_rgba(25,28,30,0.06)] p-6">
       <div className="flex items-center justify-between mb-5">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg bg-[#eceef0] flex items-center justify-center">
+          <div className="w-9 h-9 rounded-lg bg-muted flex items-center justify-center">
             <span className="material-symbols-outlined text-primary">{icon}</span>
           </div>
           <h2 className="text-lg font-headline font-bold text-primary">{title}</h2>
@@ -42,13 +43,41 @@ function SectionCard({ title, icon, children, badge }: { title: string; icon: st
 function FieldGroup({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="space-y-1.5">
-      <Label className="text-[10px] font-bold text-[#74777d] uppercase tracking-wider block">{label}</Label>
+      <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider block">{label}</Label>
       {children}
     </div>
   );
 }
 
-const inputCls = "bg-[#eceef0] border-none rounded-lg text-sm focus-visible:ring-primary/20 h-10";
+const inputCls = "bg-muted dark:bg-[#272a2d] border-none rounded-lg text-sm focus-visible:ring-primary/20 h-10";
+
+const THEME_OPTIONS: { value: "light" | "dark" | "system"; label: string; icon: string }[] = [
+  { value: "light", label: "Light", icon: "light_mode" },
+  { value: "dark", label: "Dark", icon: "dark_mode" },
+  { value: "system", label: "System", icon: "desktop_windows" },
+];
+
+function ThemeSelector() {
+  const { theme, setTheme } = useTheme();
+  return (
+    <div className="flex gap-2">
+      {THEME_OPTIONS.map((opt) => (
+        <button
+          key={opt.value}
+          onClick={() => setTheme(opt.value)}
+          className={`flex-1 flex flex-col items-center gap-1.5 py-3 rounded-lg text-xs font-semibold transition-colors ${
+            theme === opt.value
+              ? "bg-primary text-primary-foreground"
+              : "bg-muted text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <span className="material-symbols-outlined text-lg">{opt.icon}</span>
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export default function SettingsPage() {
   const [searchParams] = useSearchParams();
@@ -133,11 +162,11 @@ export default function SettingsPage() {
       {/* ── Header ─────────────────────────────────────────────────── */}
       <div>
         <h1 className="text-3xl font-headline font-extrabold text-primary tracking-tight">System Administration</h1>
-        <p className="text-[#43474c] font-medium mt-1">Configure your precision extraction engine and global connectivity.</p>
+        <p className="text-muted-foreground font-medium mt-1">Configure your precision extraction engine and global connectivity.</p>
       </div>
 
       {/* ── Tab nav ─────────────────────────────────────────────────── */}
-      <div className="flex gap-1 flex-wrap bg-white rounded-xl shadow-[0_2px_8px_rgba(25,28,30,0.04)] p-1.5">
+      <div className="flex gap-1 flex-wrap bg-card rounded-xl shadow-[0_2px_8px_rgba(25,28,30,0.04)] p-1.5">
         {TABS.map((tab) => (
           <button
             key={tab.key}
@@ -145,7 +174,7 @@ export default function SettingsPage() {
             className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-colors ${
               activeTab === tab.key
                 ? "bg-primary text-white"
-                : "text-[#43474c] hover:bg-[#eceef0] hover:text-primary"
+                : "text-muted-foreground hover:bg-muted hover:text-primary"
             }`}
           >
             <span className="material-symbols-outlined text-base">{tab.icon}</span>
@@ -202,7 +231,7 @@ export default function SettingsPage() {
                     onChange={(e) => setSettings({ ...settings, watched_folder_path: e.target.value })}
                     placeholder="/path/to/watched/folder"
                   />
-                  <p className="text-xs text-[#43474c]">Files dropped here are auto-ingested and moved to a "processed" subfolder.</p>
+                  <p className="text-xs text-muted-foreground">Files dropped here are auto-ingested and moved to a "processed" subfolder.</p>
                 </FieldGroup>
                 <FieldGroup label="Poll Interval (seconds)">
                   <Input
@@ -218,6 +247,10 @@ export default function SettingsPage() {
           </div>
 
           <div className="lg:col-span-4 space-y-6">
+            <SectionCard title="Appearance" icon="palette">
+              <ThemeSelector />
+            </SectionCard>
+
             <SectionCard title="Master Authentication" icon="lock">
               <div className="space-y-4">
                 <FieldGroup label="Admin Username">
@@ -259,14 +292,14 @@ export default function SettingsPage() {
                 <div className="space-y-4">
                   <FieldGroup label="Confidence Threshold">
                     <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs text-[#43474c]">Documents below this are flagged for review</span>
-                      <span className="text-xs font-mono bg-[#eceef0] px-2 py-0.5 rounded">{Math.round((settings.confidence_threshold ?? 0.8) * 100)}%</span>
+                      <span className="text-xs text-muted-foreground">Documents below this are flagged for review</span>
+                      <span className="text-xs font-mono bg-muted px-2 py-0.5 rounded">{Math.round((settings.confidence_threshold ?? 0.8) * 100)}%</span>
                     </div>
                     <input
                       type="range"
                       min="0" max="1" step="0.05"
                       value={settings.confidence_threshold ?? 0.8}
-                      className="w-full h-1.5 bg-[#e6e8ea] rounded-lg appearance-none cursor-pointer accent-primary"
+                      className="w-full h-1.5 bg-accent rounded-lg appearance-none cursor-pointer accent-primary"
                       onChange={(e) => setSettings({ ...settings, confidence_threshold: parseFloat(e.target.value) })}
                       onMouseUp={(e) => save({ confidence_threshold: parseFloat((e.target as HTMLInputElement).value) })}
                     />
@@ -293,15 +326,15 @@ export default function SettingsPage() {
               <SectionCard title="Processing Costs" icon="payments">
                 <div className="space-y-3">
                   <div className="flex justify-between text-sm">
-                    <span className="text-[#43474c]">Total cost</span>
+                    <span className="text-muted-foreground">Total cost</span>
                     <span className="font-bold font-headline text-primary">${costs.total_cost_usd?.toFixed(4)}</span>
                   </div>
                   <div className="flex justify-between text-sm">
-                    <span className="text-[#43474c]">Tokens in</span>
+                    <span className="text-muted-foreground">Tokens in</span>
                     <span className="font-medium">{costs.total_tokens_in?.toLocaleString()}</span>
                   </div>
                   <div className="flex justify-between text-sm">
-                    <span className="text-[#43474c]">Tokens out</span>
+                    <span className="text-muted-foreground">Tokens out</span>
                     <span className="font-medium">{costs.total_tokens_out?.toLocaleString()}</span>
                   </div>
                 </div>
@@ -334,7 +367,7 @@ export default function SettingsPage() {
                     onBlur={(e) => save({ telegram_authorized_users: e.target.value.split(";").map((s: string) => s.trim()).filter(Boolean) })}
                     onChange={(e) => setSettings({ ...settings, telegram_authorized_users: e.target.value })}
                   />
-                  <p className="text-xs text-[#43474c]">Message @userinfobot on Telegram to find your user ID.</p>
+                  <p className="text-xs text-muted-foreground">Message @userinfobot on Telegram to find your user ID.</p>
                 </FieldGroup>
 
                 {telegramStatus?.bot_username && (
@@ -345,14 +378,14 @@ export default function SettingsPage() {
                         {telegramStatus.bot_username}
                       </a>
                     </p>
-                    {telegramStatus.bot_name && <p className="text-xs text-[#43474c]">{telegramStatus.bot_name}</p>}
+                    {telegramStatus.bot_name && <p className="text-xs text-muted-foreground">{telegramStatus.bot_name}</p>}
                   </div>
                 )}
 
                 <div className="flex items-center gap-3 flex-wrap">
                   <button
                     onClick={checkTelegram}
-                    className="px-4 py-2 border border-[#c4c6cd] text-primary text-sm font-semibold rounded-lg hover:bg-[#f2f4f6] transition-colors flex items-center gap-2"
+                    className="px-4 py-2 border border-border text-primary text-sm font-semibold rounded-lg hover:bg-muted transition-colors flex items-center gap-2"
                   >
                     <span className="material-symbols-outlined text-sm">refresh</span>
                     Check Status
@@ -367,7 +400,7 @@ export default function SettingsPage() {
                         {telegramStatus.status}
                       </span>
                       {!telegramStatus.bot_username && telegramStatus.message && (
-                        <span className="text-[#43474c] text-xs">{telegramStatus.message}</span>
+                        <span className="text-muted-foreground text-xs">{telegramStatus.message}</span>
                       )}
                     </span>
                   )}
@@ -402,7 +435,7 @@ export default function SettingsPage() {
                     onChange={(e) => setSettings({ ...settings, gmail_app_password: e.target.value })}
                     placeholder="16-character App Password"
                   />
-                  <p className="text-xs text-[#43474c]">
+                  <p className="text-xs text-muted-foreground">
                     Gmail:{" "}
                     <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer" className="underline text-primary">
                       myaccount.google.com/apppasswords
@@ -428,7 +461,7 @@ export default function SettingsPage() {
                     onChange={(e) => setSettings({ ...settings, gmail_labels: e.target.value })}
                     placeholder="Receipts; Invoices"
                   />
-                  <p className="text-xs text-[#43474c]">Only emails in these labels are ingested. No labels = email ingestion disabled.</p>
+                  <p className="text-xs text-muted-foreground">Only emails in these labels are ingested. No labels = email ingestion disabled.</p>
                 </FieldGroup>
 
                 <div className="flex items-center gap-3">
@@ -437,7 +470,7 @@ export default function SettingsPage() {
                     onCheckedChange={(checked) => save({ gmail_unread_only: !!checked })}
                   />
                   <Label className="text-sm font-medium">Unread only</Label>
-                  <span className="text-xs text-[#43474c]">
+                  <span className="text-xs text-muted-foreground">
                     {settings.gmail_unread_only !== false
                       ? "Only unread emails are processed"
                       : "All emails checked — duplicates skipped by hash"}
@@ -467,7 +500,7 @@ export default function SettingsPage() {
                 <div className="flex items-center gap-3 flex-wrap">
                   <button
                     onClick={checkGmail}
-                    className="px-4 py-2 border border-[#c4c6cd] text-primary text-sm font-semibold rounded-lg hover:bg-[#f2f4f6] transition-colors flex items-center gap-2"
+                    className="px-4 py-2 border border-border text-primary text-sm font-semibold rounded-lg hover:bg-muted transition-colors flex items-center gap-2"
                   >
                     <span className="material-symbols-outlined text-sm">cable</span>
                     Test Connection
@@ -482,11 +515,11 @@ export default function SettingsPage() {
                         {gmailStatus.status}
                       </span>
                       {gmailStatus.email && (
-                        <span className="text-[#43474c] text-xs">
+                        <span className="text-muted-foreground text-xs">
                           {gmailStatus.email} ({gmailStatus.matching} {gmailStatus.unread_only ? "unread" : "total"} in {(gmailStatus.labels || []).join(", ")})
                         </span>
                       )}
-                      {gmailStatus.message && <span className="text-[#43474c] text-xs">{gmailStatus.message}</span>}
+                      {gmailStatus.message && <span className="text-muted-foreground text-xs">{gmailStatus.message}</span>}
                     </span>
                   )}
                 </div>
@@ -495,12 +528,12 @@ export default function SettingsPage() {
                   <div className="flex items-center gap-3">
                     <button
                       onClick={pollGmailNow}
-                      className="px-4 py-2 border border-[#c4c6cd] text-primary text-sm font-semibold rounded-lg hover:bg-[#f2f4f6] transition-colors flex items-center gap-2"
+                      className="px-4 py-2 border border-border text-primary text-sm font-semibold rounded-lg hover:bg-muted transition-colors flex items-center gap-2"
                     >
                       <span className="material-symbols-outlined text-sm">sync</span>
                       Poll Now
                     </button>
-                    {gmailPollResult && <span className="text-sm text-[#43474c]">{gmailPollResult}</span>}
+                    {gmailPollResult && <span className="text-sm text-muted-foreground">{gmailPollResult}</span>}
                   </div>
                 )}
               </div>
@@ -534,17 +567,17 @@ export default function SettingsPage() {
                     onChange={(e) => setSettings({ ...settings, backup_schedule: e.target.value })}
                     placeholder="0 2 * * *"
                   />
-                  <p className="text-xs text-[#43474c]">Daily at 02:00 AM: <code className="bg-[#eceef0] px-1 rounded">0 2 * * *</code></p>
+                  <p className="text-xs text-muted-foreground">Daily at 02:00 AM: <code className="bg-muted px-1 rounded">0 2 * * *</code></p>
                 </FieldGroup>
                 <FieldGroup label="Current Destination">
-                  <p className="text-sm font-mono text-[#43474c] bg-[#eceef0] px-3 py-2 rounded-lg">
+                  <p className="text-sm font-mono text-muted-foreground bg-muted px-3 py-2 rounded-lg">
                     {settings.backup_destination || "(not configured)"}
                   </p>
                 </FieldGroup>
                 <FieldGroup label="Retention Policy">
                   <div className="grid grid-cols-3 gap-3">
                     <div className="space-y-1">
-                      <Label className="text-[10px] font-bold text-[#74777d] uppercase tracking-wider">Daily (days)</Label>
+                      <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Daily (days)</Label>
                       <Input
                         className={inputCls}
                         type="number"
@@ -555,7 +588,7 @@ export default function SettingsPage() {
                       />
                     </div>
                     <div className="space-y-1">
-                      <Label className="text-[10px] font-bold text-[#74777d] uppercase tracking-wider">Weekly (weeks)</Label>
+                      <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Weekly (weeks)</Label>
                       <Input
                         className={inputCls}
                         type="number"
@@ -566,7 +599,7 @@ export default function SettingsPage() {
                       />
                     </div>
                     <div className="space-y-1">
-                      <Label className="text-[10px] font-bold text-[#74777d] uppercase tracking-wider">Monthly (months)</Label>
+                      <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Monthly (months)</Label>
                       <Input
                         className={inputCls}
                         type="number"
@@ -577,10 +610,10 @@ export default function SettingsPage() {
                       />
                     </div>
                   </div>
-                  <p className="text-xs text-[#43474c] mt-1">Quarterly backups (Jan/Apr/Jul/Oct 1st) are never auto-deleted.</p>
+                  <p className="text-xs text-muted-foreground mt-1">Quarterly backups (Jan/Apr/Jul/Oct 1st) are never auto-deleted.</p>
                 </FieldGroup>
                 <details className="text-sm">
-                  <summary className="cursor-pointer text-[#74777d] font-medium hover:text-primary transition-colors">
+                  <summary className="cursor-pointer text-muted-foreground font-medium hover:text-primary transition-colors">
                     Advanced: Custom rclone destination
                   </summary>
                   <div className="mt-3">
@@ -598,7 +631,7 @@ export default function SettingsPage() {
               </div>
             </SectionCard>
 
-            <div className="bg-white rounded-xl shadow-[0_8px_32px_rgba(25,28,30,0.06)] p-6">
+            <div className="bg-card rounded-xl shadow-[0_8px_32px_rgba(25,28,30,0.06)] p-6">
               <h3 className="font-headline font-bold text-primary mb-4">Backup History</h3>
               <BackupPanel />
             </div>
@@ -620,7 +653,7 @@ export default function SettingsPage() {
                     onChange={(e) => setSettings({ ...settings, base_url: e.target.value })}
                     placeholder="https://receiptory.example.com"
                   />
-                  <p className="text-xs text-[#43474c]">Used to generate clickable links in notifications. Leave empty to omit links.</p>
+                  <p className="text-xs text-muted-foreground">Used to generate clickable links in notifications. Leave empty to omit links.</p>
                 </FieldGroup>
                 <FieldGroup label="From Name (email sender display name)">
                   <Input
@@ -647,15 +680,15 @@ export default function SettingsPage() {
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-[#eceef0]">
-                      <th className="text-left py-2 pr-4 font-bold text-[#74777d] text-[10px] uppercase tracking-wider w-full">Event</th>
-                      <th className="text-center py-2 px-4 font-bold text-[#74777d] text-[10px] uppercase tracking-wider whitespace-nowrap">
+                    <tr className="border-b border-border">
+                      <th className="text-left py-2 pr-4 font-bold text-muted-foreground text-[10px] uppercase tracking-wider w-full">Event</th>
+                      <th className="text-center py-2 px-4 font-bold text-muted-foreground text-[10px] uppercase tracking-wider whitespace-nowrap">
                         <span className="flex items-center gap-1 justify-center">
                           <span className="material-symbols-outlined text-sm">send</span>
                           Telegram
                         </span>
                       </th>
-                      <th className="text-center py-2 px-4 font-bold text-[#74777d] text-[10px] uppercase tracking-wider whitespace-nowrap">
+                      <th className="text-center py-2 px-4 font-bold text-muted-foreground text-[10px] uppercase tracking-wider whitespace-nowrap">
                         <span className="flex items-center gap-1 justify-center">
                           <span className="material-symbols-outlined text-sm">mail</span>
                           Email

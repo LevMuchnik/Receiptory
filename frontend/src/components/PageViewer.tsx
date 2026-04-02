@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 
-const API_BASE = import.meta.env.DEV ? "http://localhost:8080/api" : "/api";
+const API_BASE = import.meta.env.DEV ? `http://localhost:${import.meta.env.VITE_API_PORT || 8484}/api` : "/api";
 
 interface Props {
   docId: number;

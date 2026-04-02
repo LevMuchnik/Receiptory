@@ -54,11 +54,11 @@ export default function ExportPage() {
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div>
           <h2 className="text-3xl font-headline font-extrabold text-primary tracking-tight">Export Repository</h2>
-          <p className="text-[#43474c] font-medium mt-1">Configure and generate high-fidelity document packages.</p>
+          <p className="text-muted-foreground font-medium mt-1">Configure and generate high-fidelity document packages.</p>
         </div>
         {lastExport && (
           <div className="text-right hidden sm:block">
-            <p className="text-[10px] uppercase font-bold text-[#74777d] tracking-wider mb-1">Last Export</p>
+            <p className="text-[10px] uppercase font-bold text-muted-foreground tracking-wider mb-1">Last Export</p>
             <p className="text-sm font-bold text-primary">{lastExport}</p>
           </div>
         )}
@@ -69,39 +69,39 @@ export default function ExportPage() {
         <div className="lg:col-span-8 space-y-8">
 
           {/* Quick Presets */}
-          <section className="bg-white rounded-xl shadow-[0_8px_32px_rgba(25,28,30,0.04)] p-6">
-            <h3 className="text-xs font-black uppercase text-[#74777d] tracking-[0.2em] mb-6">Quick Export Presets</h3>
+          <section className="bg-card rounded-xl shadow-[0_8px_32px_rgba(25,28,30,0.04)] p-6">
+            <h3 className="text-xs font-black uppercase text-muted-foreground tracking-[0.2em] mb-6">Quick Export Presets</h3>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {PRESETS.map((preset) => (
                 <button
                   key={preset.label}
                   disabled={exporting}
                   onClick={preset.action}
-                  className="group flex flex-col items-start p-5 bg-[#eceef0] rounded-lg hover:bg-primary hover:text-white transition-all duration-300 text-left disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="group flex flex-col items-start p-5 bg-muted rounded-lg hover:bg-primary hover:text-white transition-all duration-300 text-left disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <span className="material-symbols-outlined mb-3 text-primary group-hover:text-white">{preset.icon}</span>
-                  <span className="text-sm font-bold block text-[#191c1e] group-hover:text-white">{preset.label}</span>
-                  <span className="text-[11px] text-[#43474c] group-hover:text-white/70 mt-1">{preset.sub}</span>
+                  <span className="text-sm font-bold block text-foreground group-hover:text-white">{preset.label}</span>
+                  <span className="text-[11px] text-muted-foreground group-hover:text-white/70 mt-1">{preset.sub}</span>
                 </button>
               ))}
             </div>
           </section>
 
           {/* Custom Configuration */}
-          <section className="bg-white rounded-xl shadow-[0_8px_32px_rgba(25,28,30,0.04)] p-6">
+          <section className="bg-card rounded-xl shadow-[0_8px_32px_rgba(25,28,30,0.04)] p-6">
             <div className="flex items-center justify-between mb-6">
-              <h3 className="text-xs font-black uppercase text-[#74777d] tracking-[0.2em]">Custom Configuration</h3>
+              <h3 className="text-xs font-black uppercase text-muted-foreground tracking-[0.2em]">Custom Configuration</h3>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-6">
               {/* Month picker */}
               <div>
-                <Label className="block text-[11px] font-bold text-[#74777d] uppercase mb-2">Export by Month</Label>
+                <Label className="block text-[11px] font-bold text-muted-foreground uppercase mb-2">Export by Month</Label>
                 <div className="flex gap-3">
                   <Input
                     type="month"
                     value={month}
                     onChange={(e) => setMonth(e.target.value)}
-                    className="bg-[#eceef0] border-none rounded-lg text-sm focus-visible:ring-primary/20 flex-1"
+                    className="bg-muted border-none rounded-lg text-sm focus-visible:ring-primary/20 flex-1"
                   />
                   <button
                     disabled={exporting || !month}
@@ -115,7 +115,7 @@ export default function ExportPage() {
 
               {/* Year picker */}
               <div>
-                <Label className="block text-[11px] font-bold text-[#74777d] uppercase mb-2">Export by Year</Label>
+                <Label className="block text-[11px] font-bold text-muted-foreground uppercase mb-2">Export by Year</Label>
                 <div className="flex gap-3">
                   <Input
                     type="number"
@@ -123,7 +123,7 @@ export default function ExportPage() {
                     onChange={(e) => setYear(e.target.value)}
                     min="2020"
                     max="2030"
-                    className="bg-[#eceef0] border-none rounded-lg text-sm focus-visible:ring-primary/20 flex-1"
+                    className="bg-muted border-none rounded-lg text-sm focus-visible:ring-primary/20 flex-1"
                   />
                   <button
                     disabled={exporting}
@@ -137,25 +137,25 @@ export default function ExportPage() {
 
               {/* Date range */}
               <div>
-                <Label className="block text-[11px] font-bold text-[#74777d] uppercase mb-2">Date Range — From</Label>
-                <div className="bg-[#eceef0] px-3 py-2 rounded-lg flex items-center justify-between">
+                <Label className="block text-[11px] font-bold text-muted-foreground uppercase mb-2">Date Range — From</Label>
+                <div className="bg-muted px-3 py-2 rounded-lg flex items-center justify-between">
                   <Input
                     type="date"
                     value={dateFrom}
                     onChange={(e) => setDateFrom(e.target.value)}
-                    className="bg-transparent border-none p-0 text-sm focus-visible:ring-0 text-[#191c1e] font-bold"
+                    className="bg-transparent border-none p-0 text-sm focus-visible:ring-0 text-foreground font-bold"
                   />
                 </div>
               </div>
 
               <div>
-                <Label className="block text-[11px] font-bold text-[#74777d] uppercase mb-2">Date Range — To</Label>
-                <div className="bg-[#eceef0] px-3 py-2 rounded-lg flex items-center justify-between">
+                <Label className="block text-[11px] font-bold text-muted-foreground uppercase mb-2">Date Range — To</Label>
+                <div className="bg-muted px-3 py-2 rounded-lg flex items-center justify-between">
                   <Input
                     type="date"
                     value={dateTo}
                     onChange={(e) => setDateTo(e.target.value)}
-                    className="bg-transparent border-none p-0 text-sm focus-visible:ring-0 text-[#191c1e] font-bold"
+                    className="bg-transparent border-none p-0 text-sm focus-visible:ring-0 text-foreground font-bold"
                   />
                 </div>
               </div>
@@ -179,7 +179,7 @@ export default function ExportPage() {
           {/* Generate Zip Banner */}
           <section className="p-6 bg-primary text-white rounded-xl flex flex-col md:flex-row items-center justify-between gap-6">
             <div className="flex items-center gap-5">
-              <div className="w-14 h-14 bg-white/10 rounded-lg flex items-center justify-center">
+              <div className="w-14 h-14 bg-card/10 rounded-lg flex items-center justify-center">
                 <span className="material-symbols-outlined text-3xl">folder_zip</span>
               </div>
               <div>
@@ -190,7 +190,7 @@ export default function ExportPage() {
             <button
               disabled={exporting}
               onClick={() => doExport({ preset: "since_last_export" })}
-              className="w-full md:w-auto px-8 py-3 bg-white text-primary rounded-lg font-black text-sm hover:bg-[#d1e4fb] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-2 justify-center"
+              className="w-full md:w-auto px-8 py-3 bg-card text-primary rounded-lg font-black text-sm hover:bg-[#d1e4fb] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-2 justify-center"
             >
               {exporting ? (
                 <>
@@ -210,8 +210,8 @@ export default function ExportPage() {
         {/* ── Right: format info ───────────────────────────────────── */}
         <div className="lg:col-span-4 space-y-6">
           {/* Output Standard */}
-          <section className="bg-[#eceef0] rounded-xl p-6">
-            <h3 className="text-xs font-black uppercase text-[#74777d] tracking-[0.2em] mb-4">Output Standard</h3>
+          <section className="bg-muted rounded-xl p-6">
+            <h3 className="text-xs font-black uppercase text-muted-foreground tracking-[0.2em] mb-4">Output Standard</h3>
             <div className="space-y-4">
               {[
                 { label: "High-Res PDFs",  sub: "Category-based directory structure" },
@@ -221,7 +221,7 @@ export default function ExportPage() {
                   <span className="material-symbols-outlined text-[#007239] bg-[#7bf8a1]/30 p-1 rounded text-base">check_circle</span>
                   <div>
                     <p className="text-xs font-bold text-primary">{f.label}</p>
-                    <p className="text-[10px] text-[#43474c]">{f.sub}</p>
+                    <p className="text-[10px] text-muted-foreground">{f.sub}</p>
                   </div>
                 </div>
               ))}

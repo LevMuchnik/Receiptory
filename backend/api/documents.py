@@ -81,16 +81,27 @@ def list_documents(
         # Build FTS5 query with prefix matching for partial/case-insensitive search
         terms = search.strip().split()
         if terms:
-            fts_query = " AND ".join(f'"{t}"*' for t in terms)
+            # Escape FTS5 special characters to prevent query injection
+            safe_terms = [t.replace('"', '').replace('*', '').replace("'", '') for t in terms if t.replace('"', '').replace('*', '').replace("'", '')]
+            fts_query = " AND ".join(f'"{t}"*' for t in safe_terms) if safe_terms else None
             like_pattern = f"%{search.strip()}%"
-            conditions.append(
-                "(d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?)"
-                " OR d.original_filename LIKE ? COLLATE NOCASE"
-                " OR d.vendor_tax_id LIKE ? COLLATE NOCASE"
-                " OR d.currency LIKE ? COLLATE NOCASE"
-                " OR CAST(d.total_amount AS TEXT) LIKE ?)"
-            )
-            params.extend([fts_query, like_pattern, like_pattern, like_pattern, like_pattern])
+            if fts_query:
+                conditions.append(
+                    "(d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?)"
+                    " OR d.original_filename LIKE ? COLLATE NOCASE"
+                    " OR d.vendor_tax_id LIKE ? COLLATE NOCASE"
+                    " OR d.currency LIKE ? COLLATE NOCASE"
+                    " OR CAST(d.total_amount AS TEXT) LIKE ?)"
+                )
+                params.extend([fts_query, like_pattern, like_pattern, like_pattern, like_pattern])
+            else:
+                conditions.append(
+                    "(d.original_filename LIKE ? COLLATE NOCASE"
+                    " OR d.vendor_tax_id LIKE ? COLLATE NOCASE"
+                    " OR d.currency LIKE ? COLLATE NOCASE"
+                    " OR CAST(d.total_amount AS TEXT) LIKE ?)"
+                )
+                params.extend([like_pattern, like_pattern, like_pattern, like_pattern])
     if missing_info:
         conditions.append("(d.receipt_date IS NULL OR d.vendor_receipt_id IS NULL)")
 

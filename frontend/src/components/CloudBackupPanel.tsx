@@ -53,7 +53,7 @@ const PROVIDER_CONFIG = {
   },
 };
 
-const inputCls = "bg-[#eceef0] border-none rounded-lg text-sm focus-visible:ring-primary/20 h-10";
+const inputCls = "bg-muted border-none rounded-lg text-sm focus-visible:ring-primary/20 h-10";
 
 export default function CloudBackupPanel({
   settings,
@@ -166,7 +166,7 @@ export default function CloudBackupPanel({
         const prefix = provider === "gdrive" ? "gdrive" : "onedrive";
 
         return (
-          <div key={provider} className="border border-[rgba(116,119,125,0.15)] rounded-xl p-5 space-y-4">
+          <div key={provider} className="border border-border rounded-xl p-5 space-y-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <div className={`p-2 rounded-lg ${cfg.color}`}>
@@ -175,7 +175,7 @@ export default function CloudBackupPanel({
                 <div>
                   <h4 className="font-bold font-headline text-primary">{cfg.name}</h4>
                   {status.connected && status.email && (
-                    <p className="text-xs text-[#43474c]">{status.email}</p>
+                    <p className="text-xs text-muted-foreground">{status.email}</p>
                   )}
                 </div>
               </div>
@@ -183,7 +183,7 @@ export default function CloudBackupPanel({
                 {status.connected ? (
                   <span className="chip-processed">Connected</span>
                 ) : (
-                  <span className="text-xs font-bold text-[#74777d] uppercase">Not connected</span>
+                  <span className="text-xs font-bold text-muted-foreground uppercase">Not connected</span>
                 )}
               </div>
             </div>
@@ -195,8 +195,8 @@ export default function CloudBackupPanel({
                     <span className="material-symbols-outlined text-sm transition-transform group-open:rotate-90">chevron_right</span>
                     Setup instructions
                   </summary>
-                  <div className="mt-3 bg-[#f7f9fb] rounded-lg p-4 space-y-3">
-                    <ol className="list-decimal list-outside ml-4 space-y-2 text-xs text-[#43474c] leading-relaxed">
+                  <div className="mt-3 bg-card rounded-lg p-4 space-y-3">
+                    <ol className="list-decimal list-outside ml-4 space-y-2 text-xs text-muted-foreground leading-relaxed">
                       {cfg.steps.map((step, i) => (
                         <li key={i} dangerouslySetInnerHTML={{ __html: step }} />
                       ))}
@@ -204,14 +204,14 @@ export default function CloudBackupPanel({
                   </div>
                 </details>
 
-                <div className="bg-[#f7f9fb] rounded-lg p-4 space-y-3">
+                <div className="bg-card rounded-lg p-4 space-y-3">
                   <div className="space-y-1.5">
-                    <Label className="text-[10px] font-bold text-[#74777d] uppercase tracking-wider">
+                    <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">
                       Callback URL
-                      <span className="normal-case font-normal text-[#43474c] ml-1">(paste this into your OAuth app's redirect URIs)</span>
+                      <span className="normal-case font-normal text-muted-foreground ml-1">(paste this into your OAuth app's redirect URIs)</span>
                     </Label>
                     <div className="flex gap-2 items-center">
-                      <code className="flex-1 bg-[#eceef0] px-3 py-2 rounded-lg text-xs break-all select-all">
+                      <code className="flex-1 bg-muted px-3 py-2 rounded-lg text-xs break-all select-all">
                         {baseUrl}{cfg.callbackPath}
                       </code>
                       <Button
@@ -229,7 +229,7 @@ export default function CloudBackupPanel({
                     </div>
                   </div>
                   <div className="space-y-1.5">
-                    <Label className="text-[10px] font-bold text-[#74777d] uppercase tracking-wider">Client ID</Label>
+                    <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Client ID</Label>
                     <Input
                       className={inputCls}
                       value={localCreds[`${prefix}_client_id`] ?? settings[`${prefix}_client_id`] ?? ""}
@@ -239,7 +239,7 @@ export default function CloudBackupPanel({
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <Label className="text-[10px] font-bold text-[#74777d] uppercase tracking-wider">Client Secret</Label>
+                    <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Client Secret</Label>
                     <Input
                       className={inputCls}
                       value={localCreds[`${prefix}_client_secret`] ?? settings[`${prefix}_client_secret`] ?? ""}
@@ -267,7 +267,7 @@ export default function CloudBackupPanel({
             {status.connected && (
               <div className="space-y-3">
                 <div className="space-y-1.5">
-                  <Label className="text-[10px] font-bold text-[#74777d] uppercase tracking-wider">Backup Folder</Label>
+                  <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Backup Folder</Label>
                   <div className="flex gap-2">
                     <Input
                       className={inputCls + " flex-1"}

@@ -10,7 +10,8 @@ logger = logging.getLogger(__name__)
 
 SESSION_COOKIE_NAME = "receiptory_session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
-_SECRET_KEY = os.environ.get("RECEIPTORY_SECRET_KEY", "receiptory-default-secret-change-me")
+import secrets as _secrets
+_SECRET_KEY = os.environ.get("RECEIPTORY_SECRET_KEY") or _secrets.token_urlsafe(32)
 
 
 def _get_serializer() -> URLSafeTimedSerializer:

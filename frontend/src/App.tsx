@@ -1,6 +1,7 @@
 import { useState, useCallback } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
+import { ThemeProvider, useTheme } from "@/contexts/ThemeContext";
 import LoginPage from "@/pages/LoginPage";
 import DashboardPage from "@/pages/DashboardPage";
 import DocumentsPage from "@/pages/DocumentsPage";
@@ -14,17 +15,20 @@ import { isAndroid } from "@/lib/platform";
 function ProtectedRoute({ children, redirectAndroid }: { children: React.ReactNode; redirectAndroid?: boolean }) {
   const { username, loading } = useAuth();
   if (loading) return (
-    <div className="flex items-center justify-center h-screen bg-[#f2f4f6]">
+    <div className="flex items-center justify-center h-screen bg-background">
       <div className="flex flex-col items-center gap-3">
         <div className="w-10 h-10 bg-primary flex items-center justify-center rounded-xl">
-          <span className="material-symbols-outlined text-white" style={{ fontVariationSettings: "'FILL' 1" }}>receipt_long</span>
+          <span className="material-symbols-outlined text-primary-foreground" style={{ fontVariationSettings: "'FILL' 1" }}>receipt_long</span>
         </div>
-        <p className="text-sm font-medium text-[#43474c]">Loading...</p>
+        <p className="text-sm font-medium text-muted-foreground">Loading...</p>
       </div>
     </div>
   );
   if (!username) return <Navigate to="/login" />;
-  if (redirectAndroid && isAndroid()) return <Navigate to="/scan" />;
+  if (redirectAndroid && isAndroid() && !sessionStorage.getItem("scanner-redirected")) {
+    sessionStorage.setItem("scanner-redirected", "1");
+    return <Navigate to="/scan" />;
+  }
   return <>{children}</>;
 }
 
@@ -40,15 +44,17 @@ function AppLayout({ children }: { children: React.ReactNode }) {
     }
   }, [headerSearch, navigate]);
 
+  const { resolved, setTheme } = useTheme();
+
   return (
-    <div className="min-h-screen bg-[#f2f4f6]">
+    <div className="min-h-screen bg-background">
       <Sidebar mobileOpen={mobileMenuOpen} onMobileClose={() => setMobileMenuOpen(false)} />
 
-      {/* Top header — only visible on mobile for hamburger */}
-      <header className="fixed top-0 right-0 left-0 md:left-64 z-40 flex justify-between items-center px-4 md:px-6 h-16 glass-header shadow-[0_2px_8px_rgba(25,28,30,0.04)] font-body text-sm">
+      {/* Top header */}
+      <header className="fixed top-0 right-0 left-0 md:left-64 z-40 flex justify-between items-center px-4 md:px-6 h-16 glass-header shadow-[var(--shadow-card)] font-body text-sm">
         {/* Mobile: hamburger */}
         <button
-          className="md:hidden p-2 text-[#43474c] hover:text-primary transition-colors"
+          className="md:hidden p-2 text-muted-foreground hover:text-primary transition-colors"
           onClick={() => setMobileMenuOpen(true)}
         >
           <span className="material-symbols-outlined">menu</span>
@@ -57,9 +63,9 @@ function AppLayout({ children }: { children: React.ReactNode }) {
         {/* Search bar */}
         <div className="flex items-center gap-4 flex-1 md:flex-initial md:w-auto">
           <div className="relative w-full max-w-md hidden md:block">
-            <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-[#74777d] text-lg">search</span>
+            <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-lg">search</span>
             <input
-              className="w-full pl-10 pr-4 py-2 bg-[#eceef0] border-none rounded-lg text-sm focus:ring-2 focus:ring-primary/20 placeholder:text-[#74777d] outline-none transition-all"
+              className="w-full pl-10 pr-4 py-2 bg-muted border-none rounded-lg text-sm focus:ring-2 focus:ring-primary/20 placeholder:text-muted-foreground outline-none transition-all text-foreground"
               placeholder="Search documents, vendors..."
               value={headerSearch}
               onChange={(e) => setHeaderSearch(e.target.value)}
@@ -70,8 +76,14 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 
         {/* Right side */}
         <div className="flex items-center gap-3">
-          <button className="p-2 text-[#43474c] hover:text-primary transition-colors opacity-80 hover:opacity-100">
-            <span className="material-symbols-outlined">notifications</span>
+          <button
+            onClick={() => setTheme(resolved === "dark" ? "light" : "dark")}
+            className="p-2 text-muted-foreground hover:text-primary transition-colors"
+            title={`Switch to ${resolved === "dark" ? "light" : "dark"} mode`}
+          >
+            <span className="material-symbols-outlined">
+              {resolved === "dark" ? "light_mode" : "dark_mode"}
+            </span>
           </button>
         </div>
       </header>
@@ -90,6 +102,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 export default function App() {
   return (
     <BrowserRouter>
+      <ThemeProvider>
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
@@ -101,6 +114,7 @@ export default function App() {
           <Route path="/scan" element={<ProtectedRoute><ScannerPage /></ProtectedRoute>} />
         </Routes>
       </AuthProvider>
+      </ThemeProvider>
     </BrowserRouter>
   );
 }

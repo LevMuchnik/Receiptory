@@ -143,10 +143,10 @@ export default function DocumentsPage() {
       {/* ── Drop overlay ──────────────────────────────────────────────── */}
       {dragging && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-primary/10 backdrop-blur-sm pointer-events-none">
-          <div className="bg-white rounded-2xl shadow-2xl p-10 flex flex-col items-center gap-3 border-2 border-dashed border-primary">
+          <div className="bg-card rounded-2xl shadow-2xl p-10 flex flex-col items-center gap-3 border-2 border-dashed border-primary">
             <span className="material-symbols-outlined text-5xl text-primary">file_download</span>
             <p className="text-lg font-bold font-headline text-primary">Drop files to upload</p>
-            <p className="text-sm text-[#43474c]">PDF, JPG, PNG, HTML supported</p>
+            <p className="text-sm text-muted-foreground">PDF, JPG, PNG, HTML supported</p>
           </div>
         </div>
       )}
@@ -155,7 +155,7 @@ export default function DocumentsPage() {
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div className="space-y-1">
           <h2 className="text-3xl font-headline font-extrabold tracking-tight text-primary">Document Browser</h2>
-          <p className="text-[#43474c] font-medium">Manage and review extracted receipt data</p>
+          <p className="text-muted-foreground font-medium">Manage and review extracted receipt data</p>
         </div>
         <div className="flex items-center gap-3 flex-wrap">
           {selected.size > 0 && (
@@ -215,7 +215,7 @@ export default function DocumentsPage() {
             className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
               quickFilter === tab.key
                 ? "bg-primary text-white"
-                : "bg-white text-[#43474c] hover:bg-[#e0e3e5]"
+                : "bg-card text-muted-foreground hover:bg-accent"
             }`}
           >
             {tab.label}
@@ -224,12 +224,12 @@ export default function DocumentsPage() {
       </div>
 
       {/* ── Filter bar ──────────────────────────────────────────────── */}
-      <div className="bg-white rounded-xl shadow-[0_2px_8px_rgba(25,28,30,0.04)] p-4">
+      <div className="bg-card rounded-xl shadow-[0_2px_8px_rgba(25,28,30,0.04)] p-4">
         <FilterBar filters={filters} onChange={(f) => { setFilters(f); setPage(1); }} />
       </div>
 
       {/* ── Document table ──────────────────────────────────────────── */}
-      <div className="bg-[#f2f4f6] rounded-2xl p-4 space-y-2">
+      <div className="bg-background rounded-2xl p-4 space-y-2">
         <DocumentTable
           documents={documents}
           selected={selected}
@@ -246,24 +246,24 @@ export default function DocumentsPage() {
 
       {/* ── Pagination ──────────────────────────────────────────────── */}
       <div className="flex items-center justify-between">
-        <span className="text-sm text-[#43474c] font-medium">{total} document{total !== 1 ? "s" : ""}</span>
+        <span className="text-sm text-muted-foreground font-medium">{total} document{total !== 1 ? "s" : ""}</span>
         <div className="flex gap-2 items-center">
           <button
             disabled={page <= 1}
             onClick={() => setPage(page - 1)}
-            className="p-2 rounded-lg hover:bg-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            className="p-2 rounded-lg hover:bg-card disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
-            <span className="material-symbols-outlined text-[#43474c]">chevron_left</span>
+            <span className="material-symbols-outlined text-muted-foreground">chevron_left</span>
           </button>
-          <span className="text-sm font-medium text-[#191c1e] px-2">
+          <span className="text-sm font-medium text-foreground px-2">
             {page} / {totalPages || 1}
           </span>
           <button
             disabled={page >= totalPages}
             onClick={() => setPage(page + 1)}
-            className="p-2 rounded-lg hover:bg-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            className="p-2 rounded-lg hover:bg-card disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
-            <span className="material-symbols-outlined text-[#43474c]">chevron_right</span>
+            <span className="material-symbols-outlined text-muted-foreground">chevron_right</span>
           </button>
         </div>
       </div>
