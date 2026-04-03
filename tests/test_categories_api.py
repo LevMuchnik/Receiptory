@@ -52,7 +52,7 @@ def test_create_category(authed_client):
 
 
 def test_create_duplicate_name_fails(authed_client):
-    resp = authed_client.post("/api/categories", json={"name": "travel"})
+    resp = authed_client.post("/api/categories", json={"name": "Travel"})
     assert resp.status_code == 400
 
 
