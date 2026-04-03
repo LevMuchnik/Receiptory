@@ -31,6 +31,15 @@ class CategoryUpdate(BaseModel):
     display_order: int | None = None
 
 
+class ReorderItem(BaseModel):
+    id: int
+    display_order: int
+
+
+class ReorderRequest(BaseModel):
+    order: list[ReorderItem]
+
+
 class CategoryResponse(BaseModel):
     id: int
     name: str

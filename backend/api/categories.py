@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.auth import require_auth
 from backend.database import get_connection
-from backend.models import CategoryCreate, CategoryUpdate, CategoryResponse
+from backend.models import CategoryCreate, CategoryUpdate, CategoryResponse, ReorderRequest
 
 router = APIRouter()
 
@@ -13,15 +13,35 @@ def list_categories(
     username: str = Depends(require_auth),
 ):
     with get_connection() as conn:
-        if include_deleted:
-            rows = conn.execute(
-                "SELECT * FROM categories ORDER BY display_order, name"
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM categories WHERE is_deleted = 0 ORDER BY display_order, name"
-            ).fetchall()
+        deleted_filter = "" if include_deleted else "WHERE c.is_deleted = 0"
+        rows = conn.execute(
+            f"""SELECT c.*, COALESCE(cnt.doc_count, 0) AS document_count
+                FROM categories c
+                LEFT JOIN (
+                    SELECT category_id, COUNT(*) AS doc_count
+                    FROM documents WHERE is_deleted = 0
+                    GROUP BY category_id
+                ) cnt ON cnt.category_id = c.id
+                {deleted_filter}
+                ORDER BY c.is_system ASC, c.display_order ASC, c.name ASC"""
+        ).fetchall()
     return [dict(r) for r in rows]
+
+
+@router.patch("/categories/reorder")
+def reorder_categories(body: ReorderRequest, username: str = Depends(require_auth)):
+    with get_connection() as conn:
+        for item in body.order:
+            cat = conn.execute("SELECT is_system FROM categories WHERE id = ?", (item.id,)).fetchone()
+            if not cat:
+                raise HTTPException(status_code=404, detail=f"Category {item.id} not found")
+            if cat["is_system"]:
+                raise HTTPException(status_code=400, detail="Cannot reorder system categories")
+            conn.execute(
+                "UPDATE categories SET display_order = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+                (item.display_order, item.id),
+            )
+    return {"message": "Order updated"}
 
 
 @router.post("/categories")
