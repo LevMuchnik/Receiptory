@@ -9,8 +9,10 @@ Fetch pipeline (stops at first success):
 
 import logging
 import re
+import socket
 import uuid
 from dataclasses import dataclass, field
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -18,6 +20,34 @@ import httpx
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
+
+# Private/loopback networks to block (SSRF protection)
+_BLOCKED_NETWORKS = [
+    ip_network("127.0.0.0/8"),
+    ip_network("10.0.0.0/8"),
+    ip_network("172.16.0.0/12"),
+    ip_network("192.168.0.0/16"),
+    ip_network("169.254.0.0/16"),  # AWS metadata endpoint
+    ip_network("::1/128"),
+    ip_network("fc00::/7"),
+]
+
+
+def _is_safe_url(url: str) -> bool:
+    """Check that a URL doesn't point to private/internal networks."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    hostname = parsed.hostname
+    if not hostname:
+        return False
+    try:
+        resolved = socket.gethostbyname(hostname)
+        ip = ip_address(resolved)
+        return not any(ip in net for net in _BLOCKED_NETWORKS)
+    except (socket.gaierror, ValueError):
+        return True  # DNS failure will be caught by httpx
+
 
 # File extensions considered downloadable documents
 DOCUMENT_EXTENSIONS = (".pdf", ".png", ".jpg", ".jpeg", ".tiff")
@@ -158,15 +188,14 @@ async def _playwright_fetch(
                 # Scan rendered DOM for download links
                 html = await page.content()
                 candidates = _find_document_links(html, url)
-                for link_url in candidates:
-                    # Try to download via httpx (simpler than intercepting Playwright downloads)
-                    async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient() as client:
+                    for link_url in candidates:
                         result = await _follow_link(
                             client, link_url, download_dir, timeout
                         )
-                    if result:
-                        result.method = "playwright_download"
-                        return result
+                        if result:
+                            result.method = "playwright_download"
+                            return result
 
                 # Fallback: capture the page as PDF
                 pdf_bytes = await page.pdf()
@@ -196,6 +225,11 @@ async def fetch_url(
     """
     download_dir = str(download_dir)
     Path(download_dir).mkdir(parents=True, exist_ok=True)
+
+    # SSRF protection: block private/internal network URLs
+    if not _is_safe_url(url):
+        logger.warning("Blocked unsafe URL (private/internal network): %s", url)
+        return None
 
     # Step 1: HTTP fetch
     try:

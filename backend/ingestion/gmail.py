@@ -1,4 +1,4 @@
-import asyncio as _asyncio
+import asyncio
 import concurrent.futures
 import email
 import imaplib
@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup as _BS
 from backend.config import get_setting
 from backend.database import get_connection
 from backend.ingestion.url_fetcher import fetch_url
-from backend.ingestion.url_triage import triage_email, triage_telegram_urls
+from backend.ingestion.url_triage import triage_email
 from backend.storage import compute_file_hash, save_original
 
 logger = logging.getLogger(__name__)
@@ -110,6 +110,7 @@ def _extract_sender_email(from_header: str) -> str:
 def _extract_urls_from_html(html: str) -> list[str]:
     """Extract HTTP(S) URLs from HTML email body, excluding unsubscribe/mailto/tel links."""
     soup = _BS(html, "html.parser")
+    seen = set()
     urls = []
     _exclude_re = re.compile(r"unsubscribe|mailto:|tel:", re.IGNORECASE)
     for a_tag in soup.find_all("a", href=True):
@@ -117,8 +118,17 @@ def _extract_urls_from_html(html: str) -> list[str]:
         if _exclude_re.search(href):
             continue
         if href.startswith("http://") or href.startswith("https://"):
-            urls.append(href)
+            if href not in seen:
+                seen.add(href)
+                urls.append(href)
     return urls
+
+
+def _extract_urls_from_text(text: str) -> list[str]:
+    """Extract HTTP(S) URLs from plain text email body."""
+    urls = re.findall(r"https?://[^\s<>\"']+", text)
+    seen = set()
+    return [u for u in urls if not (u in seen or seen.add(u))]
 
 
 def _collect_attachments(parsed) -> list[dict]:
@@ -147,11 +157,11 @@ def _collect_attachments(parsed) -> list[dict]:
 def _run_async(coro):
     """Run an async coroutine from sync context, handling existing event loops."""
     try:
-        return _asyncio.run(coro)
+        return asyncio.run(coro)
     except RuntimeError:
         # Already in an event loop — use a thread pool executor
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(_asyncio.run, coro).result()
+            return pool.submit(asyncio.run, coro).result()
 
 
 def _ingest_url(url: str, sender_email: str, data_dir: str, authorized: bool) -> dict:
@@ -250,14 +260,23 @@ def _process_message(mail: imaplib.IMAP4_SSL, msg_id: bytes, data_dir: str) -> d
     attachments = _collect_attachments(parsed)
 
     html_body = ""
+    text_body = ""
     for part in parsed.walk():
-        if part.get_content_type() == "text/html":
-            payload = part.get_payload(decode=True)
-            if payload:
-                html_body = payload.decode("utf-8", errors="replace")
-                break
+        ct = part.get_content_type()
+        payload = part.get_payload(decode=True)
+        if not payload:
+            continue
+        if ct == "text/html" and not html_body:
+            html_body = payload.decode("utf-8", errors="replace")
+        elif ct == "text/plain" and not text_body:
+            text_body = payload.decode("utf-8", errors="replace")
 
+    # Extract URLs from both HTML and plain text, deduplicate
     urls = _extract_urls_from_html(html_body) if html_body else []
+    if text_body:
+        text_urls = _extract_urls_from_text(text_body)
+        seen = set(urls)
+        urls.extend(u for u in text_urls if u not in seen)
 
     ingested = []
     has_attachments = len(attachments) > 0
