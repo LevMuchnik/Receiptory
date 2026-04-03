@@ -21,6 +21,12 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
+# Mobile User-Agent — many receipt URLs (from Telegram) expect a mobile browser
+_MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+)
+
 # Private/loopback networks to block (SSRF protection)
 _BLOCKED_NETWORKS = [
     ip_network("127.0.0.0/8"),
@@ -165,7 +171,11 @@ async def _playwright_fetch(
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True)
             try:
-                page = await browser.new_page()
+                page = await browser.new_page(
+                    user_agent=_MOBILE_USER_AGENT,
+                    viewport={"width": 412, "height": 915},
+                    is_mobile=True,
+                )
                 await page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
 
                 # Auth wall detection
@@ -188,7 +198,7 @@ async def _playwright_fetch(
                 # Scan rendered DOM for download links
                 html = await page.content()
                 candidates = _find_document_links(html, url)
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(headers={"User-Agent": _MOBILE_USER_AGENT}) as client:
                     for link_url in candidates:
                         result = await _follow_link(
                             client, link_url, download_dir, timeout
@@ -231,9 +241,10 @@ async def fetch_url(
         logger.warning("Blocked unsafe URL (private/internal network): %s", url)
         return None
 
-    # Step 1: HTTP fetch
+    # Step 1: HTTP fetch (mobile UA — many receipt links expect mobile browser)
+    _headers = {"User-Agent": _MOBILE_USER_AGENT}
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=_headers) as client:
             resp = await client.get(url, timeout=timeout, follow_redirects=True)
     except httpx.TimeoutException:
         logger.warning("Timeout fetching URL: %s", url)
@@ -264,7 +275,7 @@ async def fetch_url(
         # Step 3: HTML link scan
         html_text = resp.text
         candidates = _find_document_links(html_text, url)
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=_headers) as client:
             for link_url in candidates:
                 result = await _follow_link(client, link_url, download_dir, timeout)
                 if result:
