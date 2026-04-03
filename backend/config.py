@@ -40,6 +40,7 @@ DEFAULTS: dict[str, Any] = {
     "gmail_authorized_senders": [],
     "watched_folder_path": "",
     "watched_folder_poll_interval": 10,
+    "url_fetch_timeout": 5,
     "base_url": "",
     "gdrive_client_id": "",
     "gdrive_client_secret": "",
