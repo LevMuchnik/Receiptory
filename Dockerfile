@@ -28,6 +28,9 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --no-dev --frozen
 
+# Install Playwright and Chromium for URL fetching (JS-rendered receipt pages)
+RUN uv run playwright install chromium --with-deps
+
 # Copy backend code
 COPY backend/ ./backend/
 COPY migrations/ ./migrations/
