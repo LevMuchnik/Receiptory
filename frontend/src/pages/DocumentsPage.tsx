@@ -198,6 +198,15 @@ export default function DocumentsPage() {
               </Button>
             </>
           )}
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-9"
+            onClick={fetchDocs}
+            title="Refresh document list"
+          >
+            <span className="material-symbols-outlined text-sm">refresh</span>
+          </Button>
           <label className="cursor-pointer h-9 px-4 rounded-lg text-sm font-semibold inline-flex items-center gap-1.5 text-white cta-gradient">
             <span className="material-symbols-outlined text-sm">upload_file</span>
             Upload
