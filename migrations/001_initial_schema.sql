@@ -31,11 +31,33 @@ INSERT INTO categories (name, description, is_system, display_order) VALUES
 
 -- Seed starter user categories
 INSERT INTO categories (name, description, display_order) VALUES
-    ('office_supplies', 'Office equipment and supplies', 10),
-    ('travel', 'Travel and transportation expenses', 11),
-    ('meals', 'Meals and dining expenses', 12),
-    ('utilities', 'Utility bills (electricity, water, internet, phone)', 13),
-    ('other', 'Uncategorized expenses', 99);
+    ('Office & Supplies', 'Office supplies, stationery, printer ink, small equipment', 10),
+    ('Subscriptions & Software', 'SaaS, software licenses, cloud services, streaming, gym, memberships', 11),
+    ('Hardware & Equipment', 'Computers, monitors, phones, peripherals, furniture', 12),
+    ('Travel', 'Flights, trains, taxis, public transport, tolls, parking', 13),
+    ('Car Fuel', 'Gasoline, diesel, EV charging', 14),
+    ('Car Maintenance', 'Vehicle repairs, servicing, tires, car wash, registration, insurance', 15),
+    ('Accommodation', 'Hotels, Airbnb, lodging for business trips', 16),
+    ('Meals & Entertainment', 'Business meals, client dinners, coffee meetings', 17),
+    ('Groceries', 'Supermarket, food, household consumables', 18),
+    ('Clothing', 'Clothes, shoes, accessories', 19),
+    ('Home & Garden', 'Home repairs, maintenance, appliances, garden supplies', 20),
+    ('Communication', 'Phone plans, internet service, SIM cards', 21),
+    ('Professional Services', 'Accountant, lawyer, consultant, freelancer fees, translation services', 22),
+    ('Insurance', 'Business insurance, professional liability, health insurance', 23),
+    ('Education & Training', 'Courses, conferences, books, certifications, professional development', 24),
+    ('Marketing & Advertising', 'Online ads, print ads, promotional materials, business cards, website costs', 25),
+    ('Rent & Workspace', 'Office rent, coworking space, home office expenses', 26),
+    ('Banking & Finance', 'Bank fees, payment processing fees, currency exchange, credit card fees', 27),
+    ('Taxes & Government', 'Tax payments, license fees, permits, government charges, municipal fees', 28),
+    ('Medical', 'Health-related expenses', 29),
+    ('Children & Family', 'Childcare, school fees, kids activities, baby supplies', 30),
+    ('Pets', 'Vet visits, pet food, grooming', 31),
+    ('Donations & Gifts', 'Charitable donations, gifts', 32),
+    ('Personal', 'Personal purchases not related to business activity', 33),
+    ('Utilities', 'Electricity, water, gas, waste disposal', 34),
+    ('Shipping & Delivery', 'Courier, postal services, package delivery, customs fees', 35),
+    ('Other', 'Expenses that do not fit any other category', 99);
 
 -- Documents
 CREATE TABLE IF NOT EXISTS documents (

@@ -42,7 +42,7 @@ Receiptory is a single-container web application that ingests receipts and invoi
 **Management**
 - Document browser with full-text search (SQLite FTS5), filters, sorting, and pagination
 - Document detail view with rendered page images and editable metadata
-- Custom categories with LLM-guided classification
+- Custom categories with LLM-guided classification (see [sample categories](#sample-categories))
 - Export to ZIP with category-organized PDFs, CSV, and Excel metadata
 
 **Infrastructure**
@@ -51,6 +51,42 @@ Receiptory is a single-container web application that ingests receipts and invoi
 - Dark theme with light/dark/system toggle
 - Notification alerts via Telegram and email
 - Single-user session auth
+
+---
+
+## Sample Categories
+
+Receiptory ships with a default set of categories. You can customize them freely — category descriptions are fed into the LLM prompt to guide automatic classification.
+
+| Category | Description |
+|----------|-------------|
+| Office & Supplies | Office supplies, stationery, printer ink, small equipment |
+| Subscriptions & Software | SaaS, software licenses, cloud services, streaming, gym, memberships |
+| Hardware & Equipment | Computers, monitors, phones, peripherals, furniture |
+| Travel | Flights, trains, taxis, public transport, tolls, parking |
+| Car Fuel | Gasoline, diesel, EV charging |
+| Car Maintenance | Vehicle repairs, servicing, tires, car wash, registration, insurance |
+| Accommodation | Hotels, Airbnb, lodging for business trips |
+| Meals & Entertainment | Business meals, client dinners, coffee meetings |
+| Groceries | Supermarket, food, household consumables |
+| Clothing | Clothes, shoes, accessories |
+| Home & Garden | Home repairs, maintenance, appliances, garden supplies |
+| Communication | Phone plans, internet service, SIM cards |
+| Professional Services | Accountant, lawyer, consultant, freelancer fees, translation services |
+| Insurance | Business insurance, professional liability, health insurance |
+| Education & Training | Courses, conferences, books, certifications, professional development |
+| Marketing & Advertising | Online ads, print ads, promotional materials, business cards, website costs |
+| Rent & Workspace | Office rent, coworking space, home office expenses |
+| Banking & Finance | Bank fees, payment processing fees, currency exchange, credit card fees |
+| Taxes & Government | Tax payments, license fees, permits, government charges, municipal fees |
+| Medical | Health-related expenses |
+| Children & Family | Childcare, school fees, kids activities, baby supplies |
+| Pets | Vet visits, pet food, grooming |
+| Donations & Gifts | Charitable donations, gifts |
+| Personal | Personal purchases not related to business activity |
+| Utilities | Electricity, water, gas, waste disposal |
+| Shipping & Delivery | Courier, postal services, package delivery, customs fees |
+| Other | Expenses that don't fit any other category |
 
 ---
 
