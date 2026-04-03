@@ -1,4 +1,5 @@
-import asyncio
+import asyncio as _asyncio
+import concurrent.futures
 import email
 import imaplib
 import logging
@@ -7,8 +8,12 @@ import re
 import tempfile
 from email import policy as email_policy
 
+from bs4 import BeautifulSoup as _BS
+
 from backend.config import get_setting
 from backend.database import get_connection
+from backend.ingestion.url_fetcher import fetch_url
+from backend.ingestion.url_triage import triage_email, triage_telegram_urls
 from backend.storage import compute_file_hash, save_original
 
 logger = logging.getLogger(__name__)
@@ -102,8 +107,133 @@ def _extract_sender_email(from_header: str) -> str:
     return from_header.strip()
 
 
+def _extract_urls_from_html(html: str) -> list[str]:
+    """Extract HTTP(S) URLs from HTML email body, excluding unsubscribe/mailto/tel links."""
+    soup = _BS(html, "html.parser")
+    urls = []
+    _exclude_re = re.compile(r"unsubscribe|mailto:|tel:", re.IGNORECASE)
+    for a_tag in soup.find_all("a", href=True):
+        href = a_tag["href"]
+        if _exclude_re.search(href):
+            continue
+        if href.startswith("http://") or href.startswith("https://"):
+            urls.append(href)
+    return urls
+
+
+def _collect_attachments(parsed) -> list[dict]:
+    """Walk MIME parts, return list of dicts with filename, content_type, size, content (bytes)."""
+    attachments = []
+    for part in parsed.walk():
+        content_type = part.get_content_type()
+        content_disposition = str(part.get("Content-Disposition", ""))
+
+        if "attachment" in content_disposition or content_type in (
+            "application/pdf", "image/jpeg", "image/png", "image/tiff"
+        ):
+            filename = part.get_filename() or "attachment"
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            attachments.append({
+                "filename": filename,
+                "content_type": content_type,
+                "size": len(payload),
+                "content": payload,
+            })
+    return attachments
+
+
+def _run_async(coro):
+    """Run an async coroutine from sync context, handling existing event loops."""
+    try:
+        return _asyncio.run(coro)
+    except RuntimeError:
+        # Already in an event loop — use a thread pool executor
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(_asyncio.run, coro).result()
+
+
+def _ingest_url(url: str, sender_email: str, data_dir: str, authorized: bool) -> dict:
+    """Fetch a URL and ingest it as a document, similar to _ingest_attachment."""
+    download_dir = os.path.join(data_dir, "storage", "tmp")
+    os.makedirs(download_dir, exist_ok=True)
+
+    fetch_result = _run_async(fetch_url(url, download_dir))
+    if fetch_result is None:
+        return {"url": url, "status": "fetch_failed"}
+
+    try:
+        file_hash = compute_file_hash(fetch_result.file_path)
+        file_size = os.path.getsize(fetch_result.file_path)
+
+        with get_connection() as conn:
+            existing = conn.execute(
+                "SELECT id FROM documents WHERE file_hash = ?", (file_hash,)
+            ).fetchone()
+
+        if existing:
+            os.unlink(fetch_result.file_path)
+            return {"url": url, "status": "duplicate", "existing_id": existing["id"]}
+
+        ext = os.path.splitext(fetch_result.file_path)[1] or ".bin"
+        save_original(fetch_result.file_path, file_hash, ext, data_dir)
+
+        category_id = None
+        status = "pending" if authorized else "needs_review"
+        if fetch_result.auth_wall:
+            status = "needs_review"
+        if not authorized:
+            with get_connection() as conn:
+                cat = conn.execute(
+                    "SELECT id FROM categories WHERE name = 'unauthorized_sender' AND is_system = 1"
+                ).fetchone()
+                if cat:
+                    category_id = cat["id"]
+
+        user_notes = None
+        if fetch_result.auth_wall:
+            user_notes = f"Auth-gated URL: {url}"
+
+        filename = os.path.basename(fetch_result.file_path)
+        with get_connection() as conn:
+            conn.execute(
+                """INSERT INTO documents
+                   (original_filename, file_hash, file_size_bytes, status, submission_channel,
+                    sender_identifier, category_id, source_url, user_notes)
+                   VALUES (?, ?, ?, ?, 'email', ?, ?, ?, ?)""",
+                (filename, file_hash, file_size, status,
+                 f"email:{sender_email}", category_id, url, user_notes),
+            )
+            doc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        if os.path.exists(fetch_result.file_path):
+            os.unlink(fetch_result.file_path)
+
+        logger.info(f"Email: ingested URL {url} as document #{doc_id} from {sender_email}")
+        try:
+            from backend.notifications.notifier import notify
+            notify("ingested", {
+                "id": doc_id,
+                "original_filename": filename,
+                "file_hash": file_hash,
+                "submission_channel": "email",
+                "sender_identifier": f"email:{sender_email}",
+                "source_url": url,
+            })
+        except Exception:
+            pass
+        return {"url": url, "status": "ingested", "doc_id": doc_id, "authorized": authorized}
+
+    except Exception as e:
+        if os.path.exists(fetch_result.file_path):
+            os.unlink(fetch_result.file_path)
+        logger.error(f"Email: failed to ingest URL {url}: {e}")
+        return {"url": url, "status": "error", "error": str(e)}
+
+
 def _process_message(mail: imaplib.IMAP4_SSL, msg_id: bytes, data_dir: str) -> dict:
-    """Fetch and process a single email message."""
+    """Fetch and process a single email message using triage-based flow."""
     status, msg_data = mail.fetch(msg_id, "(RFC822)")
     if status != "OK" or not msg_data or not msg_data[0]:
         return {"msg_id": msg_id.decode(), "status": "error", "error": "Failed to fetch message"}
@@ -116,38 +246,71 @@ def _process_message(mail: imaplib.IMAP4_SSL, msg_id: bytes, data_dir: str) -> d
     sender_email = _extract_sender_email(from_header)
     authorized = _is_sender_authorized(sender_email)
 
-    ingested = []
+    # Collect attachments and URLs
+    attachments = _collect_attachments(parsed)
 
-    # Extract attachments
-    has_attachment = False
+    html_body = ""
     for part in parsed.walk():
-        content_type = part.get_content_type()
-        content_disposition = str(part.get("Content-Disposition", ""))
-
-        if "attachment" in content_disposition or content_type in (
-            "application/pdf", "image/jpeg", "image/png", "image/tiff"
-        ):
-            filename = part.get_filename() or f"attachment_{msg_id.decode()}"
+        if part.get_content_type() == "text/html":
             payload = part.get_payload(decode=True)
-            if not payload:
-                continue
-
-            has_attachment = True
-            result = _ingest_attachment(payload, filename, sender_email, data_dir, authorized)
-            ingested.append(result)
-
-    # If no attachments, try to save the HTML body
-    if not has_attachment:
-        html_body = None
-        for part in parsed.walk():
-            if part.get_content_type() == "text/html":
-                html_body = part.get_payload(decode=True)
+            if payload:
+                html_body = payload.decode("utf-8", errors="replace")
                 break
 
-        if html_body:
-            filename = f"email_{msg_id.decode()}.html"
-            result = _ingest_attachment(html_body, filename, sender_email, data_dir, authorized)
+    urls = _extract_urls_from_html(html_body) if html_body else []
+
+    ingested = []
+    has_attachments = len(attachments) > 0
+    has_urls = len(urls) > 0
+
+    if has_attachments and has_urls:
+        # LLM triage decides what to ingest
+        triage_input = [
+            {"filename": a["filename"], "content_type": a["content_type"], "size": a["size"]}
+            for a in attachments
+        ]
+        triage_result = _run_async(triage_email(html_body, triage_input, urls))
+
+        # Ingest recommended attachments
+        att_by_name = {a["filename"]: a for a in attachments}
+        for fname in triage_result.ingest_attachments:
+            if fname in att_by_name:
+                att = att_by_name[fname]
+                result = _ingest_attachment(att["content"], att["filename"], sender_email, data_dir, authorized)
+                ingested.append(result)
+
+        # Ingest recommended URLs
+        for url in triage_result.ingest_urls:
+            result = _ingest_url(url, sender_email, data_dir, authorized)
             ingested.append(result)
+
+    elif has_attachments and not has_urls:
+        # Ingest all attachments (original behavior)
+        for att in attachments:
+            result = _ingest_attachment(att["content"], att["filename"], sender_email, data_dir, authorized)
+            ingested.append(result)
+
+    elif not has_attachments and has_urls:
+        # LLM triage on URLs only
+        triage_result = _run_async(triage_email(html_body, [], urls))
+
+        for url in triage_result.ingest_urls:
+            result = _ingest_url(url, sender_email, data_dir, authorized)
+            ingested.append(result)
+
+    else:
+        # No attachments, no URLs — create needs_review document
+        with get_connection() as conn:
+            conn.execute(
+                """INSERT INTO documents
+                   (original_filename, file_hash, file_size_bytes, status, submission_channel,
+                    sender_identifier, user_notes)
+                   VALUES (?, ?, 0, 'needs_review', 'email', ?, ?)""",
+                (f"email_{msg_id.decode()}.eml", f"no-content-{msg_id.decode()}",
+                 f"email:{sender_email}", f"Email with no attachments or URLs. Subject: {subject}"),
+            )
+            doc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        ingested.append({"status": "needs_review", "doc_id": doc_id})
 
     # Mark as seen
     mail.store(msg_id, "+FLAGS", "\\Seen")
