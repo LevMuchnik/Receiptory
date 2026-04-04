@@ -63,12 +63,14 @@ DEFAULTS: dict[str, Any] = {
     "notify_telegram_needs_review": True,
     "notify_telegram_backup_ok": False,
     "notify_telegram_backup_failed": True,
+    "notify_telegram_nothing_found": True,
     "notify_email_ingested": False,
     "notify_email_processed": False,
     "notify_email_failed": True,
     "notify_email_needs_review": True,
     "notify_email_backup_ok": False,
     "notify_email_backup_failed": True,
+    "notify_email_nothing_found": False,
 }
 
 SENSITIVE_KEYS = {

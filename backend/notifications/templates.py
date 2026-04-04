@@ -202,3 +202,41 @@ def format_backup_failed(error_msg: dict) -> dict:
     )
 
     return {"subject": subject, "caption": caption, "html": html}
+
+
+def format_nothing_found(info: dict, base_url: str) -> dict:
+    sender = info.get("sender_email", "unknown")
+    subject = info.get("subject", "(no subject)")
+    att_count = info.get("attachment_count", 0)
+    url_count = info.get("url_count", 0)
+
+    subject_line = f"Receiptory: No documents found \u2014 {subject}"
+
+    checked_parts = []
+    if att_count:
+        checked_parts.append(f"{att_count} attachment(s)")
+    if url_count:
+        checked_parts.append(f"{url_count} URL(s)")
+    checked = ", ".join(checked_parts) if checked_parts else "nothing"
+
+    caption_parts = [
+        "\U0001f50d <b>No Documents Found</b>",
+        f"From: {sender}",
+        f"Subject: {subject}",
+        f"Checked: {checked}",
+        "No receipts or invoices were identified.",
+    ]
+    caption = "\n".join(caption_parts)
+
+    html_parts = [
+        "<h3>&#128269; No Documents Found</h3>",
+        "<p>",
+        f"<b>From:</b> {sender}<br>",
+        f"<b>Subject:</b> {subject}<br>",
+        f"<b>Checked:</b> {checked}<br>",
+        "No receipts or invoices were identified in this email.",
+        "</p>",
+    ]
+    html = "\n".join(html_parts)
+
+    return {"subject": subject_line, "caption": caption, "html": html}

@@ -4,6 +4,7 @@ from backend.config import get_setting
 from backend.notifications.templates import (
     format_ingested, format_processed, format_failed,
     format_needs_review, format_backup_ok, format_backup_failed,
+    format_nothing_found,
 )
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,7 @@ FORMATTERS = {
     "needs_review": format_needs_review,
     "backup_ok": format_backup_ok,
     "backup_failed": format_backup_failed,
+    "nothing_found": format_nothing_found,
 }
 
 # Events that include a document photo in Telegram
