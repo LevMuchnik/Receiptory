@@ -84,55 +84,56 @@ async def triage_telegram_urls(message_text: str, urls: list[str]) -> list[str]:
         return list(urls)
 
 
-async def triage_email(
-    body_text: str, attachments: list[dict], urls: list[str]
-) -> TriageResult:
-    """Use LLM to decide which email attachments and URLs to ingest.
+async def triage_email_urls(
+    sender_email: str,
+    subject: str,
+    body_text: str,
+    urls: list[str],
+) -> list[str]:
+    """Use LLM to filter URLs that likely point to financial documents.
 
-    attachments: list of dicts with keys: filename, content_type, size
-    On LLM failure or missing config, falls back to ALL attachments + ALL URLs.
+    Uses email context (sender, subject, body) for better decisions.
+    Fallback on LLM failure or missing config: returns ALL URLs.
     """
-    all_filenames = [a["filename"] for a in attachments]
-    fallback = TriageResult(
-        ingest_attachments=list(all_filenames),
-        ingest_urls=list(urls),
-    )
+    if not urls:
+        return []
 
-    if not attachments and not urls:
-        return TriageResult()
+    fallback = list(urls)
 
-    model = get_setting("llm_model")
-    api_key = get_setting("llm_api_key")
+    try:
+        model = get_setting("llm_model")
+        api_key = get_setting("llm_api_key")
+    except RuntimeError:
+        logger.warning("Database not available for URL triage settings, returning all URLs")
+        return fallback
 
     if not model or not api_key:
-        logger.warning("LLM not configured for email triage, returning all content")
+        logger.warning("LLM not configured for URL triage, returning all URLs")
         return fallback
 
     truncated_body = body_text[:3000] if body_text else ""
-
-    att_desc = "\n".join(
-        f"- {a['filename']} (type: {a.get('content_type', 'unknown')}, size: {a.get('size', 'unknown')} bytes)"
-        for a in attachments
-    ) or "(none)"
-
-    url_list = "\n".join(f"- {u}" for u in urls) or "(none)"
+    url_list = "\n".join(f"- {u}" for u in urls)
 
     prompt = (
-        "You are a document triage assistant. Given an email body, its attachments, and URLs found in the email, "
-        "decide which attachments and URLs are likely receipts, invoices, or financial documents worth ingesting.\n\n"
-        "Decision factors:\n"
-        "- PDF attachments are likely invoices or receipts\n"
-        "- Small image attachments (under 10KB) are likely logos or signatures, not documents\n"
-        "- Larger image attachments may be scanned receipts\n"
-        "- URLs pointing to download/view invoice or receipt pages should be ingested\n"
-        "- Account management, unsubscribe, marketing, and social media URLs should NOT be ingested\n"
-        "- Attachments with names like 'logo', 'signature', 'banner' are not documents\n\n"
+        "You are a document triage assistant for a receipt/invoice management system. "
+        "Given an email's metadata and a list of URLs found in the email, determine which URLs "
+        "are likely to point to viewable or downloadable financial documents.\n\n"
+        "Financial document URLs include: invoice download pages, receipt viewers, "
+        "purchase confirmation pages, billing portals with downloadable statements.\n\n"
+        "Exclude URLs that are:\n"
+        "- Unsubscribe or email preference links\n"
+        "- Account management or login pages (unless specifically for viewing an invoice)\n"
+        "- Marketing, promotional, or social media links\n"
+        "- App store links\n"
+        "- Tracking or shipping status links\n"
+        "- General company website pages\n"
+        "- News, blog, or help articles\n\n"
+        f"Email sender: {sender_email}\n"
+        f"Email subject: {subject}\n"
         f"Email body (truncated):\n{truncated_body}\n\n"
-        f"Attachments:\n{att_desc}\n\n"
-        f"URLs:\n{url_list}\n\n"
-        'Return ONLY a JSON object with two keys: "ingest_attachments" (list of filenames) '
-        'and "ingest_urls" (list of URLs). Only include items from the provided lists. '
-        "No explanation, just JSON."
+        f"URLs found in email:\n{url_list}\n\n"
+        "Return ONLY a JSON array of URLs to fetch (must be from the provided list). "
+        "If none are relevant, return an empty array. No explanation, just JSON."
     )
 
     try:
@@ -144,23 +145,12 @@ async def triage_email(
         )
         raw = response.choices[0].message.content
         parsed = json.loads(_strip_code_fences(raw))
-        if not isinstance(parsed, dict):
-            logger.error("LLM returned non-dict for email triage: %s", type(parsed))
+        if not isinstance(parsed, list):
+            logger.error("LLM returned non-list for URL triage: %s", type(parsed))
             return fallback
-
-        filenames = parsed.get("ingest_attachments", [])
-        ingest_urls = parsed.get("ingest_urls", [])
-
-        # Filter to only items from the input lists
-        valid_filenames = [f for f in filenames if f in all_filenames]
-        valid_urls = [u for u in ingest_urls if u in urls]
-
-        return TriageResult(
-            ingest_attachments=valid_filenames,
-            ingest_urls=valid_urls,
-        )
+        return [u for u in parsed if u in urls]
     except Exception:
-        logger.exception("LLM triage failed for email, returning all content")
+        logger.exception("LLM URL triage failed, returning all URLs")
         return fallback
 
 

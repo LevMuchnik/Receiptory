@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from backend.ingestion.url_triage import classify_email_documents, ClassificationDocument
+from backend.ingestion.url_triage import classify_email_documents, ClassificationDocument, triage_email_urls
 
 
 @pytest.fixture
@@ -91,5 +91,43 @@ async def test_classify_empty_documents():
     """No documents provided — returns empty list."""
     result = await classify_email_documents(
         sender_email="a@b.com", subject="test", body_text="", documents=[],
+    )
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_triage_urls_returns_candidates(mock_llm_settings):
+    """LLM picks invoice URL from a list."""
+    urls = ["https://billing.com/invoice/123", "https://company.com/unsubscribe"]
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = '["https://billing.com/invoice/123"]'
+
+    with patch("backend.ingestion.url_triage.litellm_completion", return_value=mock_response):
+        result = await triage_email_urls(
+            sender_email="billing@vendor.com",
+            subject="Your Invoice",
+            body_text="Click here to view your invoice.",
+            urls=urls,
+        )
+    assert result == ["https://billing.com/invoice/123"]
+
+
+@pytest.mark.asyncio
+async def test_triage_urls_fallback_on_failure(mock_llm_settings):
+    """On LLM failure, returns all URLs."""
+    urls = ["https://a.com", "https://b.com"]
+    with patch("backend.ingestion.url_triage.litellm_completion", side_effect=Exception("fail")):
+        result = await triage_email_urls(
+            sender_email="a@b.com", subject="test", body_text="", urls=urls,
+        )
+    assert set(result) == {"https://a.com", "https://b.com"}
+
+
+@pytest.mark.asyncio
+async def test_triage_urls_empty():
+    """No URLs — returns empty list."""
+    result = await triage_email_urls(
+        sender_email="a@b.com", subject="test", body_text="", urls=[],
     )
     assert result == []
