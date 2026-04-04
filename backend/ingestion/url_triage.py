@@ -4,18 +4,12 @@ import base64
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from backend.config import get_setting
 from backend.processing.extract import litellm_completion
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class TriageResult:
-    ingest_attachments: list[str] = field(default_factory=list)
-    ingest_urls: list[str] = field(default_factory=list)
 
 
 @dataclass
