@@ -27,6 +27,11 @@ _MOBILE_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
 )
 
+_DESKTOP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+)
+
 # Private/loopback networks to block (SSRF protection)
 _BLOCKED_NETWORKS = [
     ip_network("127.0.0.0/8"),
@@ -156,7 +161,7 @@ async def _follow_link(
 
 
 async def _playwright_fetch(
-    url: str, download_dir: str, timeout: int
+    url: str, download_dir: str, timeout: int, user_agent: str | None = None,
 ) -> FetchResult | None:
     """Use Playwright headless Chromium to render a page and extract content."""
     try:
@@ -171,10 +176,13 @@ async def _playwright_fetch(
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True)
             try:
+                ua = user_agent or _MOBILE_USER_AGENT
+                is_mobile = ua == _MOBILE_USER_AGENT
+                viewport = {"width": 412, "height": 915} if is_mobile else {"width": 1280, "height": 900}
                 page = await browser.new_page(
-                    user_agent=_MOBILE_USER_AGENT,
-                    viewport={"width": 412, "height": 915},
-                    is_mobile=True,
+                    user_agent=ua,
+                    viewport=viewport,
+                    is_mobile=is_mobile,
                 )
                 await page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
 
@@ -198,7 +206,7 @@ async def _playwright_fetch(
                 # Scan rendered DOM for download links
                 html = await page.content()
                 candidates = _find_document_links(html, url)
-                async with httpx.AsyncClient(headers={"User-Agent": _MOBILE_USER_AGENT}) as client:
+                async with httpx.AsyncClient(headers={"User-Agent": ua}) as client:
                     for link_url in candidates:
                         result = await _follow_link(
                             client, link_url, download_dir, timeout
@@ -226,7 +234,7 @@ async def _playwright_fetch(
 
 
 async def fetch_url(
-    url: str, download_dir: str | Path, timeout: int = 5
+    url: str, download_dir: str | Path, timeout: int = 5, user_agent: str | None = None,
 ) -> FetchResult | None:
     """Fetch a URL and return a FetchResult with the downloaded file.
 
@@ -242,7 +250,8 @@ async def fetch_url(
         return None
 
     # Step 1: HTTP fetch (mobile UA — many receipt links expect mobile browser)
-    _headers = {"User-Agent": _MOBILE_USER_AGENT}
+    ua = user_agent or _MOBILE_USER_AGENT
+    _headers = {"User-Agent": ua}
     try:
         async with httpx.AsyncClient(headers=_headers) as client:
             resp = await client.get(url, timeout=timeout, follow_redirects=True)
@@ -282,7 +291,7 @@ async def fetch_url(
                     return result
 
         # Step 4: Playwright render
-        return await _playwright_fetch(url, download_dir, timeout)
+        return await _playwright_fetch(url, download_dir, timeout, user_agent=ua)
 
     # Other content type — save raw, let downstream handle it
     file_path = _save_response(resp.content, content_type, download_dir)
