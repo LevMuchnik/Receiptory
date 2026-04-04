@@ -13,7 +13,6 @@ from bs4 import BeautifulSoup as _BS
 from backend.config import get_setting
 from backend.database import get_connection
 from backend.ingestion.url_fetcher import fetch_url
-from backend.ingestion.url_triage import triage_email
 from backend.storage import compute_file_hash, save_original
 
 logger = logging.getLogger(__name__)
@@ -164,14 +163,162 @@ def _run_async(coro):
             return pool.submit(asyncio.run, coro).result()
 
 
-def _ingest_url(url: str, sender_email: str, data_dir: str, authorized: bool) -> dict:
-    """Fetch a URL and ingest it as a document, similar to _ingest_attachment."""
+def _render_first_page(content: bytes, filename: str, data_dir: str) -> bytes | None:
+    """Render the first page of a document to PNG for LLM classification."""
+    ext = os.path.splitext(filename)[1].lower() or ".bin"
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            from backend.processing.normalize import normalize_file
+            norm = normalize_file(tmp_path, data_dir)
+            pdf_path = norm.pdf_path
+            from backend.storage import render_all_pages_to_memory
+            pages = render_all_pages_to_memory(pdf_path, dpi=150)
+            if norm.converted and os.path.exists(pdf_path):
+                os.unlink(pdf_path)
+            return pages[0] if pages else None
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+    except Exception as e:
+        logger.debug(f"Failed to render first page of {filename}: {e}")
+        return None
+
+
+def _render_first_page_from_file(file_path: str, data_dir: str) -> bytes | None:
+    """Render first page of an already-fetched file to PNG."""
+    try:
+        from backend.processing.normalize import normalize_file
+        norm = normalize_file(file_path, data_dir)
+        pdf_path = norm.pdf_path
+        from backend.storage import render_all_pages_to_memory
+        pages = render_all_pages_to_memory(pdf_path, dpi=150)
+        if norm.converted and os.path.exists(pdf_path):
+            os.unlink(pdf_path)
+        return pages[0] if pages else None
+    except Exception as e:
+        logger.debug(f"Failed to render first page of {file_path}: {e}")
+        return None
+
+
+def _classify_attachments(
+    attachments: list[dict], sender_email: str, subject: str, body_text: str, data_dir: str,
+) -> list[str]:
+    """Render attachment first pages and classify via LLM. Returns list of qualifying filenames."""
+    from backend.ingestion.url_triage import classify_email_documents, ClassificationDocument
+
+    docs = []
+    for att in attachments:
+        image = _render_first_page(att["content"], att["filename"], data_dir)
+        if image is None:
+            continue
+        docs.append(ClassificationDocument(
+            identifier=att["filename"],
+            source="attachment",
+            first_page_image=image,
+        ))
+
+    if not docs:
+        return []
+
+    return _run_async(classify_email_documents(
+        sender_email=sender_email,
+        subject=subject,
+        body_text=body_text,
+        documents=docs,
+    ))
+
+
+def _process_urls(
+    urls: list[str], sender_email: str, subject: str, body_text: str,
+    data_dir: str, authorized: bool,
+) -> list[dict]:
+    """Phase 2: Triage URLs, fetch candidates, classify fetched docs, ingest qualifying ones."""
+    from backend.ingestion.url_triage import triage_email_urls, classify_email_documents, ClassificationDocument
+    from backend.ingestion.url_fetcher import _DESKTOP_USER_AGENT
+
+    # Step 2a: LLM triage to filter candidate URLs
+    candidate_urls = _run_async(triage_email_urls(
+        sender_email=sender_email,
+        subject=subject,
+        body_text=body_text,
+        urls=urls,
+    ))
+
+    if not candidate_urls:
+        return []
+
+    # Step 2b: Fetch candidate URLs (desktop mode for email-sourced URLs)
     download_dir = os.path.join(data_dir, "storage", "tmp")
     os.makedirs(download_dir, exist_ok=True)
 
-    fetch_result = _run_async(fetch_url(url, download_dir))
+    fetched = []  # list of (url, fetch_result)
+    for url in candidate_urls:
+        result = _run_async(fetch_url(url, download_dir, user_agent=_DESKTOP_USER_AGENT))
+        if result is not None:
+            fetched.append((url, result))
+
+    if not fetched:
+        return []
+
+    # Step 2c: Classify fetched documents
+    docs = []
+    for url, fr in fetched:
+        image = _render_first_page_from_file(fr.file_path, data_dir)
+        if image is not None:
+            docs.append(ClassificationDocument(
+                identifier=url,
+                source="url",
+                first_page_image=image,
+            ))
+
+    qualifying_urls = set()
+    if docs:
+        qualifying_urls = set(_run_async(classify_email_documents(
+            sender_email=sender_email,
+            subject=subject,
+            body_text=body_text,
+            documents=docs,
+        )))
+
+    # Ingest qualifying, clean up non-qualifying
+    ingested = []
+    for url, fr in fetched:
+        if url in qualifying_urls:
+            result = _ingest_url(url, sender_email, data_dir, authorized, fetch_result=fr)
+            ingested.append(result)
+        else:
+            if os.path.exists(fr.file_path):
+                os.unlink(fr.file_path)
+            logger.info(f"Email: discarded non-qualifying URL {url}")
+
+    return ingested
+
+
+def _notify_nothing_found(sender_email: str, subject: str, attachment_count: int, url_count: int) -> None:
+    """Send notification when an email produced no ingested documents."""
+    try:
+        from backend.notifications.notifier import notify
+        notify("nothing_found", {
+            "sender_email": sender_email,
+            "subject": subject,
+            "attachment_count": attachment_count,
+            "url_count": url_count,
+        })
+    except Exception:
+        pass
+
+
+def _ingest_url(url: str, sender_email: str, data_dir: str, authorized: bool, fetch_result=None) -> dict:
+    """Fetch a URL and ingest it as a document, similar to _ingest_attachment."""
     if fetch_result is None:
-        return {"url": url, "status": "fetch_failed"}
+        download_dir = os.path.join(data_dir, "storage", "tmp")
+        os.makedirs(download_dir, exist_ok=True)
+        fetch_result = _run_async(fetch_url(url, download_dir))
+        if fetch_result is None:
+            return {"url": url, "status": "fetch_failed"}
 
     try:
         file_hash = compute_file_hash(fetch_result.file_path)
@@ -242,8 +389,60 @@ def _ingest_url(url: str, sender_email: str, data_dir: str, authorized: bool) ->
         return {"url": url, "status": "error", "error": str(e)}
 
 
+def _process_message_logic(ctx: dict, data_dir: str) -> dict:
+    """Core two-phase ingestion logic, separated from IMAP parsing for testability.
+
+    ctx keys: sender_email, subject, body_text, html_body, attachments, urls, authorized
+    """
+    sender_email = ctx["sender_email"]
+    subject = ctx["subject"]
+    body_text = ctx["body_text"]
+    attachments = ctx["attachments"]
+    urls = ctx["urls"]
+    authorized = ctx["authorized"]
+
+    ingested = []
+
+    # Phase 1: Classify attachments (if any)
+    if attachments:
+        qualifying_filenames = _classify_attachments(
+            attachments, sender_email, subject, body_text, data_dir,
+        )
+
+        if qualifying_filenames:
+            # Ingest qualifying attachments, skip URLs
+            att_by_name = {a["filename"]: a for a in attachments}
+            for fname in qualifying_filenames:
+                if fname in att_by_name:
+                    att = att_by_name[fname]
+                    result = _ingest_attachment(
+                        att["content"], att["filename"], sender_email, data_dir, authorized,
+                    )
+                    ingested.append(result)
+
+            return {"ingested": ingested}
+
+    # Phase 2: URL fallback (no attachment qualified, or no attachments)
+    if urls:
+        url_results = _process_urls(
+            urls, sender_email, subject, body_text, data_dir, authorized,
+        )
+        ingested.extend(url_results)
+
+    # Phase 3: Notify if nothing was ingested
+    if not ingested:
+        _notify_nothing_found(
+            sender_email=sender_email,
+            subject=subject,
+            attachment_count=len(attachments),
+            url_count=len(urls),
+        )
+
+    return {"ingested": ingested}
+
+
 def _process_message(mail: imaplib.IMAP4_SSL, msg_id: bytes, data_dir: str) -> dict:
-    """Fetch and process a single email message using triage-based flow."""
+    """Fetch and process a single email message using two-phase smart ingestion."""
     status, msg_data = mail.fetch(msg_id, "(RFC822)")
     if status != "OK" or not msg_data or not msg_data[0]:
         return {"msg_id": msg_id.decode(), "status": "error", "error": "Failed to fetch message"}
@@ -256,7 +455,6 @@ def _process_message(mail: imaplib.IMAP4_SSL, msg_id: bytes, data_dir: str) -> d
     sender_email = _extract_sender_email(from_header)
     authorized = _is_sender_authorized(sender_email)
 
-    # Collect attachments and URLs
     attachments = _collect_attachments(parsed)
 
     html_body = ""
@@ -271,67 +469,24 @@ def _process_message(mail: imaplib.IMAP4_SSL, msg_id: bytes, data_dir: str) -> d
         elif ct == "text/plain" and not text_body:
             text_body = payload.decode("utf-8", errors="replace")
 
-    # Extract URLs from both HTML and plain text, deduplicate
     urls = _extract_urls_from_html(html_body) if html_body else []
     if text_body:
         text_urls = _extract_urls_from_text(text_body)
         seen = set(urls)
         urls.extend(u for u in text_urls if u not in seen)
 
-    ingested = []
-    has_attachments = len(attachments) > 0
-    has_urls = len(urls) > 0
+    ctx = {
+        "sender_email": sender_email,
+        "subject": subject,
+        "body_text": text_body or html_body,
+        "html_body": html_body,
+        "attachments": attachments,
+        "urls": urls,
+        "authorized": authorized,
+    }
 
-    if has_attachments and has_urls:
-        # LLM triage decides what to ingest
-        triage_input = [
-            {"filename": a["filename"], "content_type": a["content_type"], "size": a["size"]}
-            for a in attachments
-        ]
-        triage_result = _run_async(triage_email(html_body, triage_input, urls))
+    result = _process_message_logic(ctx, data_dir)
 
-        # Ingest recommended attachments
-        att_by_name = {a["filename"]: a for a in attachments}
-        for fname in triage_result.ingest_attachments:
-            if fname in att_by_name:
-                att = att_by_name[fname]
-                result = _ingest_attachment(att["content"], att["filename"], sender_email, data_dir, authorized)
-                ingested.append(result)
-
-        # Ingest recommended URLs
-        for url in triage_result.ingest_urls:
-            result = _ingest_url(url, sender_email, data_dir, authorized)
-            ingested.append(result)
-
-    elif has_attachments and not has_urls:
-        # Ingest all attachments (original behavior)
-        for att in attachments:
-            result = _ingest_attachment(att["content"], att["filename"], sender_email, data_dir, authorized)
-            ingested.append(result)
-
-    elif not has_attachments and has_urls:
-        # LLM triage on URLs only
-        triage_result = _run_async(triage_email(html_body, [], urls))
-
-        for url in triage_result.ingest_urls:
-            result = _ingest_url(url, sender_email, data_dir, authorized)
-            ingested.append(result)
-
-    else:
-        # No attachments, no URLs — create needs_review document
-        with get_connection() as conn:
-            conn.execute(
-                """INSERT INTO documents
-                   (original_filename, file_hash, file_size_bytes, status, submission_channel,
-                    sender_identifier, user_notes)
-                   VALUES (?, ?, 0, 'needs_review', 'email', ?, ?)""",
-                (f"email_{msg_id.decode()}.eml", f"no-content-{msg_id.decode()}",
-                 f"email:{sender_email}", f"Email with no attachments or URLs. Subject: {subject}"),
-            )
-            doc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        ingested.append({"status": "needs_review", "doc_id": doc_id})
-
-    # Mark as seen
     mail.store(msg_id, "+FLAGS", "\\Seen")
 
     return {
@@ -339,7 +494,7 @@ def _process_message(mail: imaplib.IMAP4_SSL, msg_id: bytes, data_dir: str) -> d
         "subject": subject,
         "sender": sender_email,
         "authorized": authorized,
-        "ingested": ingested,
+        **result,
     }
 
 
