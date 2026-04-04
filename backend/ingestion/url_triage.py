@@ -1,5 +1,6 @@
 """LLM-based triage to decide which URLs/attachments to ingest."""
 
+import base64
 import json
 import logging
 import re
@@ -15,6 +16,13 @@ logger = logging.getLogger(__name__)
 class TriageResult:
     ingest_attachments: list[str] = field(default_factory=list)
     ingest_urls: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ClassificationDocument:
+    identifier: str  # filename (for attachments) or URL (for fetched docs)
+    source: str  # "attachment" or "url"
+    first_page_image: bytes  # PNG bytes of first page
 
 
 def _strip_code_fences(text: str) -> str:
@@ -153,4 +161,87 @@ async def triage_email(
         )
     except Exception:
         logger.exception("LLM triage failed for email, returning all content")
+        return fallback
+
+
+async def classify_email_documents(
+    sender_email: str,
+    subject: str,
+    body_text: str,
+    documents: list[ClassificationDocument],
+) -> list[str]:
+    """Classify which documents are real financial documents using LLM with email context.
+
+    Sends email metadata + first-page images to LLM. Returns list of identifiers
+    (filenames or URLs) that are actual financial documents.
+
+    Fallback on LLM failure or missing config: returns ALL identifiers.
+    """
+    if not documents:
+        return []
+
+    all_identifiers = [d.identifier for d in documents]
+    fallback = list(all_identifiers)
+
+    try:
+        model = get_setting("llm_model")
+        api_key = get_setting("llm_api_key")
+    except RuntimeError:
+        logger.warning("Database not available for document classification settings, returning all")
+        return fallback
+
+    if not model or not api_key:
+        logger.warning("LLM not configured for document classification, returning all")
+        return fallback
+
+    truncated_body = body_text[:3000] if body_text else ""
+
+    doc_descriptions = "\n".join(
+        f"- {d.identifier} (source: {d.source})"
+        for d in documents
+    )
+
+    prompt = (
+        "You are a document classification assistant for a receipt/invoice management system. "
+        "Given an email's metadata and document previews, identify which documents are actual "
+        "financial documents worth keeping.\n\n"
+        "Financial documents include: receipts, invoices (incoming or outgoing), flight/travel tickets, "
+        "purchase confirmations, financial statements, tax documents, insurance documents, "
+        "utility bills, bank statements, or similar transactional documents.\n\n"
+        "NOT financial documents: newsletters, marketing materials, app UI screenshots, "
+        "terms of service, logos, signatures, banners, general web pages, "
+        "duplicate copies of a document already identified.\n\n"
+        f"Email sender: {sender_email}\n"
+        f"Email subject: {subject}\n"
+        f"Email body (truncated):\n{truncated_body}\n\n"
+        f"Documents to classify:\n{doc_descriptions}\n\n"
+        "Each document's first page is attached as an image (in the same order as listed above).\n\n"
+        "Return ONLY a JSON array of identifiers (from the list above) that are real financial documents. "
+        "If none qualify, return an empty array. No explanation, just JSON."
+    )
+
+    content: list[dict] = [{"type": "text", "text": prompt}]
+    for doc in documents:
+        b64 = base64.b64encode(doc.first_page_image).decode("utf-8")
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{b64}"},
+        })
+
+    try:
+        response = litellm_completion(
+            model=model,
+            api_key=api_key,
+            messages=[{"role": "user", "content": content}],
+            temperature=0.0,
+        )
+        raw = response.choices[0].message.content
+        parsed = json.loads(_strip_code_fences(raw))
+        if not isinstance(parsed, list):
+            logger.error("LLM returned non-list for document classification: %s", type(parsed))
+            return fallback
+        # Only return identifiers that were in the input
+        return [i for i in parsed if i in all_identifiers]
+    except Exception:
+        logger.exception("LLM document classification failed, returning all")
         return fallback
