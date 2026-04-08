@@ -1,0 +1,107 @@
+<h2>Design Direction for Receiptory UI Redesign</h2>
+<p class="subtitle">Pick the overall visual personality. This sets the tone for all pages.</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:24px;background:linear-gradient(135deg,#f8fafc,#eef2f7);">
+      <!-- Clean Professional mockup -->
+      <div style="font-family:system-ui;font-size:13px;color:#1e293b;">
+        <div style="display:flex;gap:16px;margin-bottom:16px;">
+          <div style="width:200px;background:#fff;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
+            <div style="font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#94a3b8;margin-bottom:12px;">Navigation</div>
+            <div style="padding:8px 12px;background:#f1f5f9;border-radius:8px;font-weight:600;margin-bottom:4px;">Dashboard</div>
+            <div style="padding:8px 12px;color:#64748b;">Documents</div>
+            <div style="padding:8px 12px;color:#64748b;">Export</div>
+          </div>
+          <div style="flex:1;">
+            <div style="background:#fff;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.08);margin-bottom:12px;">
+              <div style="font-weight:700;font-size:15px;margin-bottom:8px;">Monthly Overview</div>
+              <div style="display:flex;gap:12px;">
+                <div style="flex:1;background:#f0fdf4;border-radius:8px;padding:12px;text-align:center;">
+                  <div style="font-size:20px;font-weight:800;color:#16a34a;">47</div>
+                  <div style="font-size:10px;color:#4ade80;">processed</div>
+                </div>
+                <div style="flex:1;background:#eff6ff;border-radius:8px;padding:12px;text-align:center;">
+                  <div style="font-size:20px;font-weight:800;color:#2563eb;">12</div>
+                  <div style="font-size:10px;color:#60a5fa;">pending</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. Clean Professional</h3>
+      <p>Subtle shadows, generous whitespace, soft rounded cards. Think Notion/Linear. Calm and organized &mdash; lets the data breathe. Neutral grays with color only for status indicators.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:24px;background:linear-gradient(135deg,#0f172a,#1e293b);">
+      <!-- Dense Dashboard mockup -->
+      <div style="font-family:system-ui;font-size:13px;color:#e2e8f0;">
+        <div style="display:flex;gap:12px;margin-bottom:12px;">
+          <div style="width:48px;background:#1e293b;border-radius:12px;padding:12px 8px;display:flex;flex-direction:column;align-items:center;gap:12px;border:1px solid #334155;">
+            <div style="width:28px;height:28px;background:#3b82f6;border-radius:8px;"></div>
+            <div style="width:24px;height:24px;background:#334155;border-radius:6px;"></div>
+            <div style="width:24px;height:24px;background:#334155;border-radius:6px;"></div>
+          </div>
+          <div style="flex:1;">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+              <div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:#64748b;text-transform:uppercase;">Revenue</div>
+                <div style="font-size:18px;font-weight:800;color:#22c55e;margin-top:4px;">$4,280</div>
+              </div>
+              <div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:#64748b;text-transform:uppercase;">Expenses</div>
+                <div style="font-size:18px;font-weight:800;color:#f97316;margin-top:4px;">$1,920</div>
+              </div>
+            </div>
+            <div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:12px;">
+              <div style="font-size:10px;color:#64748b;margin-bottom:8px;">RECENT</div>
+              <div style="padding:6px 0;border-bottom:1px solid #1e293b;display:flex;justify-content:space-between;"><span>Amazon</span><span style="color:#f97316;">-$42.99</span></div>
+              <div style="padding:6px 0;display:flex;justify-content:space-between;"><span>Client A</span><span style="color:#22c55e;">+$1,200</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. Dense Data-Driven</h3>
+      <p>Icon-only sidebar, compact cards with thin borders, dark-first aesthetic. Think Vercel/GitHub dashboard. Information-dense &mdash; every pixel earns its place. Great for power users.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:24px;background:linear-gradient(135deg,#fafaf9,#f5f5f4);">
+      <!-- Warm Minimal mockup -->
+      <div style="font-family:Georgia,serif;font-size:13px;color:#292524;">
+        <div style="margin-bottom:16px;">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:16px;padding-bottom:8px;border-bottom:2px solid #292524;">
+            <div style="font-size:18px;font-weight:700;letter-spacing:-0.5px;">Receiptory</div>
+            <div style="font-family:system-ui;font-size:11px;display:flex;gap:16px;color:#78716c;">
+              <span>Documents</span><span>Export</span><span>Settings</span>
+            </div>
+          </div>
+          <div style="font-size:24px;font-weight:700;margin-bottom:4px;letter-spacing:-0.5px;">Good morning.</div>
+          <div style="color:#78716c;font-size:13px;margin-bottom:16px;">3 documents need your attention</div>
+          <div style="display:flex;gap:12px;">
+            <div style="flex:1;padding:16px;border:1.5px solid #d6d3d1;border-radius:4px;">
+              <div style="font-family:system-ui;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#a8a29e;margin-bottom:6px;">This month</div>
+              <div style="font-size:28px;font-weight:700;">47</div>
+            </div>
+            <div style="flex:1;padding:16px;border:1.5px solid #d6d3d1;border-radius:4px;">
+              <div style="font-family:system-ui;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#a8a29e;margin-bottom:6px;">Total</div>
+              <div style="font-size:28px;font-weight:700;">$4,280</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. Warm Minimal</h3>
+      <p>Serif accents, stone tones, thin borders, lots of air. Think Stripe docs or a premium banking app. Elegant and calm &mdash; feels expensive without trying. Top nav instead of sidebar on desktop.</p>
+    </div>
+  </div>
+</div>
