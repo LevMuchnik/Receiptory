@@ -26,6 +26,7 @@ export default function DocumentsPage() {
     if (filters.statuses.length > 0) params.set("status", filters.statuses.join(","));
     if (filters.category_ids.length > 0) params.set("category_id", filters.category_ids.join(","));
     if (filters.document_types.length > 0) params.set("document_type", filters.document_types.join(","));
+    if (filters.section) params.set("section", filters.section);
     if (filters.date_from) params.set("date_from", filters.date_from);
     if (filters.date_to) params.set("date_to", filters.date_to);
     if (quickFilter === "needs_review") params.set("status", "needs_review");

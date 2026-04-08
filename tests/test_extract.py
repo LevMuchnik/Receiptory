@@ -15,7 +15,7 @@ SAMPLE_LLM_RESPONSE = json.dumps({
 })
 
 def test_build_prompt_includes_business_info():
-    prompt = build_extraction_prompt(business_names=["Acme Corp", 'אקמה בע"מ'], business_addresses=["123 Main St", "רחוב ראשי 123"], business_tax_ids=["515000000"], categories=[{"name": "office_supplies", "description": "Office equipment and supplies"}, {"name": "travel", "description": "Travel expenses"}])
+    prompt = build_extraction_prompt(business_names=["Acme Corp", 'אקמה בע"מ'], business_addresses=["123 Main St", "רחוב ראשי 123"], business_tax_ids=["515000000"], expense_categories=[{"name": "office_supplies", "description": "Office equipment and supplies"}, {"name": "travel", "description": "Travel expenses"}], issued_categories=[])
     assert "Acme Corp" in prompt
     assert "515000000" in prompt
     assert "office_supplies" in prompt
@@ -53,8 +53,35 @@ def test_extract_document_calls_llm(mock_completion):
     mock_response.usage.prompt_tokens = 1000
     mock_response.usage.completion_tokens = 500
     mock_completion.return_value = mock_response
-    result = extract_document(page_images=[b"fake-png-bytes"], model="gemini/gemini-3-flash-preview", api_key="test-key", business_names=["Acme"], business_addresses=["123 Main"], business_tax_ids=["515000000"], categories=[{"name": "office_supplies", "description": "Office stuff"}])
+    result = extract_document(page_images=[b"fake-png-bytes"], model="gemini/gemini-3-flash-preview", api_key="test-key", business_names=["Acme"], business_addresses=["123 Main"], business_tax_ids=["515000000"], expense_categories=[{"name": "office_supplies", "description": "Office stuff"}], issued_categories=[{"name": "Tax Invoice", "description": "Standard invoice"}])
     assert result.extraction.vendor_name == "Office Depot"
     assert result.tokens_in == 1000
     assert result.tokens_out == 500
     mock_completion.assert_called_once()
+
+
+def test_build_prompt_separates_expense_and_issued_categories():
+    prompt = build_extraction_prompt(
+        business_names=["Acme"],
+        business_addresses=["123 Main"],
+        business_tax_ids=["515000000"],
+        expense_categories=[
+            {"name": "Office Supplies", "description": "Office stuff"},
+            {"name": "Travel", "description": "Travel expenses"},
+        ],
+        issued_categories=[
+            {"name": "Tax Invoice", "description": "Standard invoice with VAT"},
+            {"name": "Credit Note", "description": "Cancels a previous invoice"},
+        ],
+    )
+    assert "Expense Categories" in prompt
+    assert "Issued Document Categories" in prompt
+    assert "Office Supplies" in prompt
+    assert "Tax Invoice" in prompt
+    assert "Credit Note" in prompt
+    # Verify they're in separate sections
+    expense_pos = prompt.index("Expense Categories")
+    issued_pos = prompt.index("Issued Document Categories")
+    office_pos = prompt.index("Office Supplies")
+    tax_inv_pos = prompt.index("Tax Invoice")
+    assert expense_pos < office_pos < issued_pos < tax_inv_pos

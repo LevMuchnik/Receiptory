@@ -73,12 +73,15 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
     if body.document_type:
         conditions.append("d.document_type = ?")
         params.append(body.document_type)
+    if body.section:
+        conditions.append("c.section = ?")
+        params.append(body.section)
 
     where = " AND ".join(conditions)
 
     with get_connection() as conn:
         rows = conn.execute(
-            f"""SELECT d.*, c.name as category_name
+            f"""SELECT d.*, c.name as category_name, c.section as category_section
                 FROM documents d
                 LEFT JOIN categories c ON d.category_id = c.id
                 WHERE {where}
@@ -89,14 +92,15 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
     # Build zip in memory
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Add PDFs organized by category
+        # Add PDFs organized by section/category
         for row in rows:
+            section = row["category_section"] or "other"
             cat_name = row["category_name"] or "uncategorized"
             stored = row["stored_filename"]
             if stored:
                 pdf_path = os.path.join(filed_dir, stored)
                 if os.path.exists(pdf_path):
-                    zf.write(pdf_path, f"{cat_name}/{stored}")
+                    zf.write(pdf_path, f"{section}/{cat_name}/{stored}")
 
         # Add CSV metadata
         csv_buf = io.StringIO()

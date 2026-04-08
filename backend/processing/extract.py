@@ -43,8 +43,9 @@ class LLMExtractionResult:
     model: str
 
 
-def build_extraction_prompt(business_names: list[str], business_addresses: list[str], business_tax_ids: list[str], categories: list[dict[str, str]]) -> str:
-    category_list = "\n".join(f"  - {c['name']}: {c.get('description', '')}" for c in categories)
+def build_extraction_prompt(business_names: list[str], business_addresses: list[str], business_tax_ids: list[str], expense_categories: list[dict[str, str]], issued_categories: list[dict[str, str]]) -> str:
+    expense_list = "\n".join(f"  - {c['name']}: {c.get('description', '')}" for c in expense_categories)
+    issued_list = "\n".join(f"  - {c['name']}: {c.get('description', '')}" for c in issued_categories)
     return f"""You are a document data extraction system. Analyze the provided document image(s) and extract all structured data.
 
 ## User's Business Information (for identifying issued invoices vs expense receipts)
@@ -54,8 +55,13 @@ def build_extraction_prompt(business_names: list[str], business_addresses: list[
 
 If the document's issuer (vendor) matches any of the above business names, addresses, or tax IDs, classify it as "issued_invoice". Otherwise, classify as "expense_receipt" for financial documents or "other_document" for non-financial documents.
 
-## Available Categories
-{category_list}
+## Expense Categories (use when document is NOT issued by the user's business)
+{expense_list}
+
+## Issued Document Categories (use when document IS issued by the user's business)
+{issued_list}
+
+Pick the category from the appropriate section above based on whether the document is issued or received.
 
 ## Required Output
 Return a single JSON object with these fields:
@@ -78,7 +84,7 @@ Return a single JSON object with these fields:
 - additional_fields: array of {{"key": "...", "value": "..."}} for any other extracted data
 - raw_extracted_text: full OCR text of the entire document
 - document_type: "expense_receipt", "issued_invoice", or "other_document"
-- category: one of the category names listed above
+- category: one of the category names listed above (from the appropriate section)
 - extraction_confidence: 0.0 to 1.0 confidence score
 
 Return ONLY the JSON object, no markdown fences or explanation."""
@@ -114,8 +120,8 @@ def litellm_completion(**kwargs):
     return litellm.completion(**kwargs)
 
 
-def extract_document(page_images: list[bytes], model: str, api_key: str, business_names: list[str], business_addresses: list[str], business_tax_ids: list[str], categories: list[dict[str, str]], temperature: float = 0.0, max_tokens: int = 8192) -> LLMExtractionResult:
-    prompt = build_extraction_prompt(business_names=business_names, business_addresses=business_addresses, business_tax_ids=business_tax_ids, categories=categories)
+def extract_document(page_images: list[bytes], model: str, api_key: str, business_names: list[str], business_addresses: list[str], business_tax_ids: list[str], expense_categories: list[dict[str, str]], issued_categories: list[dict[str, str]], temperature: float = 0.0, max_tokens: int = 8192) -> LLMExtractionResult:
+    prompt = build_extraction_prompt(business_names=business_names, business_addresses=business_addresses, business_tax_ids=business_tax_ids, expense_categories=expense_categories, issued_categories=issued_categories)
     content: list[dict] = [{"type": "text", "text": prompt}]
     for img_bytes in page_images:
         b64 = base64.b64encode(img_bytes).decode("utf-8")

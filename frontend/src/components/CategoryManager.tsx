@@ -24,6 +24,7 @@ interface Category {
   id: number;
   name: string;
   description: string | null;
+  section: string | null;
   is_system: boolean;
   display_order: number | null;
   document_count: number;
@@ -168,8 +169,11 @@ export default function CategoryManager() {
 
   useEffect(() => { load(); }, [load]);
 
-  const userCats = categories.filter((c) => !c.is_system);
+  const expenseCats = categories.filter((c) => !c.is_system && c.section === "expense");
+  const issuedCats = categories.filter((c) => !c.is_system && c.section === "issued");
   const systemCats = categories.filter((c) => c.is_system);
+  const [activeSection, setActiveSection] = useState<"expense" | "issued">("expense");
+  const userCats = activeSection === "expense" ? expenseCats : issuedCats;
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -181,13 +185,15 @@ export default function CategoryManager() {
     await api.patch("/categories/reorder", { order });
   };
 
+  const otherSectionCats = activeSection === "expense" ? issuedCats : expenseCats;
+
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
     const oldIndex = userCats.findIndex((c) => c.id === active.id);
     const newIndex = userCats.findIndex((c) => c.id === over.id);
     const reordered = arrayMove(userCats, oldIndex, newIndex);
-    setCategories([...reordered, ...systemCats]);
+    setCategories([...reordered, ...otherSectionCats, ...systemCats]);
     await persistOrder(reordered);
   };
 
@@ -195,7 +201,7 @@ export default function CategoryManager() {
     const idx = userCats.findIndex((c) => c.id === id);
     if (idx <= 0) return;
     const reordered = arrayMove(userCats, idx, idx - 1);
-    setCategories([...reordered, ...systemCats]);
+    setCategories([...reordered, ...otherSectionCats, ...systemCats]);
     await persistOrder(reordered);
   };
 
@@ -203,7 +209,7 @@ export default function CategoryManager() {
     const idx = userCats.findIndex((c) => c.id === id);
     if (idx < 0 || idx >= userCats.length - 1) return;
     const reordered = arrayMove(userCats, idx, idx + 1);
-    setCategories([...reordered, ...systemCats]);
+    setCategories([...reordered, ...otherSectionCats, ...systemCats]);
     await persistOrder(reordered);
   };
 
@@ -245,7 +251,7 @@ export default function CategoryManager() {
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
-    await api.post("/categories", { name: newName, description: newDesc || null });
+    await api.post("/categories", { name: newName, description: newDesc || null, section: activeSection });
     setNewName("");
     setNewDesc("");
     setAdding(false);
@@ -259,6 +265,31 @@ export default function CategoryManager() {
 
   return (
     <div className="space-y-4">
+      {/* Section tabs */}
+      <div className="flex rounded-md border border-input overflow-hidden w-fit">
+        <button
+          type="button"
+          onClick={() => setActiveSection("expense")}
+          className={`px-4 py-2 text-sm font-medium transition-colors ${
+            activeSection === "expense"
+              ? "bg-primary text-primary-foreground"
+              : "bg-background hover:bg-accent"
+          }`}
+        >
+          Expense Categories ({expenseCats.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveSection("issued")}
+          className={`px-4 py-2 text-sm font-medium transition-colors ${
+            activeSection === "issued"
+              ? "bg-blue-600 text-white"
+              : "bg-background hover:bg-accent"
+          }`}
+        >
+          Issued Document Types ({issuedCats.length})
+        </button>
+      </div>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>

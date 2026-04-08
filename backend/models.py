@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Any
+from typing import Any, Literal
 
 
 # === Auth ===
@@ -23,6 +23,7 @@ class AuthMeResponse(BaseModel):
 class CategoryCreate(BaseModel):
     name: str
     description: str | None = None
+    section: Literal["expense", "issued", "other"] = "expense"
 
 
 class CategoryUpdate(BaseModel):
@@ -44,6 +45,7 @@ class CategoryResponse(BaseModel):
     id: int
     name: str
     description: str | None
+    section: str | None
     is_system: bool
     is_deleted: bool
     display_order: int | None
@@ -100,6 +102,7 @@ class DocumentResponse(BaseModel):
 
     category_id: int | None
     category_name: str | None = None
+    category_section: str | None = None
     status: str
 
     extraction_confidence: float | None
@@ -162,6 +165,7 @@ class ExportRequest(BaseModel):
     status: str | None = None
     category_id: int | None = None
     document_type: str | None = None
+    section: str | None = None
     document_ids: list[int] | None = None
 
 

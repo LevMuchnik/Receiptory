@@ -48,15 +48,15 @@ def reorder_categories(body: ReorderRequest, username: str = Depends(require_aut
 def create_category(body: CategoryCreate, username: str = Depends(require_auth)):
     with get_connection() as conn:
         existing = conn.execute(
-            "SELECT id FROM categories WHERE name = ?", (body.name,)
+            "SELECT id FROM categories WHERE name = ? AND section = ?", (body.name, body.section)
         ).fetchone()
         if existing:
-            raise HTTPException(status_code=400, detail="Category name already exists")
+            raise HTTPException(status_code=400, detail="Category name already exists in this section")
 
         conn.execute(
-            """INSERT INTO categories (name, description)
-               VALUES (?, ?)""",
-            (body.name, body.description),
+            """INSERT INTO categories (name, description, section)
+               VALUES (?, ?, ?)""",
+            (body.name, body.description, body.section),
         )
         cat_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         row = conn.execute("SELECT * FROM categories WHERE id = ?", (cat_id,)).fetchone()

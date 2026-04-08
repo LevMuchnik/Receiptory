@@ -49,7 +49,7 @@ def _export_jsonl(output_path: str) -> None:
     """Export all document metadata as JSONL."""
     with get_connection() as conn:
         rows = conn.execute(
-            """SELECT d.*, c.name as category_name
+            """SELECT d.*, c.name as category_name, c.section as category_section
                FROM documents d
                LEFT JOIN categories c ON d.category_id = c.id"""
         ).fetchall()

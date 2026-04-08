@@ -7,7 +7,11 @@ router = APIRouter()
 
 
 @router.get("/stats/dashboard")
-def dashboard_stats(username: str = Depends(require_auth)):
+def dashboard_stats(
+    date_from: str | None = None,
+    date_to: str | None = None,
+    username: str = Depends(require_auth),
+):
     with get_connection() as conn:
         processed = conn.execute(
             """SELECT COUNT(*) as c FROM documents
@@ -19,13 +23,31 @@ def dashboard_stats(username: str = Depends(require_auth)):
             "SELECT COUNT(*) as c FROM documents WHERE status = 'needs_review' AND is_deleted = 0"
         ).fetchone()["c"]
 
+        # Expenses only: exclude issued documents (section != 'issued')
+        expense_conditions = [
+            "d.status = 'processed'",
+            "d.is_deleted = 0",
+            "d.total_amount IS NOT NULL",
+            "(c.section IS NULL OR c.section != 'issued')",
+            "d.document_type != 'issued_invoice'",
+        ]
+        params: list = []
+        if date_from:
+            expense_conditions.append("d.receipt_date >= ?")
+            params.append(date_from)
+        if date_to:
+            expense_conditions.append("d.receipt_date <= ?")
+            params.append(date_to)
+
+        where = " AND ".join(expense_conditions)
         expenses = conn.execute(
-            """SELECT c.name, SUM(d.total_amount) as total
+            f"""SELECT c.name, SUM(d.total_amount) as total
                FROM documents d
                LEFT JOIN categories c ON d.category_id = c.id
-               WHERE d.status = 'processed' AND d.is_deleted = 0 AND d.total_amount IS NOT NULL
+               WHERE {where}
                GROUP BY c.name
-               ORDER BY total DESC"""
+               ORDER BY total DESC""",
+            params,
         ).fetchall()
 
         recent = conn.execute(

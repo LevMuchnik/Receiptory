@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
 
-interface Category { id: number; name: string; }
+interface Category { id: number; name: string; section: string | null; is_system: boolean; }
 
 interface Props {
   doc: any;
@@ -40,7 +40,26 @@ export default function MetadataForm({ doc, onSave }: Props) {
     api.get<Category[]>("/categories").then(setCategories);
   }, []);
 
-  const update = (key: string, value: string) => setForm({ ...form, [key]: value });
+  const update = (key: string, value: string) => {
+    if (key === "document_type" && value !== form.document_type) {
+      // Reset category when document type changes (section mismatch)
+      setForm({ ...form, [key]: value, category_id: "" });
+    } else {
+      setForm({ ...form, [key]: value });
+    }
+  };
+
+  const sectionForType = (docType: string) => {
+    if (docType === "issued_invoice") return "issued";
+    if (docType === "other_document") return "other";
+    return "expense";
+  };
+
+  const filteredCategories = categories.filter((c) => {
+    if (c.is_system) return false;
+    if (!form.document_type) return true;
+    return c.section === sectionForType(form.document_type);
+  });
 
   const handleSave = () => {
     const updates: any = {};
@@ -85,7 +104,7 @@ export default function MetadataForm({ doc, onSave }: Props) {
           <Select value={form.category_id} onValueChange={(v) => update("category_id", v ?? "")}>
             <SelectTrigger><SelectValue placeholder="Select category" /></SelectTrigger>
             <SelectContent>
-              {categories.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
+              {filteredCategories.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>

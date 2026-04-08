@@ -123,3 +123,30 @@ def test_list_excludes_deleted(authed_client, db_path):
         _insert_doc(conn, file_hash="h2", is_deleted=1)
     resp = authed_client.get("/api/documents")
     assert resp.json()["total"] == 1
+
+
+def test_list_filter_by_section(authed_client, db_path):
+    with get_connection() as conn:
+        # Get an expense category and an issued category
+        expense_cat = conn.execute("SELECT id FROM categories WHERE section = 'expense' AND is_system = 0 LIMIT 1").fetchone()
+        issued_cat = conn.execute("SELECT id FROM categories WHERE section = 'issued' AND is_system = 0 LIMIT 1").fetchone()
+        _insert_doc(conn, file_hash="h_expense", category_id=expense_cat["id"])
+        _insert_doc(conn, file_hash="h_issued", category_id=issued_cat["id"])
+
+    resp = authed_client.get("/api/documents?section=expense")
+    assert resp.json()["total"] == 1
+    assert resp.json()["documents"][0]["category_section"] == "expense"
+
+    resp = authed_client.get("/api/documents?section=issued")
+    assert resp.json()["total"] == 1
+    assert resp.json()["documents"][0]["category_section"] == "issued"
+
+
+def test_document_response_includes_category_section(authed_client, db_path):
+    with get_connection() as conn:
+        issued_cat = conn.execute("SELECT id FROM categories WHERE section = 'issued' AND is_system = 0 LIMIT 1").fetchone()
+        doc_id = _insert_doc(conn, file_hash="h_section_test", category_id=issued_cat["id"])
+
+    resp = authed_client.get(f"/api/documents/{doc_id}")
+    assert resp.status_code == 200
+    assert resp.json()["category_section"] == "issued"

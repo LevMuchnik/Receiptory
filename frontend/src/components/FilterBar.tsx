@@ -7,6 +7,8 @@ import { api } from "@/lib/api";
 interface Category {
   id: number;
   name: string;
+  section: string | null;
+  is_system: boolean;
 }
 
 export interface Filters {
@@ -14,6 +16,7 @@ export interface Filters {
   statuses: string[];
   category_ids: string[];
   document_types: string[];
+  section: string;
   date_from: string;
   date_to: string;
 }
@@ -23,6 +26,7 @@ export const defaultFilters: Filters = {
   statuses: [],
   category_ids: [],
   document_types: [],
+  section: "",
   date_from: "",
   date_to: "",
 };
@@ -44,6 +48,12 @@ const TYPE_OPTIONS = [
   { value: "expense_receipt", label: "Expense Receipt" },
   { value: "issued_invoice", label: "Issued Invoice" },
   { value: "other_document", label: "Other" },
+];
+
+const SECTION_OPTIONS = [
+  { value: "", label: "All" },
+  { value: "expense", label: "Expenses" },
+  { value: "issued", label: "Issued" },
 ];
 
 function MultiSelect({
@@ -135,13 +145,47 @@ export default function FilterBar({ filters, onChange }: FilterBarProps) {
     api.get<Category[]>("/categories").then(setCategories);
   }, []);
 
-  const categoryOptions = categories.map((c) => ({
+  // Filter category options by active section chip
+  const filteredCategories = categories.filter((c) => {
+    if (c.is_system) return false;
+    if (!filters.section) return true;
+    return c.section === filters.section;
+  });
+
+  const categoryOptions = filteredCategories.map((c) => ({
     value: String(c.id),
     label: c.name,
   }));
 
+  const handleSectionChange = (section: string) => {
+    // Clear stale category selections when section changes
+    const validCatIds = new Set(
+      categories
+        .filter((c) => !c.is_system && (!section || c.section === section))
+        .map((c) => String(c.id))
+    );
+    const cleanedCatIds = filters.category_ids.filter((id) => validCatIds.has(id));
+    onChange({ ...filters, section, category_ids: cleanedCatIds });
+  };
+
   return (
     <div className="flex flex-wrap gap-2 items-end">
+      <div className="flex rounded-md border border-input overflow-hidden">
+        {SECTION_OPTIONS.map((opt) => (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => handleSectionChange(opt.value)}
+            className={`px-3 py-1.5 text-sm font-medium transition-colors ${
+              filters.section === opt.value
+                ? "bg-primary text-primary-foreground"
+                : "bg-background hover:bg-accent"
+            }`}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
       <Input
         placeholder="Search..."
         value={filters.search}

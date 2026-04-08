@@ -39,6 +39,7 @@ def list_documents(
     status: str | None = None,
     category_id: str | None = None,
     document_type: str | None = None,
+    section: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     channel: str | None = None,
@@ -68,6 +69,9 @@ def list_documents(
         placeholders = ",".join("?" * len(types))
         conditions.append(f"d.document_type IN ({placeholders})")
         params.extend(types)
+    if section:
+        conditions.append("d.category_id IN (SELECT id FROM categories WHERE section = ?)")
+        params.append(section)
     if date_from:
         conditions.append("d.receipt_date >= ?")
         params.append(date_from)
@@ -119,7 +123,7 @@ def list_documents(
 
         offset = (page - 1) * page_size
         rows = conn.execute(
-            f"""SELECT d.*, c.name as category_name
+            f"""SELECT d.*, c.name as category_name, c.section as category_section
                 FROM documents d
                 LEFT JOIN categories c ON d.category_id = c.id
                 WHERE {where}
@@ -154,7 +158,7 @@ def list_duplicates(username: str = Depends(require_auth)):
         ids = [int(x) for x in row["ids"].split(",")]
         with get_connection() as conn:
             docs = conn.execute(
-                f"SELECT d.*, c.name as category_name FROM documents d LEFT JOIN categories c ON d.category_id = c.id WHERE d.id IN ({','.join('?' * len(ids))})",
+                f"SELECT d.*, c.name as category_name, c.section as category_section FROM documents d LEFT JOIN categories c ON d.category_id = c.id WHERE d.id IN ({','.join('?' * len(ids))})",
                 ids,
             ).fetchall()
         groups.append({
@@ -169,12 +173,25 @@ def list_duplicates(username: str = Depends(require_auth)):
 def get_document(doc_id: int, username: str = Depends(require_auth)):
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT d.*, c.name as category_name FROM documents d LEFT JOIN categories c ON d.category_id = c.id WHERE d.id = ?",
+            "SELECT d.*, c.name as category_name, c.section as category_section FROM documents d LEFT JOIN categories c ON d.category_id = c.id WHERE d.id = ?",
             (doc_id,),
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Document not found")
-    return _row_to_response(row)
+    result = _row_to_response(row)
+    # Add neighbor IDs for prev/next navigation
+    with get_connection() as conn:
+        prev_row = conn.execute(
+            "SELECT id FROM documents WHERE is_deleted = 0 AND (submission_date > ? OR (submission_date = ? AND id < ?)) ORDER BY submission_date ASC, id DESC LIMIT 1",
+            (row["submission_date"], row["submission_date"], doc_id),
+        ).fetchone()
+        next_row = conn.execute(
+            "SELECT id FROM documents WHERE is_deleted = 0 AND (submission_date < ? OR (submission_date = ? AND id > ?)) ORDER BY submission_date DESC, id ASC LIMIT 1",
+            (row["submission_date"], row["submission_date"], doc_id),
+        ).fetchone()
+    result["prev_id"] = prev_row["id"] if prev_row else None
+    result["next_id"] = next_row["id"] if next_row else None
+    return result
 
 
 @router.patch("/documents/{doc_id}")
@@ -211,7 +228,7 @@ def edit_document(doc_id: int, update: DocumentUpdate, username: str = Depends(r
             values,
         )
         row = conn.execute(
-            "SELECT d.*, c.name as category_name FROM documents d LEFT JOIN categories c ON d.category_id = c.id WHERE d.id = ?",
+            "SELECT d.*, c.name as category_name, c.section as category_section FROM documents d LEFT JOIN categories c ON d.category_id = c.id WHERE d.id = ?",
             (doc_id,),
         ).fetchone()
 

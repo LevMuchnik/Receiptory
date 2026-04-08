@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
+import { Input } from "@/components/ui/input";
 import { useFileDrop } from "@/lib/useFileDrop";
 
 interface DashboardData {
@@ -34,12 +35,57 @@ const statusIcon = (status: string) => {
   }
 };
 
+type TimeFramePreset = "this_month" | "last_month" | "last_3_months" | "this_year" | "custom";
+
+function getDateRange(preset: TimeFramePreset, customFrom: string, customTo: string): { date_from: string; date_to: string } {
+  const now = new Date();
+  if (preset === "custom") return { date_from: customFrom, date_to: customTo };
+  if (preset === "this_month") {
+    const from = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+    return { date_from: from, date_to: "" };
+  }
+  if (preset === "last_month") {
+    const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const end = new Date(now.getFullYear(), now.getMonth(), 0);
+    return { date_from: d.toISOString().slice(0, 10), date_to: end.toISOString().slice(0, 10) };
+  }
+  if (preset === "last_3_months") {
+    const d = new Date(now.getFullYear(), now.getMonth() - 2, 1);
+    return { date_from: d.toISOString().slice(0, 10), date_to: "" };
+  }
+  // this_year
+  return { date_from: `${now.getFullYear()}-01-01`, date_to: "" };
+}
+
+const STORAGE_KEY = "receiptory_dashboard_timeframe";
+
+function loadTimeFrame(): { preset: TimeFramePreset; customFrom: string; customTo: string } {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) return JSON.parse(saved);
+  } catch {}
+  return { preset: "this_month", customFrom: "", customTo: "" };
+}
+
 export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardData | null>(null);
   const [queue, setQueue] = useState<QueueData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [backingUp, setBackingUp] = useState(false);
   const [uploadCount, setUploadCount] = useState<number | null>(null);
+
+  const [timeFrame, setTimeFrame] = useState(loadTimeFrame);
+
+  const saveTimeFrame = (update: Partial<typeof timeFrame>) => {
+    const next = { ...timeFrame, ...update };
+    setTimeFrame(next);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  };
+
+  const dateRange = useMemo(
+    () => getDateRange(timeFrame.preset, timeFrame.customFrom, timeFrame.customTo),
+    [timeFrame]
+  );
 
   const handleDrop = useCallback(async (files: File[]) => {
     await api.upload(files);
@@ -49,13 +95,17 @@ export default function DashboardPage() {
   const { dragging, ...dropHandlers } = useFileDrop(handleDrop);
 
   useEffect(() => {
-    api.get<DashboardData>("/stats/dashboard")
+    const params = new URLSearchParams();
+    if (dateRange.date_from) params.set("date_from", dateRange.date_from);
+    if (dateRange.date_to) params.set("date_to", dateRange.date_to);
+    const qs = params.toString();
+    api.get<DashboardData>(`/stats/dashboard${qs ? `?${qs}` : ""}`)
       .then(setStats)
       .catch((e) => setError(e.message || "Failed to load dashboard"));
     api.get<QueueData>("/queue/status")
       .then(setQueue)
       .catch(() => {});
-  }, []);
+  }, [dateRange]);
 
   const triggerBackup = async () => {
     setBackingUp(true);
@@ -148,8 +198,48 @@ export default function DashboardPage() {
 
         {/* Expense Distribution chart */}
         <div className="lg:col-span-8 bg-card rounded-xl shadow-[0_2px_8px_rgba(25,28,30,0.04)] p-6 relative overflow-hidden">
-          <div className="flex justify-between items-center mb-6">
+          <div className="flex justify-between items-center mb-6 flex-wrap gap-3">
             <h3 className="font-bold font-headline text-primary">Expense Distribution</h3>
+            <div className="flex items-center gap-2 flex-wrap">
+              {(
+                [
+                  { key: "this_month", label: "This Month" },
+                  { key: "last_month", label: "Last Month" },
+                  { key: "last_3_months", label: "3 Months" },
+                  { key: "this_year", label: "Year" },
+                  { key: "custom", label: "Custom" },
+                ] as { key: TimeFramePreset; label: string }[]
+              ).map((opt) => (
+                <button
+                  key={opt.key}
+                  onClick={() => saveTimeFrame({ preset: opt.key })}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                    timeFrame.preset === opt.key
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground hover:bg-accent"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+              {timeFrame.preset === "custom" && (
+                <div className="flex items-center gap-1.5">
+                  <Input
+                    type="date"
+                    value={timeFrame.customFrom}
+                    onChange={(e) => saveTimeFrame({ customFrom: e.target.value })}
+                    className="h-7 w-32 text-xs"
+                  />
+                  <span className="text-xs text-muted-foreground">to</span>
+                  <Input
+                    type="date"
+                    value={timeFrame.customTo}
+                    onChange={(e) => saveTimeFrame({ customTo: e.target.value })}
+                    className="h-7 w-32 text-xs"
+                  />
+                </div>
+              )}
+            </div>
           </div>
           {categoryData.length === 0 ? (
             <div className="flex items-center justify-center h-40 text-muted-foreground text-sm">

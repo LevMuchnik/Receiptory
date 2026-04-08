@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -24,6 +24,23 @@ export default function DocumentDetailPage() {
   useEffect(() => {
     if (id) api.get(`/documents/${id}`).then(setDoc);
   }, [id]);
+
+  const goBack = useCallback(() => navigate("/documents"), [navigate]);
+  const goPrev = useCallback(() => { if (doc?.prev_id) navigate(`/documents/${doc.prev_id}`); }, [doc, navigate]);
+  const goNext = useCallback(() => { if (doc?.next_id) navigate(`/documents/${doc.next_id}`); }, [doc, navigate]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Don't intercept when typing in inputs
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key === "Escape") goBack();
+      if (e.key === "ArrowLeft" || e.key === "k") goPrev();
+      if (e.key === "ArrowRight" || e.key === "j") goNext();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [goBack, goPrev, goNext]);
 
   if (!doc) return (
     <div className="flex items-center gap-3 text-muted-foreground">
@@ -60,11 +77,30 @@ export default function DocumentDetailPage() {
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-center gap-4">
           <button
-            onClick={() => navigate("/documents")}
+            onClick={goBack}
             className="p-2 hover:bg-card rounded-lg transition-colors"
+            title="Back to list (Esc)"
           >
             <span className="material-symbols-outlined text-muted-foreground">arrow_back</span>
           </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={goPrev}
+              disabled={!doc.prev_id}
+              className="p-1.5 hover:bg-card rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Previous document (←)"
+            >
+              <span className="material-symbols-outlined text-sm text-muted-foreground">chevron_left</span>
+            </button>
+            <button
+              onClick={goNext}
+              disabled={!doc.next_id}
+              className="p-1.5 hover:bg-card rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Next document (→)"
+            >
+              <span className="material-symbols-outlined text-sm text-muted-foreground">chevron_right</span>
+            </button>
+          </div>
           <div>
             <h1 className="text-xl font-headline font-bold text-primary truncate max-w-xs md:max-w-lg">
               {doc.vendor_name || doc.original_filename}

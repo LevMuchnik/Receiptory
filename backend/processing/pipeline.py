@@ -60,11 +60,12 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
     business_tax_ids = get_setting("business_tax_ids")
     confidence_threshold = get_setting("confidence_threshold")
     with get_connection() as conn:
-        cats = conn.execute("SELECT name, description FROM categories WHERE is_deleted = 0 AND is_system = 0").fetchall()
-    categories = [{"name": c["name"], "description": c["description"] or ""} for c in cats]
+        cats = conn.execute("SELECT name, description, section FROM categories WHERE is_deleted = 0 AND is_system = 0").fetchall()
+    expense_categories = [{"name": c["name"], "description": c["description"] or ""} for c in cats if c["section"] == "expense"]
+    issued_categories = [{"name": c["name"], "description": c["description"] or ""} for c in cats if c["section"] == "issued"]
     temperature = get_setting("llm_temperature")
     max_tokens = get_setting("llm_max_tokens")
-    llm_result = extract_document(page_images=page_images, model=model, api_key=api_key, business_names=business_names, business_addresses=business_addresses, business_tax_ids=business_tax_ids, categories=categories, temperature=temperature, max_tokens=max_tokens)
+    llm_result = extract_document(page_images=page_images, model=model, api_key=api_key, business_names=business_names, business_addresses=business_addresses, business_tax_ids=business_tax_ids, expense_categories=expense_categories, issued_categories=issued_categories, temperature=temperature, max_tokens=max_tokens)
     ext = llm_result.extraction
     doc_type = ext.document_type
     if ext.vendor_tax_id and ext.vendor_tax_id in business_tax_ids:
@@ -75,11 +76,20 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
     stored_filename = generate_stored_filename(receipt_date=ext.receipt_date, vendor_receipt_id=ext.vendor_receipt_id, file_hash=file_hash)
     save_filed(pdf_path, stored_filename, data_dir)
     category_id = None
+    expected_section = "issued" if doc_type == "issued_invoice" else ("other" if doc_type == "other_document" else "expense")
     if ext.category_name:
         with get_connection() as conn:
-            cat_row = conn.execute("SELECT id FROM categories WHERE name = ? AND is_deleted = 0", (ext.category_name,)).fetchone()
+            cat_row = conn.execute("SELECT id, section FROM categories WHERE name = ? AND section = ? AND is_deleted = 0", (ext.category_name, expected_section)).fetchone()
             if cat_row:
                 category_id = cat_row["id"]
+            else:
+                # Fallback: try without section filter in case LLM returned wrong-section category
+                cat_row = conn.execute("SELECT id, section FROM categories WHERE name = ? AND is_deleted = 0", (ext.category_name,)).fetchone()
+                if cat_row and cat_row["section"] != expected_section:
+                    logger.warning(f"Document {doc_id}: LLM returned category '{ext.category_name}' (section={cat_row['section']}) but expected section={expected_section}. Setting category to NULL.")
+                    category_id = None
+                elif cat_row:
+                    category_id = cat_row["id"]
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with get_connection() as conn:
         conn.execute("""UPDATE documents SET document_type = ?, stored_filename = ?, page_count = ?, receipt_date = ?, document_title = ?, vendor_name = ?, vendor_tax_id = ?, vendor_receipt_id = ?, client_name = ?, client_tax_id = ?, description = ?, line_items = ?, subtotal = ?, tax_amount = ?, total_amount = ?, currency = ?, payment_method = ?, payment_identifier = ?, language = ?, additional_fields = ?, raw_extracted_text = ?, category_id = ?, status = ?, extraction_confidence = ?, processing_model = ?, processing_tokens_in = ?, processing_tokens_out = ?, processing_cost_usd = ?, processing_date = ?, processing_attempts = processing_attempts + 1, processing_error = NULL, updated_at = ? WHERE id = ?""",

@@ -15,24 +15,26 @@ def test_wal_mode(db_conn):
 
 def test_migration_version(db_conn):
     version = _get_current_version(db_conn)
-    assert version == 2
+    assert version == 5
 
 def test_system_categories_seeded(db_conn):
     rows = db_conn.execute("SELECT name FROM categories WHERE is_system = 1 ORDER BY name").fetchall()
     names = [r["name"] for r in rows]
     assert "failed" in names
-    assert "not_a_receipt" in names
+    assert "uncategorized" in names
     assert "pending" in names
     assert "unauthorized_sender" in names
 
 def test_user_categories_seeded(db_conn):
     rows = db_conn.execute("SELECT name FROM categories WHERE is_system = 0 ORDER BY name").fetchall()
     names = [r["name"] for r in rows]
-    assert "office_supplies" in names
-    assert "travel" in names
-    assert "meals" in names
-    assert "utilities" in names
-    assert "other" in names
+    assert "Office & Supplies" in names
+    assert "Travel" in names
+    assert "Utilities" in names
+    assert "Other" in names
+    # Issued categories
+    assert "Tax Invoice" in names
+    assert "Credit Note" in names
 
 def test_idempotent_migration(tmp_data_dir):
     path = str(tmp_data_dir / "receiptory.db")
@@ -40,4 +42,4 @@ def test_idempotent_migration(tmp_data_dir):
     init_db(path)
     with get_connection() as conn:
         count = conn.execute("SELECT COUNT(*) as c FROM categories").fetchone()["c"]
-        assert count == 9  # 4 system + 5 user
+        assert count == 38  # 4 system + 27 expense + 7 issued

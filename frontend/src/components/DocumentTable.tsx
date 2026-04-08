@@ -9,6 +9,7 @@ interface Document {
   currency: string | null;
   status: string;
   category_name: string | null;
+  category_section: string | null;
   original_filename: string;
   submission_date: string;
 }
@@ -129,20 +130,19 @@ export default function DocumentTable({ documents, selected, onSelect, onSelectA
           {/* Category */}
           <div className="col-span-2">
             {doc.category_name ? (
-              <span className="text-xs font-medium text-muted-foreground px-2 py-1 bg-muted rounded-md">{doc.category_name}</span>
+              <span className={`text-xs font-medium px-2 py-1 rounded-md ${
+                doc.category_section === "issued"
+                  ? "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300"
+                  : "bg-muted text-muted-foreground"
+              }`}>{doc.category_name}</span>
             ) : (
               <span className="text-xs text-slate-400">—</span>
             )}
           </div>
 
-          {/* Open icon */}
+          {/* Date */}
           <div className="col-span-1 text-right">
-            <button
-              className="p-1.5 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-muted rounded-lg"
-              onClick={(e) => { e.stopPropagation(); navigate(`/documents/${doc.id}`); }}
-            >
-              <span className="material-symbols-outlined text-muted-foreground hover:text-primary text-base">open_in_new</span>
-            </button>
+            <span className="text-xs text-muted-foreground">{doc.receipt_date || "—"}</span>
           </div>
         </div>
       ))}
