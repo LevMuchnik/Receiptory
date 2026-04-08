@@ -9,3 +9,4 @@ frontend/public/opencv/
 *.egg-info/
 .pytest_cache/
 test_documents/
+.gstack/
