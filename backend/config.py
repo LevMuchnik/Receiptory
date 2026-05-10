@@ -71,6 +71,7 @@ DEFAULTS: dict[str, Any] = {
     "notify_email_backup_ok": False,
     "notify_email_backup_failed": True,
     "notify_email_nothing_found": False,
+    "scanner_active_config": {"detector": "classical", "params": {}},
 }
 
 SENSITIVE_KEYS = {

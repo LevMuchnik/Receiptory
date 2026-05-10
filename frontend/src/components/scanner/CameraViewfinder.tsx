@@ -1,18 +1,31 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useCamera } from "@/lib/useCamera";
-import { detectCorners } from "@/lib/opencv-loader";
+import type { Detector, Quad } from "@/lib/scanner/detector";
+import { TemporalSmoother } from "@/lib/scanner/smoother";
 
 interface CameraViewfinderProps {
-  onCapture: (imageData: ImageData, corners: any | null) => void;
+  detector: Detector;
+  detectorParams: any;
+  onCapture: (imageData: ImageData, corners: Quad | null) => void;
+  onAutoCapture?: () => void;
 }
 
-export default function CameraViewfinder({ onCapture }: CameraViewfinderProps) {
+const DETECTION_SCALE = 0.4;
+
+export default function CameraViewfinder({
+  detector,
+  detectorParams,
+  onCapture,
+  onAutoCapture,
+}: CameraViewfinderProps) {
   const { videoRef, error, ready } = useCamera();
   const overlayRef = useRef<HTMLCanvasElement>(null);
-  const cornersRef = useRef<any>(null);
+  const cornersRef = useRef<Quad | null>(null);
   const [documentDetected, setDocumentDetected] = useState(false);
   const frameCount = useRef(0);
   const detecting = useRef(false);
+  const smoother = useMemo(() => new TemporalSmoother(), []);
+  const lastAutoCaptureRef = useRef(0);
 
   useEffect(() => {
     if (!ready) return;
@@ -25,28 +38,39 @@ export default function CameraViewfinder({ onCapture }: CameraViewfinderProps) {
     const tick = () => {
       frameCount.current++;
 
-      // Detect every 5th frame, skip if previous detection still running
       if (frameCount.current % 5 === 0 && video.videoWidth > 0 && !detecting.current) {
         detecting.current = true;
-        const scale = 0.4;
-        offscreen.width = Math.round(video.videoWidth * scale);
-        offscreen.height = Math.round(video.videoHeight * scale);
+        offscreen.width = Math.round(video.videoWidth * DETECTION_SCALE);
+        offscreen.height = Math.round(video.videoHeight * DETECTION_SCALE);
         const ctx = offscreen.getContext("2d")!;
         ctx.drawImage(video, 0, 0, offscreen.width, offscreen.height);
         const imageData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
+        const diag = Math.hypot(offscreen.width, offscreen.height);
 
-        detectCorners(imageData).then((corners) => {
-          cornersRef.current = corners;
-          setDocumentDetected(!!corners);
-          detecting.current = false;
-        }).catch(() => {
-          cornersRef.current = null;
-          setDocumentDetected(false);
-          detecting.current = false;
-        });
+        detector
+          .detect(imageData, detectorParams)
+          .then((result) => {
+            smoother.push(result, diag);
+            const ema = smoother.getEMA();
+            cornersRef.current = ema;
+            setDocumentDetected(!!ema);
+
+            if (ema && onAutoCapture && smoother.shouldAutoCapture()) {
+              const now = performance.now();
+              if (now - lastAutoCaptureRef.current > 2000) {
+                lastAutoCaptureRef.current = now;
+                onAutoCapture();
+              }
+            }
+            detecting.current = false;
+          })
+          .catch(() => {
+            cornersRef.current = null;
+            setDocumentDetected(false);
+            detecting.current = false;
+          });
       }
 
-      // Draw overlay
       const overlay = overlayRef.current;
       if (overlay && video.videoWidth > 0) {
         overlay.width = overlay.clientWidth;
@@ -56,40 +80,30 @@ export default function CameraViewfinder({ onCapture }: CameraViewfinderProps) {
 
         const corners = cornersRef.current;
         if (corners) {
-          const scale = 0.4;
-          const scaleX = overlay.width / (video.videoWidth * scale);
-          const scaleY = overlay.height / (video.videoHeight * scale);
+          const scaleX = overlay.width / (video.videoWidth * DETECTION_SCALE);
+          const scaleY = overlay.height / (video.videoHeight * DETECTION_SCALE);
+          const pts = [corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft];
 
-          // Scanic returns corners as { topLeft, topRight, bottomLeft, bottomRight }
-          const pts = [
-            corners.topLeft || corners[0],
-            corners.topRight || corners[1],
-            corners.bottomRight || corners[2],
-            corners.bottomLeft || corners[3],
-          ].filter(Boolean);
+          ctx.beginPath();
+          ctx.moveTo(pts[0].x * scaleX, pts[0].y * scaleY);
+          for (let i = 1; i < pts.length; i++) {
+            ctx.lineTo(pts[i].x * scaleX, pts[i].y * scaleY);
+          }
+          ctx.closePath();
+          ctx.fillStyle = "rgba(0, 109, 55, 0.15)";
+          ctx.fill();
+          ctx.strokeStyle = "#006d37";
+          ctx.lineWidth = 3;
+          ctx.stroke();
 
-          if (pts.length === 4) {
+          for (const pt of pts) {
             ctx.beginPath();
-            ctx.moveTo(pts[0].x * scaleX, pts[0].y * scaleY);
-            for (let i = 1; i < pts.length; i++) {
-              ctx.lineTo(pts[i].x * scaleX, pts[i].y * scaleY);
-            }
-            ctx.closePath();
-            ctx.fillStyle = "rgba(0, 109, 55, 0.15)";
+            ctx.arc(pt.x * scaleX, pt.y * scaleY, 6, 0, Math.PI * 2);
+            ctx.fillStyle = "#006d37";
             ctx.fill();
-            ctx.strokeStyle = "#006d37";
-            ctx.lineWidth = 3;
+            ctx.strokeStyle = "white";
+            ctx.lineWidth = 2;
             ctx.stroke();
-
-            for (const pt of pts) {
-              ctx.beginPath();
-              ctx.arc(pt.x * scaleX, pt.y * scaleY, 6, 0, Math.PI * 2);
-              ctx.fillStyle = "#006d37";
-              ctx.fill();
-              ctx.strokeStyle = "white";
-              ctx.lineWidth = 2;
-              ctx.stroke();
-            }
           }
         }
       }
@@ -99,7 +113,7 @@ export default function CameraViewfinder({ onCapture }: CameraViewfinderProps) {
 
     animId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animId);
-  }, [ready, videoRef]);
+  }, [ready, videoRef, detector, detectorParams, smoother, onAutoCapture]);
 
   const handleCapture = useCallback(() => {
     const video = videoRef.current;

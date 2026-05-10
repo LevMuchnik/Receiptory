@@ -99,3 +99,30 @@ def render_all_pages_to_memory(pdf_path: str, dpi: int = 200) -> list[bytes]:
         pages.append(pix.tobytes("png"))
     doc.close()
     return pages
+
+
+def save_scanner_test_frame(jpeg_bytes: bytes, data_dir: str) -> str:
+    """Save a raw camera frame for the scanner lab test set.
+
+    Returns the path relative to data_dir so the DB row stays portable
+    across data_dir relocations.
+    """
+    from datetime import datetime, timezone
+    import secrets
+
+    now = datetime.now(timezone.utc)
+    day = now.strftime("%Y-%m-%d")
+    timestamp = now.strftime("%Y%m%dT%H%M%S")
+    short_id = secrets.token_hex(4)
+    rel_dir = os.path.join("scanner_test_set", day)
+    abs_dir = os.path.join(data_dir, rel_dir)
+    os.makedirs(abs_dir, exist_ok=True)
+    rel_path = os.path.join(rel_dir, f"{timestamp}-{short_id}.jpg")
+    abs_path = os.path.join(data_dir, rel_path)
+    with open(abs_path, "wb") as f:
+        f.write(jpeg_bytes)
+    return rel_path.replace(os.sep, "/")
+
+
+def get_scanner_test_frame_path(rel_path: str, data_dir: str) -> str:
+    return os.path.join(data_dir, rel_path)

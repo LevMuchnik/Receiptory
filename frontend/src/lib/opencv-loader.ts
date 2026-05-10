@@ -17,7 +17,7 @@ export async function initScanner(): Promise<void> {
   return initPromise;
 }
 
-function getScanner(): Scanner {
+export function getScanner(): Scanner {
   if (!scanner) throw new Error("Scanner not initialized — call initScanner() first");
   return scanner;
 }

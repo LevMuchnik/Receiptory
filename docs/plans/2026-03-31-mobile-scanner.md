@@ -1557,7 +1557,7 @@ git commit -m "feat(scanner): mobile document scanner with boundary detection, e
 
 ---
 
-Plan complete and saved to `docs/superpowers/plans/2026-03-31-mobile-scanner.md`. Two execution options:
+Plan complete and saved to `docs/plans/2026-03-31-mobile-scanner.md`. Two execution options:
 
 **1. Subagent-Driven (recommended)** - I dispatch a fresh subagent per task, review between tasks, fast iteration
 

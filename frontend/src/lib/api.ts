@@ -58,4 +58,29 @@ export const api = {
     if (!res.ok) throw new Error("Export failed");
     return res.blob();
   },
+  uploadScannerTestFrame: async (
+    blob: Blob,
+    metadata: {
+      width: number;
+      height: number;
+      detector_name?: string;
+      corners_at_capture_json?: string;
+      notes?: string;
+    },
+  ) => {
+    const form = new FormData();
+    form.append("file", blob, "frame.jpg");
+    form.append("width", String(metadata.width));
+    form.append("height", String(metadata.height));
+    if (metadata.detector_name) form.append("detector_name", metadata.detector_name);
+    if (metadata.corners_at_capture_json) form.append("corners_at_capture_json", metadata.corners_at_capture_json);
+    if (metadata.notes) form.append("notes", metadata.notes);
+    const res = await fetch(`${API_BASE}/scanner/test-frames`, {
+      method: "POST",
+      credentials: "include",
+      body: form,
+    });
+    if (!res.ok) throw new Error("Frame upload failed");
+    return res.json();
+  },
 };

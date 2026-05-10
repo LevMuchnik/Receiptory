@@ -126,6 +126,9 @@ def create_app(data_dir: str | None = None, run_background: bool = True) -> Fast
     from backend.api.cloud_auth import router as cloud_auth_router
     app.include_router(cloud_auth_router, prefix="/api", tags=["cloud-auth"])
 
+    from backend.api.scanner import router as scanner_router
+    app.include_router(scanner_router, prefix="/api", tags=["scanner"])
+
     # Serve frontend static files in production (skip in dev when Vite handles frontend)
     # Use override=False so test fixtures that clear env vars aren't clobbered
     import dotenv
