@@ -7,6 +7,7 @@ import { buildPDF } from "@/lib/pdf-builder";
 import { useScanner } from "@/lib/useScanner";
 import type { ScannedPage } from "@/lib/pdf-builder";
 import { ClassicalDetector } from "@/lib/scanner/classical-detector";
+import { MLDetector } from "@/lib/scanner/ml-detector";
 import type { Detector, Quad } from "@/lib/scanner/detector";
 import { uploadTestFrame } from "@/lib/scanner/test-frame-upload";
 import ScannerNav from "@/components/scanner/ScannerNav";
@@ -24,8 +25,10 @@ export default function ScannerPage() {
   const { state, pages, dispatch, addPage, clearPages } = useScanner();
   const [loadProgress, setLoadProgress] = useState("Initializing...");
 
-  const detector: Detector = useMemo(() => new ClassicalDetector(), []);
-  const [detectorParams, setDetectorParams] = useState<any>(() => detector.getDefaultParams());
+  const classical = useMemo(() => new ClassicalDetector(), []);
+  const ml = useMemo(() => new MLDetector(), []);
+  const [detector, setDetector] = useState<Detector>(() => classical);
+  const [detectorParams, setDetectorParams] = useState<any>(() => classical.getDefaultParams());
 
   const insecure = !isSecureContext();
   const unsupported = isWebView();
@@ -40,8 +43,12 @@ export default function ScannerPage() {
         await initScanner();
         try {
           const cfg = await api.get<ActiveConfig>("/scanner/active-config");
-          if (cfg?.detector === detector.name && cfg.params) {
-            setDetectorParams({ ...detector.getDefaultParams(), ...cfg.params });
+          if (cfg?.detector === "ml") {
+            setDetector(ml);
+            setDetectorParams({ ...ml.getDefaultParams(), ...(cfg.params ?? {}) });
+          } else {
+            setDetector(classical);
+            setDetectorParams({ ...classical.getDefaultParams(), ...(cfg?.params ?? {}) });
           }
         } catch {
           // Fall back to defaults if active config unreachable.
@@ -55,7 +62,7 @@ export default function ScannerPage() {
 
     init();
     return () => { cancelled = true; };
-  }, [dispatch, unsupported, insecure, detector]);
+  }, [dispatch, unsupported, insecure, classical, ml]);
 
   const handleCapture = useCallback(
     async (imageData: ImageData, corners: Quad | null) => {

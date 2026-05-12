@@ -3,6 +3,7 @@ import { api, type ScannerTestFrame } from "@/lib/api";
 import { useCamera } from "@/lib/useCamera";
 import { initScanner } from "@/lib/opencv-loader";
 import { ClassicalDetector, CLASSICAL_DEFAULTS, type ClassicalParams } from "@/lib/scanner/classical-detector";
+import { MLDetector, ML_DEFAULTS, type MLParams } from "@/lib/scanner/ml-detector";
 import type { Detector, DetectionResult, Quad } from "@/lib/scanner/detector";
 
 interface LoadedFrame {
@@ -13,8 +14,35 @@ interface LoadedFrame {
   height: number;
 }
 
+type DetectorKind = "classical" | "ml";
+
+interface PanelState {
+  kind: DetectorKind;
+  classical: ClassicalParams;
+  ml: MLParams;
+  result: DetectionResult | null;
+  evalReport: EvalReport | null;
+}
+
+interface EvalReport {
+  count: number;
+  hitRate: number;
+  medianIoU: number;
+  medianTimingMs: number;
+}
+
 const PALETTE_A = "#006d37";
 const PALETTE_B = "#9b4dff";
+
+function makePanel(): PanelState {
+  return {
+    kind: "classical",
+    classical: { ...CLASSICAL_DEFAULTS },
+    ml: { ...ML_DEFAULTS },
+    result: null,
+    evalReport: null,
+  };
+}
 
 export default function ScannerLabPage() {
   const [scannerReady, setScannerReady] = useState(false);
@@ -23,11 +51,12 @@ export default function ScannerLabPage() {
   const [groundTruth, setGroundTruth] = useState<Quad | null>(null);
   const [activeBanner, setActiveBanner] = useState<string | null>(null);
 
-  const detector = useMemo<Detector>(() => new ClassicalDetector(), []);
-  const [paramsA, setParamsA] = useState<ClassicalParams>(() => ({ ...CLASSICAL_DEFAULTS }));
-  const [paramsB, setParamsB] = useState<ClassicalParams>(() => ({ ...CLASSICAL_DEFAULTS, shadowNorm: false }));
-  const [resultA, setResultA] = useState<DetectionResult | null>(null);
-  const [resultB, setResultB] = useState<DetectionResult | null>(null);
+  const classical = useMemo(() => new ClassicalDetector(), []);
+  const ml = useMemo(() => new MLDetector(), []);
+  const detectorFor = useCallback((kind: DetectorKind): Detector => (kind === "ml" ? ml : classical), [classical, ml]);
+
+  const [panelA, setPanelA] = useState<PanelState>(() => makePanel());
+  const [panelB, setPanelB] = useState<PanelState>(() => ({ ...makePanel(), classical: { ...CLASSICAL_DEFAULTS, shadowNorm: false } }));
 
   useEffect(() => {
     initScanner().then(() => setScannerReady(true)).catch(() => setScannerReady(false));
@@ -53,8 +82,8 @@ export default function ScannerLabPage() {
       width: imageData.width,
       height: imageData.height,
     });
-    setResultA(null);
-    setResultB(null);
+    setPanelA((p) => ({ ...p, result: null }));
+    setPanelB((p) => ({ ...p, result: null }));
     if (frame.ground_truth_json) {
       try {
         setGroundTruth(JSON.parse(frame.ground_truth_json));
@@ -72,7 +101,6 @@ export default function ScannerLabPage() {
     const result = await api.uploadScannerTestFrame(blob, {
       width: imageData.width,
       height: imageData.height,
-      detector_name: null as unknown as string | undefined,
     });
     await refreshFrames();
     const objectUrl = URL.createObjectURL(blob);
@@ -83,8 +111,8 @@ export default function ScannerLabPage() {
       width: imageData.width,
       height: imageData.height,
     });
-    setResultA(null);
-    setResultB(null);
+    setPanelA((p) => ({ ...p, result: null }));
+    setPanelB((p) => ({ ...p, result: null }));
     setGroundTruth(null);
   }, [refreshFrames]);
 
@@ -93,19 +121,19 @@ export default function ScannerLabPage() {
     if (loaded?.frameId === id) {
       setLoaded(null);
       setGroundTruth(null);
-      setResultA(null);
-      setResultB(null);
+      setPanelA((p) => ({ ...p, result: null }));
+      setPanelB((p) => ({ ...p, result: null }));
     }
     await refreshFrames();
   }, [refreshFrames, loaded]);
 
-  const runDetect = useCallback(async (which: "A" | "B") => {
+  const runDetect = useCallback(async (panel: PanelState, set: (s: PanelState) => void) => {
     if (!loaded || !scannerReady) return;
-    const params = which === "A" ? paramsA : paramsB;
-    const result = await detector.detect(loaded.imageData, params);
-    if (which === "A") setResultA(result);
-    else setResultB(result);
-  }, [loaded, scannerReady, detector, paramsA, paramsB]);
+    const det = detectorFor(panel.kind);
+    const params = panel.kind === "ml" ? panel.ml : panel.classical;
+    const result = await det.detect(loaded.imageData, params);
+    set({ ...panel, result });
+  }, [loaded, scannerReady, detectorFor]);
 
   const saveGroundTruth = useCallback(async () => {
     if (!loaded?.frameId || !groundTruth) return;
@@ -118,19 +146,59 @@ export default function ScannerLabPage() {
     setTimeout(() => setActiveBanner(null), 2000);
   }, [loaded, groundTruth, refreshFrames]);
 
-  const saveActiveConfig = useCallback(async (which: "A" | "B") => {
-    const params = which === "A" ? paramsA : paramsB;
-    await api.putScannerActiveConfig({ detector: detector.name, params: params as unknown as Record<string, unknown> });
+  const saveActiveConfig = useCallback(async (panel: PanelState) => {
+    const params = panel.kind === "ml" ? panel.ml : panel.classical;
+    await api.putScannerActiveConfig({
+      detector: panel.kind,
+      params: params as unknown as Record<string, unknown>,
+    });
     setActiveBanner("Active config saved — reload the scanner page to apply.");
-  }, [paramsA, paramsB, detector]);
+  }, []);
+
+  const runEval = useCallback(async (panel: PanelState, set: (s: PanelState) => void) => {
+    const annotated = frames.filter((f) => !!f.ground_truth_json);
+    if (annotated.length === 0) {
+      setActiveBanner("No annotated frames yet.");
+      return;
+    }
+    const det = detectorFor(panel.kind);
+    const params = panel.kind === "ml" ? panel.ml : panel.classical;
+    const ious: number[] = [];
+    const timings: number[] = [];
+    let hits = 0;
+    for (const f of annotated) {
+      let gt: Quad;
+      try {
+        gt = JSON.parse(f.ground_truth_json!) as Quad;
+      } catch {
+        continue;
+      }
+      const imageData = await fetchImageData(api.scannerTestFrameImageUrl(f.id));
+      const result = await det.detect(imageData, params);
+      timings.push(result.timingMs);
+      const iou = result.corners
+        ? quadIoU(
+            denormalizeQuadIfNormalized(gt, imageData.width, imageData.height),
+            result.corners,
+          )
+        : 0;
+      ious.push(iou);
+      if (iou >= 0.85) hits++;
+    }
+    const report: EvalReport = {
+      count: annotated.length,
+      hitRate: hits / annotated.length,
+      medianIoU: median(ious),
+      medianTimingMs: median(timings),
+    };
+    set({ ...panel, evalReport: report });
+  }, [frames, detectorFor]);
 
   return (
     <div className="space-y-6">
-      <header className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-headline font-bold text-primary">Scanner Lab</h1>
-          <p className="text-sm text-muted-foreground">Capture frames, tune detector parameters, annotate ground truth.</p>
-        </div>
+      <header>
+        <h1 className="text-2xl font-headline font-bold text-primary">Scanner Lab</h1>
+        <p className="text-sm text-muted-foreground">Capture frames, tune detector parameters, annotate ground truth.</p>
       </header>
 
       {activeBanner && (
@@ -157,24 +225,22 @@ export default function ScannerLabPage() {
                 color={PALETTE_A}
                 frame={loaded}
                 groundTruth={groundTruth}
-                params={paramsA}
-                onParamsChange={setParamsA}
-                result={resultA}
-                onDetect={() => runDetect("A")}
-                onSaveActive={() => saveActiveConfig("A")}
-                detector={detector}
+                panel={panelA}
+                onChange={setPanelA}
+                onDetect={() => runDetect(panelA, setPanelA)}
+                onSaveActive={() => saveActiveConfig(panelA)}
+                onRunEval={() => runEval(panelA, setPanelA)}
               />
               <DetectorPanel
                 title="Panel B"
                 color={PALETTE_B}
                 frame={loaded}
                 groundTruth={groundTruth}
-                params={paramsB}
-                onParamsChange={setParamsB}
-                result={resultB}
-                onDetect={() => runDetect("B")}
-                onSaveActive={() => saveActiveConfig("B")}
-                detector={detector}
+                panel={panelB}
+                onChange={setPanelB}
+                onDetect={() => runDetect(panelB, setPanelB)}
+                onSaveActive={() => saveActiveConfig(panelB)}
+                onRunEval={() => runEval(panelB, setPanelB)}
               />
             </div>
           </section>
@@ -290,12 +356,11 @@ interface DetectorPanelProps {
   color: string;
   frame: LoadedFrame;
   groundTruth: Quad | null;
-  params: ClassicalParams;
-  onParamsChange: (p: ClassicalParams) => void;
-  result: DetectionResult | null;
+  panel: PanelState;
+  onChange: (p: PanelState) => void;
   onDetect: () => void;
   onSaveActive: () => void;
-  detector: Detector;
+  onRunEval: () => void;
 }
 
 function DetectorPanel({
@@ -303,12 +368,11 @@ function DetectorPanel({
   color,
   frame,
   groundTruth,
-  params,
-  onParamsChange,
-  result,
+  panel,
+  onChange,
   onDetect,
   onSaveActive,
-  detector,
+  onRunEval,
 }: DetectorPanelProps) {
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -325,9 +389,14 @@ function DetectorPanel({
     const sy = canvas.height / frame.height;
 
     if (groundTruth) {
-      drawQuad(ctx, denormalizeQuad(groundTruth, frame.width, frame.height), sx, sy, "#888", 1.5, true);
+      drawQuad(
+        ctx,
+        denormalizeQuadIfNormalized(groundTruth, frame.width, frame.height),
+        sx, sy, "#888", 1.5, true,
+      );
     }
 
+    const result = panel.result;
     if (result?.candidates) {
       for (const c of result.candidates) {
         if (c.quad === result.corners) continue;
@@ -337,7 +406,7 @@ function DetectorPanel({
     if (result?.corners) {
       drawQuad(ctx, result.corners, sx, sy, color, 3, false);
     }
-  }, [color, frame.width, frame.height, groundTruth, result]);
+  }, [color, frame.width, frame.height, groundTruth, panel.result]);
 
   useEffect(() => {
     drawOverlay();
@@ -348,11 +417,12 @@ function DetectorPanel({
       <div className="flex items-center justify-between">
         <div className="text-xs font-bold uppercase tracking-wider" style={{ color }}>{title}</div>
         <select
-          value={detector.name}
-          onChange={() => { /* only classical for now */ }}
+          value={panel.kind}
+          onChange={(e) => onChange({ ...panel, kind: e.target.value as DetectorKind, result: null })}
           className="text-xs bg-muted border-none rounded-md px-2 py-1"
         >
           <option value="classical">classical</option>
+          <option value="ml">ml</option>
         </select>
       </div>
 
@@ -368,60 +438,82 @@ function DetectorPanel({
       </div>
 
       <div className="flex flex-wrap gap-2 text-xs">
-        <span className="px-2 py-1 rounded-md bg-muted">
-          {result ? `score: ${result.score.toFixed(3)}` : "score: —"}
-        </span>
-        <span className="px-2 py-1 rounded-md bg-muted">
-          {result ? `time: ${result.timingMs.toFixed(0)} ms` : "time: —"}
-        </span>
-        <span className="px-2 py-1 rounded-md bg-muted">
-          candidates: {result?.candidates?.length ?? 0}
-        </span>
-        <span className="px-2 py-1 rounded-md bg-muted">
-          {result?.corners ? "accepted" : result ? "rejected" : "—"}
-        </span>
+        <Stat label="score" value={panel.result ? panel.result.score.toFixed(3) : "—"} />
+        <Stat label="time" value={panel.result ? `${panel.result.timingMs.toFixed(0)} ms` : "—"} />
+        <Stat label="candidates" value={String(panel.result?.candidates?.length ?? 0)} />
+        <Stat label="status" value={panel.result?.corners ? "accepted" : panel.result ? "rejected" : "—"} />
       </div>
+
+      {panel.evalReport && (
+        <div className="text-xs grid grid-cols-2 gap-2 bg-muted/50 p-3 rounded-md">
+          <span>Eval on {panel.evalReport.count} annotated frames</span>
+          <span>Hit rate: <strong>{(panel.evalReport.hitRate * 100).toFixed(0)}%</strong></span>
+          <span>Median IoU: <strong>{panel.evalReport.medianIoU.toFixed(3)}</strong></span>
+          <span>Median time: <strong>{panel.evalReport.medianTimingMs.toFixed(0)} ms</strong></span>
+        </div>
+      )}
 
       <div className="flex gap-2">
-        <button
-          onClick={onDetect}
-          className="flex-1 py-2 rounded-lg bg-primary text-primary-foreground font-bold text-sm"
-        >
+        <button onClick={onDetect} className="flex-1 py-2 rounded-lg bg-primary text-primary-foreground font-bold text-sm">
           Detect
         </button>
-        <button
-          onClick={onSaveActive}
-          className="flex-1 py-2 rounded-lg bg-muted text-foreground font-bold text-sm border border-border"
-        >
-          Save as active
+        <button onClick={onRunEval} className="flex-1 py-2 rounded-lg bg-muted text-foreground font-bold text-sm border border-border">
+          Run eval
+        </button>
+        <button onClick={onSaveActive} className="flex-1 py-2 rounded-lg bg-muted text-foreground font-bold text-sm border border-border">
+          Save active
         </button>
       </div>
 
-      <ParamControls params={params} onChange={onParamsChange} />
+      {panel.kind === "classical" ? (
+        <ParamControls
+          params={panel.classical as unknown as Record<string, AnyParamValue>}
+          order={CLASSICAL_PARAM_ORDER}
+          onChange={(next) => onChange({ ...panel, classical: next as unknown as ClassicalParams })}
+        />
+      ) : (
+        <ParamControls
+          params={panel.ml as unknown as Record<string, AnyParamValue>}
+          order={ML_PARAM_ORDER}
+          onChange={(next) => onChange({ ...panel, ml: next as unknown as MLParams })}
+        />
+      )}
     </div>
   );
 }
 
-const PARAM_ORDER: (keyof ClassicalParams)[] = [
-  "shadowNorm",
-  "shadowBlurFraction",
-  "saturationPrior",
-  "saturationWeight",
-  "minAreaFraction",
-  "maxAreaFraction",
-  "minAspect",
-  "maxAspect",
-  "minAngleDeg",
-  "maxAngleDeg",
-  "wArea",
-  "wConvex",
-  "wUniform",
-  "wText",
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="px-2 py-1 rounded-md bg-muted">
+      {label}: <strong>{value}</strong>
+    </span>
+  );
+}
+
+type AnyParamValue = number | boolean | string;
+
+const CLASSICAL_PARAM_ORDER: string[] = [
+  "shadowNorm", "shadowBlurFraction",
+  "saturationPrior", "saturationWeight",
+  "minAreaFraction", "maxAreaFraction",
+  "minAspect", "maxAspect",
+  "minAngleDeg", "maxAngleDeg",
+  "wArea", "wConvex", "wUniform", "wText",
 ];
 
-function ParamControls({ params, onChange }: { params: ClassicalParams; onChange: (p: ClassicalParams) => void }) {
-  const setField = (key: keyof ClassicalParams, value: number | boolean) => {
-    onChange({ ...params, [key]: value } as ClassicalParams);
+const ML_PARAM_ORDER: string[] = [
+  "modelUrl", "inputSize", "outputType", "scoreThreshold",
+];
+
+interface ParamControlsProps {
+  params: Record<string, AnyParamValue>;
+  order: string[];
+  onChange: (p: Record<string, AnyParamValue>) => void;
+}
+
+function ParamControls({ params, order, onChange }: ParamControlsProps) {
+  const setField = (key: string, value: AnyParamValue) => {
+    onChange({ ...params, [key]: value });
   };
   return (
     <details className="bg-muted/50 rounded-lg p-3">
@@ -429,28 +521,37 @@ function ParamControls({ params, onChange }: { params: ClassicalParams; onChange
         Parameters
       </summary>
       <div className="grid grid-cols-2 gap-x-3 gap-y-2 mt-3 text-xs">
-        {PARAM_ORDER.map((key) => {
+        {order.map((key) => {
           const v = params[key];
           if (typeof v === "boolean") {
             return (
               <label key={key} className="flex items-center gap-2 col-span-2">
-                <input
-                  type="checkbox"
-                  checked={v}
-                  onChange={(e) => setField(key, e.target.checked)}
-                />
+                <input type="checkbox" checked={v} onChange={(e) => setField(key, e.target.checked)} />
                 <span className="font-mono">{key}</span>
               </label>
             );
           }
+          if (typeof v === "number") {
+            return (
+              <label key={key} className="flex flex-col gap-0.5">
+                <span className="font-mono text-[10px] text-muted-foreground">{key}</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={v}
+                  onChange={(e) => setField(key, Number(e.target.value))}
+                  className="bg-card border border-border rounded-md px-2 py-1 text-xs"
+                />
+              </label>
+            );
+          }
           return (
-            <label key={key} className="flex flex-col gap-0.5">
+            <label key={key} className="flex flex-col gap-0.5 col-span-2">
               <span className="font-mono text-[10px] text-muted-foreground">{key}</span>
               <input
-                type="number"
-                step="0.01"
-                value={v as number}
-                onChange={(e) => setField(key, Number(e.target.value))}
+                type="text"
+                value={String(v ?? "")}
+                onChange={(e) => setField(key, e.target.value)}
                 className="bg-card border border-border rounded-md px-2 py-1 text-xs"
               />
             </label>
@@ -474,7 +575,7 @@ function GroundTruthAnnotator({ frame, quad, onChange, onSave, canSave }: Annota
   const containerRef = useRef<HTMLDivElement>(null);
   const [draggingCorner, setDraggingCorner] = useState<keyof Quad | null>(null);
 
-  const initialQuad = useMemo<Quad>(() => quad ?? {
+  const initialQuad = useMemo<Quad>(() => quad ? denormalizeQuadIfNormalized(quad, frame.width, frame.height) : {
     topLeft: { x: frame.width * 0.15, y: frame.height * 0.15 },
     topRight: { x: frame.width * 0.85, y: frame.height * 0.15 },
     bottomRight: { x: frame.width * 0.85, y: frame.height * 0.85 },
@@ -485,7 +586,7 @@ function GroundTruthAnnotator({ frame, quad, onChange, onSave, canSave }: Annota
     if (!quad) onChange(initialQuad);
   }, [quad, initialQuad, onChange]);
 
-  const current = quad ?? initialQuad;
+  const current = quad ? denormalizeQuadIfNormalized(quad, frame.width, frame.height) : initialQuad;
 
   const handlePointerDown = (corner: keyof Quad) => (e: React.PointerEvent) => {
     e.preventDefault();
@@ -627,8 +728,7 @@ function normalizeQuadCoords(quad: Quad, w: number, h: number): Quad {
   };
 }
 
-function denormalizeQuad(quad: Quad, w: number, h: number): Quad {
-  // Detect whether the stored quad is normalized (max coord ≤ 1.5) or pixel-space.
+function denormalizeQuadIfNormalized(quad: Quad, w: number, h: number): Quad {
   const maxV = Math.max(
     quad.topLeft.x, quad.topLeft.y,
     quad.topRight.x, quad.topRight.y,
@@ -642,4 +742,71 @@ function denormalizeQuad(quad: Quad, w: number, h: number): Quad {
     bottomRight: { x: quad.bottomRight.x * w, y: quad.bottomRight.y * h },
     bottomLeft: { x: quad.bottomLeft.x * w, y: quad.bottomLeft.y * h },
   };
+}
+
+function quadIoU(a: Quad, b: Quad): number {
+  const polyA = [a.topLeft, a.topRight, a.bottomRight, a.bottomLeft];
+  const polyB = [b.topLeft, b.topRight, b.bottomRight, b.bottomLeft];
+  const inter = polygonClip(polyA, polyB);
+  const interArea = polygonArea(inter);
+  const areaA = polygonArea(polyA);
+  const areaB = polygonArea(polyB);
+  const union = areaA + areaB - interArea;
+  return union > 0 ? interArea / union : 0;
+}
+
+interface Pt2 { x: number; y: number; }
+
+function polygonClip(subject: Pt2[], clip: Pt2[]): Pt2[] {
+  let output = subject.slice();
+  for (let i = 0; i < clip.length; i++) {
+    if (output.length === 0) break;
+    const input = output;
+    output = [];
+    const A = clip[i];
+    const B = clip[(i + 1) % clip.length];
+    for (let j = 0; j < input.length; j++) {
+      const P = input[j];
+      const Q = input[(j + 1) % input.length];
+      const Pin = isLeft(A, B, P) >= 0;
+      const Qin = isLeft(A, B, Q) >= 0;
+      if (Pin) {
+        output.push(P);
+        if (!Qin) output.push(intersect(P, Q, A, B));
+      } else if (Qin) {
+        output.push(intersect(P, Q, A, B));
+      }
+    }
+  }
+  return output;
+}
+
+function isLeft(A: Pt2, B: Pt2, P: Pt2): number {
+  return (B.x - A.x) * (P.y - A.y) - (B.y - A.y) * (P.x - A.x);
+}
+
+function intersect(P: Pt2, Q: Pt2, A: Pt2, B: Pt2): Pt2 {
+  const r = { x: Q.x - P.x, y: Q.y - P.y };
+  const s = { x: B.x - A.x, y: B.y - A.y };
+  const denom = r.x * s.y - r.y * s.x;
+  if (Math.abs(denom) < 1e-9) return P;
+  const t = ((A.x - P.x) * s.y - (A.y - P.y) * s.x) / denom;
+  return { x: P.x + t * r.x, y: P.y + t * r.y };
+}
+
+function polygonArea(pts: Pt2[]): number {
+  if (pts.length < 3) return 0;
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const j = (i + 1) % pts.length;
+    a += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
+  }
+  return Math.abs(a) / 2;
+}
+
+function median(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const sorted = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
