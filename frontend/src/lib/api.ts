@@ -83,4 +83,32 @@ export const api = {
     if (!res.ok) throw new Error("Frame upload failed");
     return res.json();
   },
+  listScannerTestFrames: () => request<{ frames: ScannerTestFrame[] }>("/scanner/test-frames"),
+  scannerTestFrameImageUrl: (id: number) => `${API_BASE}/scanner/test-frames/${id}/image`,
+  patchScannerTestFrame: (id: number, body: { ground_truth_json?: string; notes?: string }) =>
+    request<{ updated: number }>(`/scanner/test-frames/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteScannerTestFrame: (id: number) =>
+    request<{ deleted: number }>(`/scanner/test-frames/${id}`, { method: "DELETE" }),
+  getScannerActiveConfig: () =>
+    request<{ detector: string; params: Record<string, unknown> }>("/scanner/active-config"),
+  putScannerActiveConfig: (body: { detector: string; params: Record<string, unknown> }) =>
+    request<{ message: string }>("/scanner/active-config", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
 };
+
+export interface ScannerTestFrame {
+  id: number;
+  frame_path: string;
+  captured_at: string;
+  width: number;
+  height: number;
+  detector_name: string | null;
+  corners_at_capture_json: string | null;
+  ground_truth_json: string | null;
+  notes: string | null;
+}

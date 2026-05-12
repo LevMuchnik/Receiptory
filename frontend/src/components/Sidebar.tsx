@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { to: "/scan",     icon: "document_scanner", label: "Scan",  exact: false },
   { to: "/export",    icon: "ios_share",   label: "Export",     exact: false },
   { to: "/settings",  icon: "settings",    label: "Administration", exact: false },
+  { to: "/admin/scanner-lab", icon: "biotech", label: "Scanner Lab", exact: false },
 ];
 
 interface UploadDialogProps {

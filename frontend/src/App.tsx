@@ -9,6 +9,7 @@ import DocumentDetailPage from "@/pages/DocumentDetailPage";
 import ExportPage from "@/pages/ExportPage";
 import SettingsPage from "@/pages/SettingsPage";
 import ScannerPage from "@/pages/ScannerPage";
+import ScannerLabPage from "@/pages/ScannerLabPage";
 import Sidebar from "@/components/Sidebar";
 import { isAndroid } from "@/lib/platform";
 
@@ -112,6 +113,7 @@ export default function App() {
           <Route path="/export" element={<ProtectedRoute><AppLayout><ExportPage /></AppLayout></ProtectedRoute>} />
           <Route path="/settings" element={<ProtectedRoute><AppLayout><SettingsPage /></AppLayout></ProtectedRoute>} />
           <Route path="/scan" element={<ProtectedRoute><ScannerPage /></ProtectedRoute>} />
+          <Route path="/admin/scanner-lab" element={<ProtectedRoute><AppLayout><ScannerLabPage /></AppLayout></ProtectedRoute>} />
         </Routes>
       </AuthProvider>
       </ThemeProvider>
