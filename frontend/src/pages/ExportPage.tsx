@@ -8,6 +8,7 @@ export default function ExportPage() {
   const [ingestionTo, setIngestionTo] = useState("");
   const [receiptFrom, setReceiptFrom] = useState("");
   const [receiptTo, setReceiptTo] = useState("");
+  const [presetBasis, setPresetBasis] = useState<"ingestion" | "receipt">("ingestion");
   const [month, setMonth] = useState("");
   const [year, setYear] = useState(new Date().getFullYear().toString());
   const [exporting, setExporting] = useState(false);
@@ -34,19 +35,19 @@ export default function ExportPage() {
       icon: "history",
       label: "All since last export",
       sub: "All pending documents",
-      action: () => doExport({ preset: "since_last_export" }),
+      action: () => doExport({ preset: "since_last_export", date_basis: presetBasis }),
     },
     {
       icon: "calendar_today",
       label: "This Month",
       sub: month || new Date().toLocaleString("default", { month: "long", year: "numeric" }),
-      action: () => doExport({ preset: "month", month: month || new Date().toISOString().slice(0, 7) }),
+      action: () => doExport({ preset: "month", month: month || new Date().toISOString().slice(0, 7), date_basis: presetBasis }),
     },
     {
       icon: "calendar_month",
       label: "Full Year",
       sub: `FY ${year}`,
-      action: () => doExport({ preset: "full_year", year: parseInt(year) }),
+      action: () => { if (!year || isNaN(parseInt(year)) || parseInt(year) < 1900) return; doExport({ preset: "full_year", year: parseInt(year), date_basis: presetBasis }); },
     },
   ];
 
@@ -72,7 +73,27 @@ export default function ExportPage() {
 
           {/* Quick Presets */}
           <section className="bg-card rounded-xl shadow-[0_8px_32px_rgba(25,28,30,0.04)] p-6">
-            <h3 className="text-xs font-black uppercase text-muted-foreground tracking-[0.2em] mb-6">Quick Export Presets</h3>
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-xs font-black uppercase text-muted-foreground tracking-[0.2em]">Quick Export Presets</h3>
+              <div className="flex gap-1 bg-muted rounded-lg p-1">
+                <button
+                  onClick={() => setPresetBasis("ingestion")}
+                  className={`px-3 py-1 rounded text-[11px] font-bold transition-colors ${
+                    presetBasis === "ingestion" ? "bg-card text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  By Upload Date
+                </button>
+                <button
+                  onClick={() => setPresetBasis("receipt")}
+                  className={`px-3 py-1 rounded text-[11px] font-bold transition-colors ${
+                    presetBasis === "receipt" ? "bg-card text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  By Issue Date
+                </button>
+              </div>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {PRESETS.map((preset) => (
                 <button
@@ -107,7 +128,7 @@ export default function ExportPage() {
                   />
                   <button
                     disabled={exporting || !month}
-                    onClick={() => doExport({ preset: "month", month })}
+                    onClick={() => doExport({ preset: "month", month, date_basis: presetBasis })}
                     className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-bold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
                   >
                     Export
@@ -128,8 +149,8 @@ export default function ExportPage() {
                     className="bg-muted border-none rounded-lg text-sm focus-visible:ring-primary/20 flex-1"
                   />
                   <button
-                    disabled={exporting}
-                    onClick={() => doExport({ preset: "full_year", year: parseInt(year) })}
+                    disabled={exporting || !year || isNaN(parseInt(year)) || parseInt(year) < 1900}
+                    onClick={() => doExport({ preset: "full_year", year: parseInt(year), date_basis: presetBasis })}
                     className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-bold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
                   >
                     Export
@@ -231,7 +252,7 @@ export default function ExportPage() {
             </div>
             <button
               disabled={exporting}
-              onClick={() => doExport({ preset: "since_last_export" })}
+              onClick={() => doExport({ preset: "since_last_export", date_basis: presetBasis })}
               className="w-full md:w-auto px-8 py-3 bg-card text-primary rounded-lg font-black text-sm hover:bg-[#d1e4fb] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-2 justify-center"
             >
               {exporting ? (

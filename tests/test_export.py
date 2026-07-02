@@ -226,3 +226,21 @@ def test_export_invalid_date_to(authed_client):
     """Malformed date_to returns 422, not 500."""
     resp = authed_client.post("/api/export", json={"date_basis": "ingestion", "date_from": "2026-01-01", "date_to": "not-a-date"})
     assert resp.status_code == 422
+
+
+def test_export_invalid_date_from(authed_client):
+    """Malformed date_from returns 422, not silent empty results."""
+    resp = authed_client.post("/api/export", json={"date_basis": "ingestion", "date_from": "not-a-date"})
+    assert resp.status_code == 422
+
+
+def test_export_invalid_month_format(authed_client):
+    """Malformed month returns 422, not 500."""
+    resp = authed_client.post("/api/export", json={"preset": "month", "month": "2026/07"})
+    assert resp.status_code == 422
+
+
+def test_export_month_single_digit(authed_client):
+    """month='2026-1' is accepted — strptime is lenient, strftime zero-pads output."""
+    resp = authed_client.post("/api/export", json={"preset": "month", "month": "2026-1"})
+    assert resp.status_code == 200

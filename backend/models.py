@@ -162,7 +162,7 @@ class ExportRequest(BaseModel):
     date_from: str | None = None
     date_to: str | None = None
     month: str | None = None  # YYYY-MM
-    year: int | None = None
+    year: int | None = Field(None, ge=1900)
     status: str | None = None
     category_id: int | None = None
     document_type: str | None = None
