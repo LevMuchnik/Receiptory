@@ -158,6 +158,7 @@ class DuplicateGroup(BaseModel):
 
 class ExportRequest(BaseModel):
     preset: str | None = None  # since_last_export, month, date_range, full_year
+    date_basis: Literal["ingestion", "receipt"] = "ingestion"
     date_from: str | None = None
     date_to: str | None = None
     month: str | None = None  # YYYY-MM

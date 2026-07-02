@@ -50,7 +50,8 @@ def docs_with_files(authed_client, db_path, tmp_data_dir, sample_pdf_path):
 
 
 def test_export_zip_structure(authed_client, docs_with_files):
-    resp = authed_client.post("/api/export", json={"date_from": "2026-01-01", "date_to": "2026-12-31"})
+    # Explicit date_basis="receipt" preserves original receipt-date semantics
+    resp = authed_client.post("/api/export", json={"date_basis": "receipt", "date_from": "2026-01-01", "date_to": "2026-12-31"})
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/zip"
 
@@ -61,7 +62,7 @@ def test_export_zip_structure(authed_client, docs_with_files):
 
 
 def test_export_csv_content(authed_client, docs_with_files):
-    resp = authed_client.post("/api/export", json={"date_from": "2026-01-01", "date_to": "2026-12-31"})
+    resp = authed_client.post("/api/export", json={"date_basis": "receipt", "date_from": "2026-01-01", "date_to": "2026-12-31"})
     zf = zipfile.ZipFile(io.BytesIO(resp.content))
     csv_content = zf.read("metadata.csv").decode("utf-8")
     reader = csv.DictReader(io.StringIO(csv_content))
@@ -71,8 +72,157 @@ def test_export_csv_content(authed_client, docs_with_files):
 
 
 def test_export_updates_last_exported(authed_client, docs_with_files):
-    authed_client.post("/api/export", json={"date_from": "2026-01-01", "date_to": "2026-12-31"})
+    authed_client.post("/api/export", json={"date_basis": "receipt", "date_from": "2026-01-01", "date_to": "2026-12-31"})
     with get_connection() as conn:
         docs = conn.execute("SELECT last_exported_date FROM documents WHERE status = 'processed'").fetchall()
     for doc in docs:
         assert doc["last_exported_date"] is not None
+
+
+def _write_dummy_pdf(path: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"%PDF-1.4\n%%EOF\n")
+
+
+def test_export_ingestion_basis(authed_client, db_path, tmp_data_dir):
+    """Doc with submission_date in range but receipt_date out of range appears in ingestion export only."""
+    filed_dir = os.path.join(str(tmp_data_dir), "storage", "filed")
+
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO documents (original_filename, file_hash, file_size_bytes, status,
+               stored_filename, receipt_date, submission_date, vendor_name, total_amount, category_id, submission_channel)
+               VALUES ('ing.pdf', 'h3', 100, 'processed', '2026-03-01-ING-h3.pdf',
+               '2025-11-15', '2026-03-01T10:00:00Z', 'Ingested Vendor', 50.0, 4, 'web_upload')"""
+        )
+    _write_dummy_pdf(os.path.join(filed_dir, "2026-03-01-ING-h3.pdf"))
+
+    # Visible with ingestion basis (submission_date is in March 2026)
+    resp = authed_client.post("/api/export", json={"date_basis": "ingestion", "date_from": "2026-03-01", "date_to": "2026-03-31"})
+    assert resp.status_code == 200
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    csv_content = zf.read("metadata.csv").decode("utf-8")
+    rows = list(csv.DictReader(io.StringIO(csv_content)))
+    assert any(r["vendor_name"] == "Ingested Vendor" for r in rows)
+
+    # NOT visible with receipt basis (receipt_date is Nov 2025, outside March 2026)
+    resp2 = authed_client.post("/api/export", json={"date_basis": "receipt", "date_from": "2026-03-01", "date_to": "2026-03-31"})
+    assert resp2.status_code == 200
+    zf2 = zipfile.ZipFile(io.BytesIO(resp2.content))
+    csv2 = zf2.read("metadata.csv").decode("utf-8")
+    rows2 = list(csv.DictReader(io.StringIO(csv2)))
+    assert not any(r["vendor_name"] == "Ingested Vendor" for r in rows2)
+
+
+def test_export_receipt_basis(authed_client, db_path, tmp_data_dir):
+    """Doc with receipt_date in range but submission_date out of range appears in receipt export only."""
+    filed_dir = os.path.join(str(tmp_data_dir), "storage", "filed")
+
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO documents (original_filename, file_hash, file_size_bytes, status,
+               stored_filename, receipt_date, submission_date, vendor_name, total_amount, category_id, submission_channel)
+               VALUES ('rcpt.pdf', 'h4', 100, 'processed', '2026-04-01-RCPT-h4.pdf',
+               '2026-04-10', '2025-12-01T08:00:00Z', 'Receipt Vendor', 75.0, 4, 'web_upload')"""
+        )
+    _write_dummy_pdf(os.path.join(filed_dir, "2026-04-01-RCPT-h4.pdf"))
+
+    # Visible with receipt basis (receipt_date is April 2026)
+    resp = authed_client.post("/api/export", json={"date_basis": "receipt", "date_from": "2026-04-01", "date_to": "2026-04-30"})
+    assert resp.status_code == 200
+    rows = list(csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(resp.content)).read("metadata.csv").decode())))
+    assert any(r["vendor_name"] == "Receipt Vendor" for r in rows)
+
+    # NOT visible with ingestion basis (submission_date is Dec 2025)
+    resp2 = authed_client.post("/api/export", json={"date_basis": "ingestion", "date_from": "2026-04-01", "date_to": "2026-04-30"})
+    assert resp2.status_code == 200
+    rows2 = list(csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(resp2.content)).read("metadata.csv").decode())))
+    assert not any(r["vendor_name"] == "Receipt Vendor" for r in rows2)
+
+
+def test_export_null_receipt_date_ingestion(authed_client, db_path, tmp_data_dir):
+    """Doc with NULL receipt_date and a valid submission_date appears in ingestion export."""
+    filed_dir = os.path.join(str(tmp_data_dir), "storage", "filed")
+
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO documents (original_filename, file_hash, file_size_bytes, status,
+               stored_filename, receipt_date, submission_date, vendor_name, total_amount, category_id, submission_channel)
+               VALUES ('null_rcpt.pdf', 'h5', 100, 'processed', '2026-05-01-NULL-h5.pdf',
+               NULL, '2026-05-01T09:00:00Z', 'No Date Vendor', 25.0, 4, 'web_upload')"""
+        )
+    _write_dummy_pdf(os.path.join(filed_dir, "2026-05-01-NULL-h5.pdf"))
+
+    # Appears with ingestion basis despite NULL receipt_date
+    resp = authed_client.post("/api/export", json={"date_basis": "ingestion", "date_from": "2026-05-01", "date_to": "2026-05-31"})
+    assert resp.status_code == 200
+    rows = list(csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(resp.content)).read("metadata.csv").decode())))
+    assert any(r["vendor_name"] == "No Date Vendor" for r in rows)
+
+    # Silently excluded with receipt basis (receipt_date IS NULL)
+    resp2 = authed_client.post("/api/export", json={"date_basis": "receipt", "date_from": "2026-05-01", "date_to": "2026-05-31"})
+    assert resp2.status_code == 200
+    rows2 = list(csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(resp2.content)).read("metadata.csv").decode())))
+    assert not any(r["vendor_name"] == "No Date Vendor" for r in rows2)
+
+
+def test_export_date_to_boundary_ingestion(authed_client, db_path, tmp_data_dir):
+    """Doc ingested at 23:59:59 UTC on date_to day IS included (exclusive upper bound < next_day)."""
+    filed_dir = os.path.join(str(tmp_data_dir), "storage", "filed")
+
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO documents (original_filename, file_hash, file_size_bytes, status,
+               stored_filename, receipt_date, submission_date, vendor_name, total_amount, category_id, submission_channel)
+               VALUES ('late.pdf', 'h6', 100, 'processed', '2026-06-30-LATE-h6.pdf',
+               '2026-06-30', '2026-06-30T23:59:59Z', 'Late Vendor', 10.0, 4, 'web_upload')"""
+        )
+    _write_dummy_pdf(os.path.join(filed_dir, "2026-06-30-LATE-h6.pdf"))
+
+    # date_to="2026-06-30" with ingestion basis: uses < "2026-07-01", so 23:59:59 is included
+    resp = authed_client.post("/api/export", json={"date_basis": "ingestion", "date_from": "2026-06-01", "date_to": "2026-06-30"})
+    assert resp.status_code == 200
+    rows = list(csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(resp.content)).read("metadata.csv").decode())))
+    assert any(r["vendor_name"] == "Late Vendor" for r in rows)
+
+
+def test_export_order_by_matches_basis(authed_client, db_path, tmp_data_dir):
+    """Rows are sorted by submission_date for ingestion basis, receipt_date for receipt basis."""
+    filed_dir = os.path.join(str(tmp_data_dir), "storage", "filed")
+
+    with get_connection() as conn:
+        # Doc A: ingested first, receipt date second
+        conn.execute(
+            """INSERT INTO documents (original_filename, file_hash, file_size_bytes, status,
+               stored_filename, receipt_date, submission_date, vendor_name, total_amount, category_id, submission_channel)
+               VALUES ('a.pdf', 'ha', 100, 'processed', '2026-07-01-A-ha.pdf',
+               '2026-07-10', '2026-07-01T08:00:00Z', 'Alpha', 10.0, 4, 'web_upload')"""
+        )
+        # Doc B: ingested second, receipt date first
+        conn.execute(
+            """INSERT INTO documents (original_filename, file_hash, file_size_bytes, status,
+               stored_filename, receipt_date, submission_date, vendor_name, total_amount, category_id, submission_channel)
+               VALUES ('b.pdf', 'hb', 100, 'processed', '2026-07-01-B-hb.pdf',
+               '2026-07-01', '2026-07-10T08:00:00Z', 'Beta', 20.0, 4, 'web_upload')"""
+        )
+    _write_dummy_pdf(os.path.join(filed_dir, "2026-07-01-A-ha.pdf"))
+    _write_dummy_pdf(os.path.join(filed_dir, "2026-07-01-B-hb.pdf"))
+
+    # Ingestion basis: Alpha (ingested July 1) before Beta (ingested July 10)
+    resp = authed_client.post("/api/export", json={"date_basis": "ingestion", "date_from": "2026-07-01", "date_to": "2026-07-31"})
+    rows = list(csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(resp.content)).read("metadata.csv").decode())))
+    vendors_ingestion = [r["vendor_name"] for r in rows]
+    assert vendors_ingestion == ["Alpha", "Beta"]
+
+    # Receipt basis: Beta (receipt July 1) before Alpha (receipt July 10)
+    resp2 = authed_client.post("/api/export", json={"date_basis": "receipt", "date_from": "2026-07-01", "date_to": "2026-07-31"})
+    rows2 = list(csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(resp2.content)).read("metadata.csv").decode())))
+    vendors_receipt = [r["vendor_name"] for r in rows2]
+    assert vendors_receipt == ["Beta", "Alpha"]
+
+
+def test_export_invalid_date_to(authed_client):
+    """Malformed date_to returns 422, not 500."""
+    resp = authed_client.post("/api/export", json={"date_basis": "ingestion", "date_from": "2026-01-01", "date_to": "not-a-date"})
+    assert resp.status_code == 422

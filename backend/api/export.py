@@ -3,8 +3,8 @@ import io
 import os
 import zipfile
 import logging
-from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, Request
+from datetime import datetime, timedelta, timezone
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from backend.auth import require_auth
@@ -40,11 +40,13 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
     else:
         conditions.append("d.status = 'processed'")
 
+    date_col = "d.submission_date" if body.date_basis == "ingestion" else "d.receipt_date"
+
     if not body.document_ids and body.preset == "since_last_export":
         conditions.append("d.last_exported_date IS NULL")
     elif body.preset == "month" and body.month:
-        conditions.append("d.receipt_date >= ?")
-        conditions.append("d.receipt_date < ?")
+        conditions.append(f"{date_col} >= ?")
+        conditions.append(f"{date_col} < ?")
         year, month = body.month.split("-")
         next_month = int(month) + 1
         next_year = int(year)
@@ -53,16 +55,27 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
             next_year += 1
         params.extend([f"{year}-{month}-01", f"{next_year:04d}-{next_month:02d}-01"])
     elif body.preset == "full_year" and body.year:
-        conditions.append("d.receipt_date >= ?")
-        conditions.append("d.receipt_date < ?")
+        conditions.append(f"{date_col} >= ?")
+        conditions.append(f"{date_col} < ?")
         params.extend([f"{body.year}-01-01", f"{body.year + 1}-01-01"])
     else:
         if body.date_from:
-            conditions.append("d.receipt_date >= ?")
+            conditions.append(f"{date_col} >= ?")
             params.append(body.date_from)
         if body.date_to:
-            conditions.append("d.receipt_date <= ?")
-            params.append(body.date_to)
+            try:
+                dt = datetime.strptime(body.date_to, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(status_code=422, detail="date_to must be in YYYY-MM-DD format")
+            if body.date_basis == "ingestion":
+                # submission_date is a full ISO timestamp; use exclusive upper bound
+                # to include all documents ingested up to end-of-day UTC on date_to
+                next_day = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+                conditions.append(f"{date_col} < ?")
+                params.append(next_day)
+            else:
+                conditions.append(f"{date_col} <= ?")
+                params.append(body.date_to)
 
     if body.status:
         conditions.append("d.status = ?")
@@ -85,7 +98,7 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
                 FROM documents d
                 LEFT JOIN categories c ON d.category_id = c.id
                 WHERE {where}
-                ORDER BY d.receipt_date""",
+                ORDER BY {date_col}""",
             params,
         ).fetchall()
 

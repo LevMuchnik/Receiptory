@@ -4,8 +4,10 @@ import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
 
 export default function ExportPage() {
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
+  const [ingestionFrom, setIngestionFrom] = useState("");
+  const [ingestionTo, setIngestionTo] = useState("");
+  const [receiptFrom, setReceiptFrom] = useState("");
+  const [receiptTo, setReceiptTo] = useState("");
   const [month, setMonth] = useState("");
   const [year, setYear] = useState(new Date().getFullYear().toString());
   const [exporting, setExporting] = useState(false);
@@ -134,46 +136,86 @@ export default function ExportPage() {
                   </button>
                 </div>
               </div>
-
-              {/* Date range */}
-              <div>
-                <Label className="block text-[11px] font-bold text-muted-foreground uppercase mb-2">Date Range — From</Label>
-                <div className="bg-muted px-3 py-2 rounded-lg flex items-center justify-between">
-                  <Input
-                    type="date"
-                    value={dateFrom}
-                    onChange={(e) => setDateFrom(e.target.value)}
-                    className="bg-transparent border-none p-0 text-sm focus-visible:ring-0 text-foreground font-bold"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <Label className="block text-[11px] font-bold text-muted-foreground uppercase mb-2">Date Range — To</Label>
-                <div className="bg-muted px-3 py-2 rounded-lg flex items-center justify-between">
-                  <Input
-                    type="date"
-                    value={dateTo}
-                    onChange={(e) => setDateTo(e.target.value)}
-                    className="bg-transparent border-none p-0 text-sm focus-visible:ring-0 text-foreground font-bold"
-                  />
-                </div>
-              </div>
             </div>
 
-            {/* Custom range export button */}
-            {(dateFrom || dateTo) && (
-              <div className="mt-6">
-                <button
-                  disabled={exporting || (!dateFrom && !dateTo)}
-                  onClick={() => doExport({ date_from: dateFrom, date_to: dateTo })}
-                  className="px-6 py-2.5 bg-primary text-white rounded-lg text-sm font-bold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity flex items-center gap-2"
-                >
-                  <span className="material-symbols-outlined text-sm">date_range</span>
-                  Export Date Range
-                </button>
+            {/* Date range — two independent columns by date type */}
+            <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-6">
+              {/* Ingestion date column */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <span className="material-symbols-outlined text-sm text-primary">upload</span>
+                  <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">By Ingestion Date</Label>
+                </div>
+                <div className="space-y-2">
+                  <div className="bg-muted px-3 py-2 rounded-lg">
+                    <p className="text-[10px] text-muted-foreground mb-1">From</p>
+                    <Input
+                      type="date"
+                      value={ingestionFrom}
+                      onChange={(e) => setIngestionFrom(e.target.value)}
+                      className="bg-transparent border-none p-0 text-sm focus-visible:ring-0 text-foreground font-bold"
+                    />
+                  </div>
+                  <div className="bg-muted px-3 py-2 rounded-lg">
+                    <p className="text-[10px] text-muted-foreground mb-1">To</p>
+                    <Input
+                      type="date"
+                      value={ingestionTo}
+                      onChange={(e) => setIngestionTo(e.target.value)}
+                      className="bg-transparent border-none p-0 text-sm focus-visible:ring-0 text-foreground font-bold"
+                    />
+                  </div>
+                </div>
+                {(ingestionFrom || ingestionTo) && (
+                  <button
+                    disabled={exporting}
+                    onClick={() => doExport({ date_basis: "ingestion", date_from: ingestionFrom || undefined, date_to: ingestionTo || undefined })}
+                    className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-bold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity flex items-center gap-2"
+                  >
+                    <span className="material-symbols-outlined text-sm">date_range</span>
+                    Export
+                  </button>
+                )}
               </div>
-            )}
+
+              {/* Receipt/issue date column */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <span className="material-symbols-outlined text-sm text-primary">receipt</span>
+                  <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">By Issue Date</Label>
+                </div>
+                <div className="space-y-2">
+                  <div className="bg-muted px-3 py-2 rounded-lg">
+                    <p className="text-[10px] text-muted-foreground mb-1">From</p>
+                    <Input
+                      type="date"
+                      value={receiptFrom}
+                      onChange={(e) => setReceiptFrom(e.target.value)}
+                      className="bg-transparent border-none p-0 text-sm focus-visible:ring-0 text-foreground font-bold"
+                    />
+                  </div>
+                  <div className="bg-muted px-3 py-2 rounded-lg">
+                    <p className="text-[10px] text-muted-foreground mb-1">To</p>
+                    <Input
+                      type="date"
+                      value={receiptTo}
+                      onChange={(e) => setReceiptTo(e.target.value)}
+                      className="bg-transparent border-none p-0 text-sm focus-visible:ring-0 text-foreground font-bold"
+                    />
+                  </div>
+                </div>
+                {(receiptFrom || receiptTo) && (
+                  <button
+                    disabled={exporting}
+                    onClick={() => doExport({ date_basis: "receipt", date_from: receiptFrom || undefined, date_to: receiptTo || undefined })}
+                    className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-bold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity flex items-center gap-2"
+                  >
+                    <span className="material-symbols-outlined text-sm">date_range</span>
+                    Export
+                  </button>
+                )}
+              </div>
+            </div>
           </section>
 
           {/* Generate Zip Banner */}
