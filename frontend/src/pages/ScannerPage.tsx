@@ -65,13 +65,13 @@ export default function ScannerPage() {
   }, [dispatch, unsupported, insecure, classical, ml]);
 
   const handleCapture = useCallback(
-    async (imageData: ImageData, corners: Quad | null) => {
+    async (imageData: ImageData, corners: Quad | null, detectionScale: number) => {
       try {
         dispatch({ type: "captured", canvas: null as any, enhanced: null });
 
         uploadTestFrame(imageData, detector.name, corners);
 
-        const result = await extractAndEnhance(imageData, corners);
+        const result = await extractAndEnhance(imageData, corners, detectionScale);
 
         dispatch({ type: "captured", canvas: result.original, enhanced: result.enhanced });
       } catch (err: any) {

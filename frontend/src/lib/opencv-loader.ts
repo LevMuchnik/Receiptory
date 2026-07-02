@@ -43,8 +43,12 @@ export async function detectCorners(imageData: ImageData): Promise<any> {
 
 /**
  * Extract the document from a full-resolution capture.
- * Corners come from detectCorners() which ran on a 0.4x scaled frame,
- * so they need to be scaled up to match the full-res imageData.
+ * When `corners` are supplied, they were detected on a downscaled preview frame
+ * (see `detectionScale`, which varies with the stream resolution), so they are
+ * scaled up by 1/detectionScale to match the full-res imageData. When `corners`
+ * is null (e.g. a full-resolution still whose field of view differs from the
+ * preview), the document is re-detected on the image itself and `detectionScale`
+ * is ignored.
  */
 export async function extractAndEnhance(
   imageData: ImageData,
@@ -76,7 +80,11 @@ export async function extractAndEnhance(
     }
   }
 
-  // Fallback: run full detect+extract on the full-res frame
+  // Full detect+extract on the full-res frame. This is also the intended path
+  // for full-resolution stills (ImageCapture): callers pass corners=null so the
+  // document is re-detected here, because viewfinder corners were measured
+  // against the lower-res preview and don't map onto the still. Keep this branch
+  // doing a real detection — the photo capture path depends on it.
   if (!outputCanvas) {
     try {
       const result = await s.scan(fullCanvas, { mode: "extract", output: "canvas" });
