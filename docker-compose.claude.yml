@@ -1,0 +1,37 @@
+# Claude Code dev-container for developing Receiptory in place on UNRAID.
+#
+# Usage (from the repo dir on the NAS, e.g. /mnt/user/appdata/Receiptory):
+#
+#   docker compose -f docker-compose.claude.yml up -d --build
+#   docker exec -it claude-dev claude          # start an interactive session
+#
+# First run: authenticate once with /login (paste the code from the printed URL),
+# or set ANTHROPIC_API_KEY below. Auth is persisted under ./ .claude-dev-home
+# (mounted as $HOME) so it survives container and host restarts.
+#
+# Tear down with:  docker compose -f docker-compose.claude.yml down
+
+services:
+  claude-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.claude
+    container_name: claude-dev
+    working_dir: /workspace
+    environment:
+      # $HOME points at a bind-mounted dir so ~/.claude and ~/.claude.json persist.
+      - HOME=/home/dev
+      # Optional: uncomment to auth via API key instead of interactive /login.
+      # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    volumes:
+      # The repo itself — Claude edits these files in place.
+      - .:/workspace
+      # Persisted Claude config/auth (kept out of the repo; see .gitignore entry).
+      - ./.claude-dev-home:/home/dev
+      # Lets Claude rebuild/restart the app via `docker compose up -d --build`.
+      # SECURITY: this grants root-equivalent control of the host Docker daemon.
+      # Comment it out if you prefer to rebuild the app manually.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Keep it running so you can `docker exec` in whenever you want to work.
+    command: ["sleep", "infinity"]
+    restart: unless-stopped

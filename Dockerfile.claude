@@ -1,0 +1,28 @@
+# Claude Code dev-container for developing Receiptory in place on a NAS (e.g. UNRAID).
+#
+# This is NOT the application image (that's ./Dockerfile). It's a lightweight
+# sidecar that carries the Claude Code CLI plus a few dev tools, and bind-mounts
+# the repo so you can edit/build/fix the app without installing anything on the
+# UNRAID host (whose root filesystem is reset on every reboot).
+#
+# Build & run: see docs/claude-code-on-unraid.md or docker-compose.claude.yml.
+
+FROM node:20-bookworm
+
+# git/ripgrep for the CLI; docker.io provides ONLY the Docker *client*, which
+# drives the host daemon through the mounted /var/run/docker.sock so Claude can
+# rebuild/restart the app container. Remove docker.io if you'd rather rebuild by hand.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git \
+      ripgrep \
+      less \
+      ca-certificates \
+      docker.io \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @anthropic-ai/claude-code
+
+WORKDIR /workspace
+
+# Keep the container alive; you interact via `docker exec -it claude-dev claude`.
+CMD ["sleep", "infinity"]
