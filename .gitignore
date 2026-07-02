@@ -10,3 +10,4 @@ frontend/public/opencv/
 .pytest_cache/
 test_documents/
 .gstack/
+.claude-dev-home/

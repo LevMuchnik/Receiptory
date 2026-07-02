@@ -1,0 +1,48 @@
+# Claude Code dev-container for developing Receiptory in place on a NAS (e.g. UNRAID).
+#
+# This is NOT the application image (that's ./Dockerfile). It's a lightweight
+# sidecar that carries the Claude Code CLI plus a few dev tools, and bind-mounts
+# the repo so you can edit/build/fix the app without installing anything on the
+# UNRAID host (whose root filesystem is reset on every reboot).
+#
+# Build & run: see docs/claude-code-on-unraid.md or docker-compose.claude.yml.
+
+FROM node:20-bookworm
+
+# Dev tools for the Claude Code CLI.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git \
+      ripgrep \
+      less \
+      ca-certificates \
+      curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI + Compose v2 plugin ONLY (no daemon) from Docker's official repo.
+# These drive the *host* daemon via the mounted /var/run/docker.sock so Claude can
+# rebuild/restart the app with `docker compose up -d --build`. docker-ce-cli pulls
+# no dockerd; the compose/buildx plugins are what make `docker compose` available
+# (the Debian `docker.io` package does not ship the Compose v2 plugin).
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+       > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+         docker-ce-cli \
+         docker-compose-plugin \
+         docker-buildx-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @anthropic-ai/claude-code
+
+# The repo is bind-mounted and owned by the host user (e.g. UNRAID's nobody:users,
+# 99:100), while this container runs as root. Without this, git 2.39 refuses to
+# operate on it with "fatal: detected dubious ownership", which breaks Claude Code.
+RUN git config --system --add safe.directory '*'
+
+WORKDIR /workspace
+
+# Keep the container alive; you interact via `docker exec -it claude-dev claude`.
+CMD ["sleep", "infinity"]
