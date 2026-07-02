@@ -81,8 +81,8 @@ export default function DocumentTable({ documents, selected, onSelect, onSelectA
           Status {sortIcon("status")}
         </div>
         <div className="col-span-2">Category</div>
-        <div className="col-span-1 flex items-center gap-1 cursor-pointer select-none justify-end" onClick={() => onSort("receipt_date")}>
-          Date {sortIcon("receipt_date")}
+        <div className="col-span-1 flex items-center gap-1 cursor-pointer select-none justify-end" onClick={() => onSort("submission_date")}>
+          Ingested {sortIcon("submission_date")}
         </div>
       </div>
 
@@ -110,7 +110,7 @@ export default function DocumentTable({ documents, selected, onSelect, onSelectA
             </div>
             <div className="min-w-0">
               <p className="font-bold text-primary text-sm truncate">{doc.vendor_name || doc.original_filename}</p>
-              <p className="text-xs text-muted-foreground">{doc.receipt_date || doc.submission_date || "—"}</p>
+              <p className="text-xs text-muted-foreground">{doc.receipt_date || "—"}</p>
             </div>
           </div>
 
@@ -140,9 +140,9 @@ export default function DocumentTable({ documents, selected, onSelect, onSelectA
             )}
           </div>
 
-          {/* Date */}
+          {/* Ingested */}
           <div className="col-span-1 text-right">
-            <span className="text-xs text-muted-foreground">{doc.receipt_date || "—"}</span>
+            <span className="text-xs text-muted-foreground">{doc.submission_date?.slice(0, 10) || "—"}</span>
           </div>
         </div>
       ))}
