@@ -3,14 +3,62 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
 
+function BasisToggle({
+  value,
+  onChange,
+}: {
+  value: "ingestion" | "receipt";
+  onChange: (v: "ingestion" | "receipt") => void;
+}) {
+  return (
+    <div className="flex gap-1 bg-muted rounded-lg p-0.5">
+      <button
+        onClick={() => onChange("ingestion")}
+        className={`px-2.5 py-1 rounded text-[10px] font-bold transition-colors ${
+          value === "ingestion" ? "bg-card text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
+        }`}
+      >
+        Upload Date
+      </button>
+      <button
+        onClick={() => onChange("receipt")}
+        className={`px-2.5 py-1 rounded text-[10px] font-bold transition-colors ${
+          value === "receipt" ? "bg-card text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
+        }`}
+      >
+        Issue Date
+      </button>
+    </div>
+  );
+}
+
+function StepBtn({ icon, onClick, label }: { icon: string; onClick: () => void; label: string }) {
+  return (
+    <button
+      onClick={onClick}
+      aria-label={label}
+      className="h-10 w-10 flex items-center justify-center bg-muted rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-colors shrink-0"
+    >
+      <span className="material-symbols-outlined text-base leading-none">{icon}</span>
+    </button>
+  );
+}
+
+function currentMonth() {
+  return new Date().toISOString().slice(0, 7);
+}
+
 export default function ExportPage() {
-  const [ingestionFrom, setIngestionFrom] = useState("");
-  const [ingestionTo, setIngestionTo] = useState("");
-  const [receiptFrom, setReceiptFrom] = useState("");
-  const [receiptTo, setReceiptTo] = useState("");
-  const [presetBasis, setPresetBasis] = useState<"ingestion" | "receipt">("ingestion");
-  const [month, setMonth] = useState("");
+  const [month, setMonth] = useState(currentMonth());
+  const [monthBasis, setMonthBasis] = useState<"ingestion" | "receipt">("ingestion");
+
   const [year, setYear] = useState(new Date().getFullYear().toString());
+  const [yearBasis, setYearBasis] = useState<"ingestion" | "receipt">("ingestion");
+
+  const [rangeFrom, setRangeFrom] = useState("");
+  const [rangeTo, setRangeTo] = useState("");
+  const [rangeBasis, setRangeBasis] = useState<"ingestion" | "receipt">("ingestion");
+
   const [exporting, setExporting] = useState(false);
   const [lastExport, setLastExport] = useState<string | null>(null);
 
@@ -30,26 +78,18 @@ export default function ExportPage() {
     }
   };
 
-  const PRESETS = [
-    {
-      icon: "history",
-      label: "All since last export",
-      sub: "All pending documents",
-      action: () => doExport({ preset: "since_last_export", date_basis: presetBasis }),
-    },
-    {
-      icon: "calendar_today",
-      label: "This Month",
-      sub: month || new Date().toLocaleString("default", { month: "long", year: "numeric" }),
-      action: () => doExport({ preset: "month", month: month || new Date().toISOString().slice(0, 7), date_basis: presetBasis }),
-    },
-    {
-      icon: "calendar_month",
-      label: "Full Year",
-      sub: `FY ${year}`,
-      action: () => { if (!year || isNaN(parseInt(year)) || parseInt(year) < 1900) return; doExport({ preset: "full_year", year: parseInt(year), date_basis: presetBasis }); },
-    },
-  ];
+  const stepMonth = (delta: number) => {
+    const [y, m] = month.split("-").map(Number);
+    const d = new Date(y, m - 1 + delta, 1);
+    setMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  };
+
+  const stepYear = (delta: number) => {
+    const y = parseInt(year);
+    if (!isNaN(y)) setYear(String(y + delta));
+  };
+
+  const yearValid = !exporting && !!year && !isNaN(parseInt(year)) && parseInt(year) >= 1900;
 
   return (
     <div className="space-y-8">
@@ -71,171 +111,95 @@ export default function ExportPage() {
         {/* ── Left: configuration ──────────────────────────────────── */}
         <div className="lg:col-span-8 space-y-8">
 
-          {/* Quick Presets */}
-          <section className="bg-card rounded-xl shadow-[0_8px_32px_rgba(25,28,30,0.04)] p-6">
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-xs font-black uppercase text-muted-foreground tracking-[0.2em]">Quick Export Presets</h3>
-              <div className="flex gap-1 bg-muted rounded-lg p-1">
+          <section className="bg-card rounded-xl shadow-[0_8px_32px_rgba(25,28,30,0.04)] p-6 space-y-8">
+            <h3 className="text-xs font-black uppercase text-muted-foreground tracking-[0.2em]">Export Configuration</h3>
+
+            {/* Export by Month */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label className="text-[11px] font-bold text-muted-foreground uppercase">Export by Month</Label>
+                <BasisToggle value={monthBasis} onChange={setMonthBasis} />
+              </div>
+              <div className="flex gap-2 items-center">
+                <StepBtn icon="chevron_left" onClick={() => stepMonth(-1)} label="Previous month" />
+                <Input
+                  type="month"
+                  value={month}
+                  onChange={(e) => setMonth(e.target.value)}
+                  className="h-10 bg-muted border-none rounded-lg text-sm focus-visible:ring-primary/20 flex-1"
+                />
+                <StepBtn icon="chevron_right" onClick={() => stepMonth(1)} label="Next month" />
                 <button
-                  onClick={() => setPresetBasis("ingestion")}
-                  className={`px-3 py-1 rounded text-[11px] font-bold transition-colors ${
-                    presetBasis === "ingestion" ? "bg-card text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
-                  }`}
+                  disabled={exporting || !month}
+                  onClick={() => doExport({ preset: "month", month, date_basis: monthBasis })}
+                  className="h-10 px-4 bg-primary text-white rounded-lg text-sm font-bold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity shrink-0"
                 >
-                  By Upload Date
-                </button>
-                <button
-                  onClick={() => setPresetBasis("receipt")}
-                  className={`px-3 py-1 rounded text-[11px] font-bold transition-colors ${
-                    presetBasis === "receipt" ? "bg-card text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  By Issue Date
+                  Export
                 </button>
               </div>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {PRESETS.map((preset) => (
-                <button
-                  key={preset.label}
-                  disabled={exporting}
-                  onClick={preset.action}
-                  className="group flex flex-col items-start p-5 bg-muted rounded-lg hover:bg-primary hover:text-white transition-all duration-300 text-left disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <span className="material-symbols-outlined mb-3 text-primary group-hover:text-white">{preset.icon}</span>
-                  <span className="text-sm font-bold block text-foreground group-hover:text-white">{preset.label}</span>
-                  <span className="text-[11px] text-muted-foreground group-hover:text-white/70 mt-1">{preset.sub}</span>
-                </button>
-              ))}
-            </div>
-          </section>
 
-          {/* Custom Configuration */}
-          <section className="bg-card rounded-xl shadow-[0_8px_32px_rgba(25,28,30,0.04)] p-6">
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-xs font-black uppercase text-muted-foreground tracking-[0.2em]">Custom Configuration</h3>
+            {/* Export by Year */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label className="text-[11px] font-bold text-muted-foreground uppercase">Export by Year</Label>
+                <BasisToggle value={yearBasis} onChange={setYearBasis} />
+              </div>
+              <div className="flex gap-2 items-center">
+                <StepBtn icon="chevron_left" onClick={() => stepYear(-1)} label="Previous year" />
+                <Input
+                  type="number"
+                  value={year}
+                  onChange={(e) => setYear(e.target.value)}
+                  min="2020"
+                  max="2030"
+                  className="h-10 bg-muted border-none rounded-lg text-sm focus-visible:ring-primary/20 flex-1"
+                />
+                <StepBtn icon="chevron_right" onClick={() => stepYear(1)} label="Next year" />
+                <button
+                  disabled={!yearValid}
+                  onClick={() => doExport({ preset: "full_year", year: parseInt(year), date_basis: yearBasis })}
+                  className="h-10 px-4 bg-primary text-white rounded-lg text-sm font-bold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity shrink-0"
+                >
+                  Export
+                </button>
+              </div>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-6">
-              {/* Month picker */}
-              <div>
-                <Label className="block text-[11px] font-bold text-muted-foreground uppercase mb-2">Export by Month</Label>
-                <div className="flex gap-3">
+
+            {/* Custom Date Range */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label className="text-[11px] font-bold text-muted-foreground uppercase">Custom Date Range</Label>
+                <BasisToggle value={rangeBasis} onChange={setRangeBasis} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-muted px-3 py-2 rounded-lg">
+                  <p className="text-[10px] text-muted-foreground mb-1">From</p>
                   <Input
-                    type="month"
-                    value={month}
-                    onChange={(e) => setMonth(e.target.value)}
-                    className="bg-muted border-none rounded-lg text-sm focus-visible:ring-primary/20 flex-1"
+                    type="date"
+                    value={rangeFrom}
+                    onChange={(e) => setRangeFrom(e.target.value)}
+                    className="bg-transparent border-none p-0 text-sm focus-visible:ring-0 text-foreground font-bold"
                   />
-                  <button
-                    disabled={exporting || !month}
-                    onClick={() => doExport({ preset: "month", month, date_basis: presetBasis })}
-                    className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-bold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
-                  >
-                    Export
-                  </button>
                 </div>
-              </div>
-
-              {/* Year picker */}
-              <div>
-                <Label className="block text-[11px] font-bold text-muted-foreground uppercase mb-2">Export by Year</Label>
-                <div className="flex gap-3">
+                <div className="bg-muted px-3 py-2 rounded-lg">
+                  <p className="text-[10px] text-muted-foreground mb-1">To</p>
                   <Input
-                    type="number"
-                    value={year}
-                    onChange={(e) => setYear(e.target.value)}
-                    min="2020"
-                    max="2030"
-                    className="bg-muted border-none rounded-lg text-sm focus-visible:ring-primary/20 flex-1"
+                    type="date"
+                    value={rangeTo}
+                    onChange={(e) => setRangeTo(e.target.value)}
+                    className="bg-transparent border-none p-0 text-sm focus-visible:ring-0 text-foreground font-bold"
                   />
-                  <button
-                    disabled={exporting || !year || isNaN(parseInt(year)) || parseInt(year) < 1900}
-                    onClick={() => doExport({ preset: "full_year", year: parseInt(year), date_basis: presetBasis })}
-                    className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-bold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
-                  >
-                    Export
-                  </button>
                 </div>
               </div>
-            </div>
-
-            {/* Date range — two independent columns by date type */}
-            <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-6">
-              {/* Ingestion date column */}
-              <div className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <span className="material-symbols-outlined text-sm text-primary">upload</span>
-                  <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">By Ingestion Date</Label>
-                </div>
-                <div className="space-y-2">
-                  <div className="bg-muted px-3 py-2 rounded-lg">
-                    <p className="text-[10px] text-muted-foreground mb-1">From</p>
-                    <Input
-                      type="date"
-                      value={ingestionFrom}
-                      onChange={(e) => setIngestionFrom(e.target.value)}
-                      className="bg-transparent border-none p-0 text-sm focus-visible:ring-0 text-foreground font-bold"
-                    />
-                  </div>
-                  <div className="bg-muted px-3 py-2 rounded-lg">
-                    <p className="text-[10px] text-muted-foreground mb-1">To</p>
-                    <Input
-                      type="date"
-                      value={ingestionTo}
-                      onChange={(e) => setIngestionTo(e.target.value)}
-                      className="bg-transparent border-none p-0 text-sm focus-visible:ring-0 text-foreground font-bold"
-                    />
-                  </div>
-                </div>
-                {(ingestionFrom || ingestionTo) && (
-                  <button
-                    disabled={exporting}
-                    onClick={() => doExport({ date_basis: "ingestion", date_from: ingestionFrom || undefined, date_to: ingestionTo || undefined })}
-                    className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-bold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity flex items-center gap-2"
-                  >
-                    <span className="material-symbols-outlined text-sm">date_range</span>
-                    Export
-                  </button>
-                )}
-              </div>
-
-              {/* Receipt/issue date column */}
-              <div className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <span className="material-symbols-outlined text-sm text-primary">receipt</span>
-                  <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">By Issue Date</Label>
-                </div>
-                <div className="space-y-2">
-                  <div className="bg-muted px-3 py-2 rounded-lg">
-                    <p className="text-[10px] text-muted-foreground mb-1">From</p>
-                    <Input
-                      type="date"
-                      value={receiptFrom}
-                      onChange={(e) => setReceiptFrom(e.target.value)}
-                      className="bg-transparent border-none p-0 text-sm focus-visible:ring-0 text-foreground font-bold"
-                    />
-                  </div>
-                  <div className="bg-muted px-3 py-2 rounded-lg">
-                    <p className="text-[10px] text-muted-foreground mb-1">To</p>
-                    <Input
-                      type="date"
-                      value={receiptTo}
-                      onChange={(e) => setReceiptTo(e.target.value)}
-                      className="bg-transparent border-none p-0 text-sm focus-visible:ring-0 text-foreground font-bold"
-                    />
-                  </div>
-                </div>
-                {(receiptFrom || receiptTo) && (
-                  <button
-                    disabled={exporting}
-                    onClick={() => doExport({ date_basis: "receipt", date_from: receiptFrom || undefined, date_to: receiptTo || undefined })}
-                    className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-bold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity flex items-center gap-2"
-                  >
-                    <span className="material-symbols-outlined text-sm">date_range</span>
-                    Export
-                  </button>
-                )}
-              </div>
+              <button
+                disabled={exporting || (!rangeFrom && !rangeTo)}
+                onClick={() => doExport({ date_basis: rangeBasis, date_from: rangeFrom || undefined, date_to: rangeTo || undefined })}
+                className="h-10 px-4 bg-primary text-white rounded-lg text-sm font-bold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity flex items-center gap-2"
+              >
+                <span className="material-symbols-outlined text-sm">date_range</span>
+                Export
+              </button>
             </div>
           </section>
 
@@ -247,12 +211,12 @@ export default function ExportPage() {
               </div>
               <div>
                 <p className="text-sm font-bold">Ready for bundling</p>
-                <p className="text-xs text-[#96a9be]">Generates PDF + CSV package of selected documents</p>
+                <p className="text-xs text-[#96a9be]">Generates PDF + CSV package of all documents not yet exported</p>
               </div>
             </div>
             <button
               disabled={exporting}
-              onClick={() => doExport({ preset: "since_last_export", date_basis: presetBasis })}
+              onClick={() => doExport({ preset: "since_last_export", date_basis: "ingestion" })}
               className="w-full md:w-auto px-8 py-3 bg-card text-primary rounded-lg font-black text-sm hover:bg-[#d1e4fb] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-2 justify-center"
             >
               {exporting ? (
@@ -272,7 +236,6 @@ export default function ExportPage() {
 
         {/* ── Right: format info ───────────────────────────────────── */}
         <div className="lg:col-span-4 space-y-6">
-          {/* Output Standard */}
           <section className="bg-muted rounded-xl p-6">
             <h3 className="text-xs font-black uppercase text-muted-foreground tracking-[0.2em] mb-4">Output Standard</h3>
             <div className="space-y-4">
@@ -291,7 +254,6 @@ export default function ExportPage() {
             </div>
           </section>
 
-          {/* Help card */}
           <div className="relative overflow-hidden bg-[#2c3e50] rounded-xl p-6 text-white">
             <div className="relative z-10">
               <h4 className="text-sm font-bold mb-2">Need a different format?</h4>
