@@ -49,6 +49,10 @@ uv run pytest tests/test_e2e.py -v      # E2E only
 
 # Build frontend for production
 cd frontend && npm run build
+
+# gstack (Claude Code skills — run once after cloning)
+git submodule update --init --depth 1
+cd .claude/skills/gstack && ./setup
 ```
 
 ## Environment
