@@ -9,15 +9,30 @@
 
 FROM node:20-bookworm
 
-# git/ripgrep for the CLI; docker.io provides ONLY the Docker *client*, which
-# drives the host daemon through the mounted /var/run/docker.sock so Claude can
-# rebuild/restart the app container. Remove docker.io if you'd rather rebuild by hand.
+# Dev tools for the Claude Code CLI.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       ripgrep \
       less \
       ca-certificates \
-      docker.io \
+      curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI + Compose v2 plugin ONLY (no daemon) from Docker's official repo.
+# These drive the *host* daemon via the mounted /var/run/docker.sock so Claude can
+# rebuild/restart the app with `docker compose up -d --build`. docker-ce-cli pulls
+# no dockerd; the compose/buildx plugins are what make `docker compose` available
+# (the Debian `docker.io` package does not ship the Compose v2 plugin).
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+       > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+         docker-ce-cli \
+         docker-compose-plugin \
+         docker-buildx-plugin \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code

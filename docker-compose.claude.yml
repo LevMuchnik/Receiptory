@@ -17,13 +17,14 @@ services:
       context: .
       dockerfile: Dockerfile.claude
     container_name: claude-dev
-    # The repo is mounted at the SAME absolute path it has on the host (${PWD}).
+    # The repo is mounted at the SAME absolute path it has on the host.
     # This matters: when Claude rebuilds the app with `docker compose up -d --build`,
     # the CLI runs in this container but the host daemon (via the mounted socket)
     # resolves the app's bind mounts (e.g. ./data) against the HOST filesystem.
     # Matching the path on both sides keeps those mounts pointing at the real
     # /mnt/user/appdata/Receiptory/data instead of a stray empty dir.
-    working_dir: ${PWD}
+    # Override RECEIPTORY_DIR (env or .env) if your repo lives elsewhere.
+    working_dir: ${RECEIPTORY_DIR:-/mnt/user/appdata/Receiptory}
     environment:
       # $HOME points at a bind-mounted dir so ~/.claude and ~/.claude.json persist.
       - HOME=/home/dev
@@ -31,7 +32,7 @@ services:
       # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     volumes:
       # The repo, mounted at its real host path (see working_dir note above).
-      - ${PWD}:${PWD}
+      - ${RECEIPTORY_DIR:-/mnt/user/appdata/Receiptory}:${RECEIPTORY_DIR:-/mnt/user/appdata/Receiptory}
       # Persisted Claude config/auth (kept out of the repo; see .gitignore entry).
       - ./.claude-dev-home:/home/dev
       # Lets Claude rebuild/restart the app via `docker compose up -d --build`.

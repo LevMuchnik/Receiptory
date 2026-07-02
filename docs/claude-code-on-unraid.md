@@ -16,7 +16,8 @@ the same for Claude Code.
 ## What's here
 
 - **`Dockerfile.claude`** — a lightweight `node:20` image with the Claude Code CLI,
-  `git`, `ripgrep`, and the Docker *client* (to drive the host daemon).
+  `git`, `ripgrep`, and the Docker *client* + Compose v2 plugin (client-only, no
+  daemon; drives the host daemon via the mounted socket).
 - **`docker-compose.claude.yml`** — runs that image as a `claude-dev` container,
   bind-mounting the repo and persisting Claude's auth.
 
@@ -55,12 +56,13 @@ docker compose up -d --build      # uses ./docker-compose.yml + ./Dockerfile
 ```
 
 This works because the repo is mounted at the **same absolute path** inside the
-sidecar as it has on the host (via `${PWD}` in `docker-compose.claude.yml`). The
-Docker CLI runs in the sidecar, but the host daemon resolves the app's bind mounts
-(e.g. `./data`) against the host filesystem — matching paths keeps `./data`
-pointing at the real `/mnt/user/appdata/Receiptory/data` instead of a stray empty
-directory. (If you launch the sidecar from a different directory, launch it from
-the repo root so `${PWD}` is correct.)
+sidecar as it has on the host (`RECEIPTORY_DIR`, defaulting to
+`/mnt/user/appdata/Receiptory` in `docker-compose.claude.yml`). The Docker CLI
+runs in the sidecar, but the host daemon resolves the app's bind mounts (e.g.
+`./data`) against the host filesystem — matching paths keeps `./data` pointing at
+the real `/mnt/user/appdata/Receiptory/data` instead of a stray empty directory.
+If your repo lives elsewhere, set `RECEIPTORY_DIR` (in the environment or a `.env`
+file next to the compose file) to its absolute host path.
 
 This reuses the app's real image build (backend + frontend), so the dev container
 doesn't need Python/uv/npm. For tighter loops (running `pytest`, hot reload) you
