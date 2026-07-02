@@ -58,38 +58,59 @@ export function useCamera(): UseCameraResult {
   // capture comes from ImageCapture.takePhoto(), not this stream. Requesting an
   // extreme/near-square resolution (e.g. ideal 9999x9999) made getUserMedia hang
   // or return a track that never produced frames on some multi-lens Android
-  // devices (Galaxy S26 Ultra), leaving `ready` stuck false. Use a standard 1080p
-  // 16:9 preview, which negotiates reliably everywhere. Binding to the <video>
-  // element happens in Effect B so a null videoRef at resolve time is retried on
-  // the next render instead of being silently dropped (the black-screen race,
-  // issue #4).
+  // devices (Galaxy S26 Ultra), leaving `ready` stuck false. Binding to the
+  // <video> element happens in Effect B so a null videoRef at resolve time is
+  // retried on the next render instead of being silently dropped (the
+  // black-screen race, issue #4).
+  //
+  // Constraint-fallback ladder: multi-lens Android devices frequently reject a
+  // fully-specified request with NotReadableError ("Couldn't start video
+  // source") or OverconstrainedError — the physical camera the OS maps
+  // "environment" onto can't initialize at the requested resolution/framerate.
+  // Retry with progressively looser constraints so we get SOME working rear (or
+  // any) camera rather than failing outright. `width/height` are `ideal` (not
+  // exact) so a satisfiable request is never over-constrained; the ladder exists
+  // for the harder failures where even ideal hints wedge the driver.
   useEffect(() => {
     let cancelled = false;
 
     async function start() {
-      try {
-        const s = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: "environment" },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-          },
-        });
-        if (cancelled) {
-          s.getTracks().forEach((t) => t.stop());
-          return;
-        }
-        setStream(s);
-      } catch (err: any) {
-        if (!cancelled) {
-          if (err.name === "NotAllowedError") {
-            setError("Camera permission denied. Please allow camera access and refresh.");
-          } else if (err.name === "NotFoundError") {
-            setError("No camera found on this device.");
-          } else {
-            setError(`Camera error: ${err.message}`);
+      const attempts: MediaStreamConstraints[] = [
+        { video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } } },
+        { video: { facingMode: { ideal: "environment" } } },
+        { video: true },
+      ];
+
+      let lastErr: any = null;
+      for (const constraints of attempts) {
+        if (cancelled) return;
+        try {
+          const s = await navigator.mediaDevices.getUserMedia(constraints);
+          if (cancelled) {
+            s.getTracks().forEach((t) => t.stop());
+            return;
           }
+          setStream(s);
+          return;
+        } catch (err: any) {
+          lastErr = err;
+          // Permission and no-camera are terminal — looser constraints won't
+          // help, so stop laddering and report immediately.
+          if (err.name === "NotAllowedError" || err.name === "NotFoundError") break;
         }
+      }
+
+      if (cancelled) return;
+      if (lastErr?.name === "NotAllowedError") {
+        setError("Camera permission denied. Please allow camera access and refresh.");
+      } else if (lastErr?.name === "NotFoundError") {
+        setError("No camera found on this device.");
+      } else if (lastErr?.name === "NotReadableError") {
+        setError(
+          "Couldn't start the camera. Another app may be using it — close other camera apps, then close and reopen the scanner.",
+        );
+      } else {
+        setError(`Camera error: ${lastErr?.message ?? "unknown"}`);
       }
     }
 
