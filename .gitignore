@@ -11,3 +11,4 @@ frontend/public/opencv/
 test_documents/
 .gstack/
 .claude-dev-home/
+.claude/skills/gstack/
