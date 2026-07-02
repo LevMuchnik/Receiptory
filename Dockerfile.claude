@@ -35,6 +35,15 @@ RUN install -m 0755 -d /etc/apt/keyrings \
          docker-buildx-plugin \
     && rm -rf /var/lib/apt/lists/*
 
+# GitHub CLI — used for PR review/create and as git credential helper (gh auth setup-git).
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN npm install -g @anthropic-ai/claude-code
 
 # The repo is bind-mounted and owned by the host user (e.g. UNRAID's nobody:users,
@@ -42,7 +51,16 @@ RUN npm install -g @anthropic-ai/claude-code
 # operate on it with "fatal: detected dubious ownership", which breaks Claude Code.
 RUN git config --system --add safe.directory '*'
 
+RUN printf '#!/bin/sh\nexec claude --dangerously-skip-permissions --continue "$@"\n' \
+    > /usr/local/bin/claude-yolo && chmod +x /usr/local/bin/claude-yolo
+
 WORKDIR /workspace
+
+# Entrypoint: wire gh as git credential helper if GH_TOKEN is present, then hand off.
+RUN printf '#!/bin/sh\nif [ -n "$GH_TOKEN" ]; then\n  gh auth setup-git\nfi\nexec "$@"\n' \
+    > /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Keep the container alive; you interact via `docker exec -it claude-dev claude`.
 CMD ["sleep", "infinity"]

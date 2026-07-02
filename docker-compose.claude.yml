@@ -28,6 +28,8 @@ services:
     environment:
       # $HOME points at a bind-mounted dir so ~/.claude and ~/.claude.json persist.
       - HOME=/home/dev
+      - IS_SANDBOX=1
+      - GH_TOKEN=${GH_TOKEN}
       # Optional: uncomment to auth via API key instead of interactive /login.
       # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     volumes:

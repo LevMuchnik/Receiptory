@@ -281,6 +281,34 @@ The Vite dev server runs on port 5173 with API proxy to localhost:8484. Set `REC
 uv run pytest tests/ -v
 ```
 
+### Claude Code Dev Container
+
+A sidecar container for in-place development on UNRAID (no host installs needed):
+
+```bash
+# First run / after Dockerfile changes — rebuild then launch:
+docker compose -f docker-compose.claude.yml up -d --build && docker exec -it claude-dev claude-yolo
+
+# Normal launch (container already running):
+docker exec -it claude-dev claude-yolo
+```
+
+`claude-yolo` is a script baked into the image that runs:
+
+```
+claude --dangerously-skip-permissions --continue
+```
+
+`--continue` resumes the most recent conversation automatically. Drop it for a fresh session:
+
+```bash
+docker exec -it claude-dev claude --dangerously-skip-permissions
+```
+
+Auth and Claude config persist in `.claude-dev-home/`.
+
+---
+
 ### Production Build
 
 ```bash
