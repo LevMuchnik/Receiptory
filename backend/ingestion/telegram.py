@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re as _re
 import tempfile
@@ -20,6 +21,7 @@ from backend.ingestion.url_fetcher import fetch_url
 logger = logging.getLogger(__name__)
 
 _app: Application | None = None
+_main_loop: asyncio.AbstractEventLoop | None = None
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -245,7 +247,7 @@ def _is_authorized(user_id: int) -> bool:
 
 async def start_telegram_bot(data_dir: str) -> None:
     """Start the Telegram bot (non-blocking, runs via polling)."""
-    global _app
+    global _app, _main_loop
 
     token = get_setting("telegram_bot_token")
     if not token:
@@ -253,6 +255,7 @@ async def start_telegram_bot(data_dir: str) -> None:
         return
 
     logger.info("Starting Telegram bot...")
+    _main_loop = asyncio.get_running_loop()
     _app = Application.builder().token(token).build()
     _app.bot_data["data_dir"] = data_dir
 
@@ -269,7 +272,7 @@ async def start_telegram_bot(data_dir: str) -> None:
 
 async def stop_telegram_bot() -> None:
     """Stop the Telegram bot gracefully."""
-    global _app
+    global _app, _main_loop
     if _app is None:
         return
     logger.info("Stopping Telegram bot...")
@@ -277,4 +280,5 @@ async def stop_telegram_bot() -> None:
     await _app.stop()
     await _app.shutdown()
     _app = None
+    _main_loop = None
     logger.info("Telegram bot stopped")

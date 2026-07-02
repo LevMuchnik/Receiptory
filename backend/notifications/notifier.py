@@ -93,11 +93,19 @@ def _send_telegram(caption: str, image_bytes: bytes | None) -> None:
         from backend.notifications.telegram_notify import send_telegram_notification
         try:
             loop = asyncio.get_running_loop()
-            # We're inside a running event loop — schedule as a task
+            # Called from an async context — schedule on the current loop.
             asyncio.ensure_future(send_telegram_notification(caption, image_bytes))
         except RuntimeError:
-            # No running event loop — run synchronously
-            asyncio.run(send_telegram_notification(caption, image_bytes))
+            # Called from an executor thread (no running loop).
+            # Marshal onto the main uvicorn loop so we never call the shared
+            # bot's httpx client from a foreign loop — asyncio.run() would
+            # create+close a throwaway loop that poisons the connection pool.
+            from backend.ingestion.telegram import _main_loop
+            if _main_loop is not None and _main_loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    send_telegram_notification(caption, image_bytes),
+                    _main_loop,
+                )
     except Exception as e:
         logger.error(f"Telegram notification error: {e}")
 
