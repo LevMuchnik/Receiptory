@@ -41,17 +41,28 @@ const MAX_CAPTURE_DIM = 4096;
 // loading overlay forever (issue #4).
 const READY_TIMEOUT_MS = 2500;
 
+// If frames still haven't arrived by this point the stream failed to start
+// (bad constraints, a camera the OS won't hand over, a lens that never
+// produces). Surface a retriable error instead of leaving the user on an
+// infinite black loading overlay.
+const STUCK_TIMEOUT_MS = 7000;
+
 export function useCamera(): UseCameraResult {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
 
-  // Effect A — acquire the stream once. Request the maximum resolution the
-  // device will grant (Android Chrome typically yields 4K; iOS Safari caps at
-  // ~720p regardless). Binding to the <video> element happens in Effect B so a
-  // null videoRef at resolve time is retried on the next render instead of
-  // being silently dropped (the black-screen race, issue #4).
+  // Effect A — acquire the stream once. The PREVIEW only needs to be reliable
+  // enough to show the viewfinder and run corner detection; the full-resolution
+  // capture comes from ImageCapture.takePhoto(), not this stream. Requesting an
+  // extreme/near-square resolution (e.g. ideal 9999x9999) made getUserMedia hang
+  // or return a track that never produced frames on some multi-lens Android
+  // devices (Galaxy S26 Ultra), leaving `ready` stuck false. Use a standard 1080p
+  // 16:9 preview, which negotiates reliably everywhere. Binding to the <video>
+  // element happens in Effect B so a null videoRef at resolve time is retried on
+  // the next render instead of being silently dropped (the black-screen race,
+  // issue #4).
   useEffect(() => {
     let cancelled = false;
 
@@ -60,8 +71,8 @@ export function useCamera(): UseCameraResult {
         const s = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: { ideal: "environment" },
-            width: { ideal: 9999 },
-            height: { ideal: 9999 },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
           },
         });
         if (cancelled) {
@@ -126,8 +137,18 @@ export function useCamera(): UseCameraResult {
       if (video.videoWidth > 0) setReady(true);
     }, READY_TIMEOUT_MS);
 
+    // Read videoWidth fresh at fire time (not stale `ready` state): if the
+    // stream produced frames it's >0 and we stay silent; if it's still 0 the
+    // camera never started, so show an actionable error.
+    const stuckTimer = setTimeout(() => {
+      if (video.videoWidth === 0) {
+        setError("Camera didn't start. Close and reopen the scanner, or reload the page.");
+      }
+    }, STUCK_TIMEOUT_MS);
+
     return () => {
       clearTimeout(readyTimer);
+      clearTimeout(stuckTimer);
       video.removeEventListener("loadedmetadata", onReady);
       video.removeEventListener("loadeddata", onReady);
     };
