@@ -1,13 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useCamera } from "@/lib/useCamera";
-import type { Detector, Quad } from "@/lib/scanner/detector";
-import { TemporalSmoother } from "@/lib/scanner/smoother";
+import { detectCorners } from "@/lib/opencv-loader";
+import type { Quad } from "@/lib/scanner/detector";
 
 interface CameraViewfinderProps {
-  detector: Detector;
-  detectorParams: any;
   onCapture: (imageData: ImageData, corners: Quad | null, detectionScale: number) => void;
-  onAutoCapture?: () => void;
 }
 
 // Live-detection input is downscaled for speed. We cap the long side at
@@ -16,12 +13,15 @@ interface CameraViewfinderProps {
 const BASE_DETECTION_SCALE = 0.4;
 const DETECTION_MAX_DIM = 800;
 
-export default function CameraViewfinder({
-  detector,
-  detectorParams,
-  onCapture,
-  onAutoCapture,
-}: CameraViewfinderProps) {
+// The live overlay is an aiming aid, not the crop source — the captured still
+// is re-detected at full resolution in extractAndEnhance. Detection here runs
+// raw Scanic on the downscaled frame and draws whatever it returns: no
+// temporal smoothing, no preprocessing, no plausibility gates. The lab-tuned
+// pipeline (ClassicalDetector/MLDetector + TemporalSmoother) proved unusable
+// on-device — sticky EMA that never recovered from panning, min-area rejects
+// that dropped real receipts, and main-thread preprocessing jank — so it
+// lives on only in ScannerLabPage for offline experimentation.
+export default function CameraViewfinder({ onCapture }: CameraViewfinderProps) {
   const { videoRef, error, ready, capturePhoto } = useCamera();
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const cornersRef = useRef<Quad | null>(null);
@@ -29,8 +29,6 @@ export default function CameraViewfinder({
   const [capturing, setCapturing] = useState(false);
   const frameCount = useRef(0);
   const detecting = useRef(false);
-  const smoother = useMemo(() => new TemporalSmoother(), []);
-  const lastAutoCaptureRef = useRef(0);
   const detScaleRef = useRef(BASE_DETECTION_SCALE);
   // Synchronous guard against overlapping captures (takePhoto can take ~2s).
   // A ref, not just `capturing`, so a rapid double-tap before the re-render
@@ -61,23 +59,11 @@ export default function CameraViewfinder({
         const ctx = offscreen.getContext("2d")!;
         ctx.drawImage(video, 0, 0, offscreen.width, offscreen.height);
         const imageData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
-        const diag = Math.hypot(offscreen.width, offscreen.height);
 
-        detector
-          .detect(imageData, detectorParams)
-          .then((result) => {
-            smoother.push(result, diag);
-            const ema = smoother.getEMA();
-            cornersRef.current = ema;
-            setDocumentDetected(!!ema);
-
-            if (ema && onAutoCapture && smoother.shouldAutoCapture()) {
-              const now = performance.now();
-              if (now - lastAutoCaptureRef.current > 2000) {
-                lastAutoCaptureRef.current = now;
-                onAutoCapture();
-              }
-            }
+        detectCorners(imageData)
+          .then((corners) => {
+            cornersRef.current = corners;
+            setDocumentDetected(!!corners);
             detecting.current = false;
           })
           .catch(() => {
@@ -129,7 +115,7 @@ export default function CameraViewfinder({
 
     animId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animId);
-  }, [ready, videoRef, detector, detectorParams, smoother, onAutoCapture]);
+  }, [ready, videoRef]);
 
   const handleCapture = useCallback(async () => {
     if (capturingRef.current) return;
