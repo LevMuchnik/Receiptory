@@ -6,7 +6,7 @@
 #   docker exec -it claude-dev claude          # start an interactive session
 #
 # First run: authenticate once with /login (paste the code from the printed URL),
-# or set ANTHROPIC_API_KEY below. Auth is persisted under ./ .claude-dev-home
+# or set ANTHROPIC_API_KEY below. Auth is persisted under ./.claude-dev-home
 # (mounted as $HOME) so it survives container and host restarts.
 #
 # Tear down with:  docker compose -f docker-compose.claude.yml down
@@ -17,15 +17,21 @@ services:
       context: .
       dockerfile: Dockerfile.claude
     container_name: claude-dev
-    working_dir: /workspace
+    # The repo is mounted at the SAME absolute path it has on the host (${PWD}).
+    # This matters: when Claude rebuilds the app with `docker compose up -d --build`,
+    # the CLI runs in this container but the host daemon (via the mounted socket)
+    # resolves the app's bind mounts (e.g. ./data) against the HOST filesystem.
+    # Matching the path on both sides keeps those mounts pointing at the real
+    # /mnt/user/appdata/Receiptory/data instead of a stray empty dir.
+    working_dir: ${PWD}
     environment:
       # $HOME points at a bind-mounted dir so ~/.claude and ~/.claude.json persist.
       - HOME=/home/dev
       # Optional: uncomment to auth via API key instead of interactive /login.
       # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     volumes:
-      # The repo itself — Claude edits these files in place.
-      - .:/workspace
+      # The repo, mounted at its real host path (see working_dir note above).
+      - ${PWD}:${PWD}
       # Persisted Claude config/auth (kept out of the repo; see .gitignore entry).
       - ./.claude-dev-home:/home/dev
       # Lets Claude rebuild/restart the app via `docker compose up -d --build`.

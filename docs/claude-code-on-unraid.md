@@ -46,13 +46,21 @@ and it survives container and host restarts. That directory is git-ignored.
 
 ## The dev loop
 
-Claude edits the live files under `/workspace` (= the repo). To see changes in the
-running app, rebuild and restart the application container — Claude can do this
-itself via the mounted Docker socket:
+Claude edits the live repo files in place. To see changes in the running app,
+rebuild and restart the application container — Claude can do this itself via the
+mounted Docker socket:
 
 ```bash
 docker compose up -d --build      # uses ./docker-compose.yml + ./Dockerfile
 ```
+
+This works because the repo is mounted at the **same absolute path** inside the
+sidecar as it has on the host (via `${PWD}` in `docker-compose.claude.yml`). The
+Docker CLI runs in the sidecar, but the host daemon resolves the app's bind mounts
+(e.g. `./data`) against the host filesystem — matching paths keeps `./data`
+pointing at the real `/mnt/user/appdata/Receiptory/data` instead of a stray empty
+directory. (If you launch the sidecar from a different directory, launch it from
+the repo root so `${PWD}` is correct.)
 
 This reuses the app's real image build (backend + frontend), so the dev container
 doesn't need Python/uv/npm. For tighter loops (running `pytest`, hot reload) you

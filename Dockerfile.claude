@@ -22,6 +22,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN npm install -g @anthropic-ai/claude-code
 
+# The repo is bind-mounted and owned by the host user (e.g. UNRAID's nobody:users,
+# 99:100), while this container runs as root. Without this, git 2.39 refuses to
+# operate on it with "fatal: detected dubious ownership", which breaks Claude Code.
+RUN git config --system --add safe.directory '*'
+
 WORKDIR /workspace
 
 # Keep the container alive; you interact via `docker exec -it claude-dev claude`.
