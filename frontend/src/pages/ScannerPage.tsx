@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { isWebView, isSecureContext } from "@/lib/platform";
@@ -6,17 +6,29 @@ import { initScanner, extractAndEnhance, terminateScanner } from "@/lib/opencv-l
 import { buildPDF } from "@/lib/pdf-builder";
 import { useScanner } from "@/lib/useScanner";
 import type { ScannedPage } from "@/lib/pdf-builder";
-import type { Quad } from "@/lib/scanner/detector";
+import { ClassicalDetector } from "@/lib/scanner/classical-detector";
+import { MLDetector } from "@/lib/scanner/ml-detector";
+import type { Detector, Quad } from "@/lib/scanner/detector";
 import { uploadTestFrame } from "@/lib/scanner/test-frame-upload";
 import ScannerNav from "@/components/scanner/ScannerNav";
 import CameraViewfinder from "@/components/scanner/CameraViewfinder";
 import CaptureReview from "@/components/scanner/CaptureReview";
 import WebViewWarning from "@/components/scanner/WebViewWarning";
 
+interface ActiveConfig {
+  detector: string;
+  params: any;
+}
+
 export default function ScannerPage() {
   const navigate = useNavigate();
   const { state, pages, dispatch, addPage, clearPages } = useScanner();
   const [loadProgress, setLoadProgress] = useState("Initializing...");
+
+  const classical = useMemo(() => new ClassicalDetector(), []);
+  const ml = useMemo(() => new MLDetector(), []);
+  const [detector, setDetector] = useState<Detector>(() => classical);
+  const [detectorParams, setDetectorParams] = useState<any>(() => classical.getDefaultParams());
 
   const insecure = !isSecureContext();
   const unsupported = isWebView();
@@ -29,6 +41,18 @@ export default function ScannerPage() {
       try {
         setLoadProgress("Loading scanner engine...");
         await initScanner();
+        try {
+          const cfg = await api.get<ActiveConfig>("/scanner/active-config");
+          if (cfg?.detector === "ml") {
+            setDetector(ml);
+            setDetectorParams({ ...ml.getDefaultParams(), ...(cfg.params ?? {}) });
+          } else {
+            setDetector(classical);
+            setDetectorParams({ ...classical.getDefaultParams(), ...(cfg?.params ?? {}) });
+          }
+        } catch {
+          // Fall back to defaults if active config unreachable.
+        }
         if (cancelled) return;
         dispatch({ type: "loaded" });
       } catch (err: any) {
@@ -38,23 +62,23 @@ export default function ScannerPage() {
 
     init();
     return () => { cancelled = true; };
-  }, [dispatch, unsupported, insecure]);
+  }, [dispatch, unsupported, insecure, classical, ml]);
 
   const handleCapture = useCallback(
-    async (imageData: ImageData, corners: Quad | null, detectionScale: number) => {
+    async (imageData: ImageData, corners: Quad | null) => {
       try {
         dispatch({ type: "captured", canvas: null as any, enhanced: null });
 
-        uploadTestFrame(imageData, "scanic", corners);
+        uploadTestFrame(imageData, detector.name, corners);
 
-        const result = await extractAndEnhance(imageData, corners, detectionScale);
+        const result = await extractAndEnhance(imageData, corners);
 
         dispatch({ type: "captured", canvas: result.original, enhanced: result.enhanced });
       } catch (err: any) {
         dispatch({ type: "error", message: `Capture failed: ${err.message}` });
       }
     },
-    [dispatch]
+    [dispatch, detector]
   );
 
   const handleSubmit = useCallback(
@@ -117,7 +141,11 @@ export default function ScannerPage() {
       )}
 
       {state.phase === "viewfinder" && (
-        <CameraViewfinder onCapture={handleCapture} />
+        <CameraViewfinder
+          detector={detector}
+          detectorParams={detectorParams}
+          onCapture={handleCapture}
+        />
       )}
 
       {state.phase === "reviewing" && state.capturedCanvas && (

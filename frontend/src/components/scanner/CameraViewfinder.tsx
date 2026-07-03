@@ -1,39 +1,31 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useCamera } from "@/lib/useCamera";
-import { detectCorners } from "@/lib/opencv-loader";
-import type { Quad } from "@/lib/scanner/detector";
+import type { Detector, Quad } from "@/lib/scanner/detector";
+import { TemporalSmoother } from "@/lib/scanner/smoother";
 
 interface CameraViewfinderProps {
-  onCapture: (imageData: ImageData, corners: Quad | null, detectionScale: number) => void;
+  detector: Detector;
+  detectorParams: any;
+  onCapture: (imageData: ImageData, corners: Quad | null) => void;
+  onAutoCapture?: () => void;
 }
 
-// Live-detection input is downscaled for speed. We cap the long side at
-// DETECTION_MAX_DIM so a 4K preview doesn't quadruple the detector's workload;
-// BASE_DETECTION_SCALE is the ceiling applied to lower-resolution streams.
-const BASE_DETECTION_SCALE = 0.4;
-const DETECTION_MAX_DIM = 800;
+const DETECTION_SCALE = 0.4;
 
-// The live overlay is an aiming aid, not the crop source — the captured still
-// is re-detected at full resolution in extractAndEnhance. Detection here runs
-// raw Scanic on the downscaled frame and draws whatever it returns: no
-// temporal smoothing, no preprocessing, no plausibility gates. The lab-tuned
-// pipeline (ClassicalDetector/MLDetector + TemporalSmoother) proved unusable
-// on-device — sticky EMA that never recovered from panning, min-area rejects
-// that dropped real receipts, and main-thread preprocessing jank — so it
-// lives on only in ScannerLabPage for offline experimentation.
-export default function CameraViewfinder({ onCapture }: CameraViewfinderProps) {
-  const { videoRef, error, ready, capturePhoto } = useCamera();
+export default function CameraViewfinder({
+  detector,
+  detectorParams,
+  onCapture,
+  onAutoCapture,
+}: CameraViewfinderProps) {
+  const { videoRef, error, ready } = useCamera();
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const cornersRef = useRef<Quad | null>(null);
   const [documentDetected, setDocumentDetected] = useState(false);
-  const [capturing, setCapturing] = useState(false);
   const frameCount = useRef(0);
   const detecting = useRef(false);
-  const detScaleRef = useRef(BASE_DETECTION_SCALE);
-  // Synchronous guard against overlapping captures (takePhoto can take ~2s).
-  // A ref, not just `capturing`, so a rapid double-tap before the re-render
-  // can't slip a second call through a stale closure.
-  const capturingRef = useRef(false);
+  const smoother = useMemo(() => new TemporalSmoother(), []);
+  const lastAutoCaptureRef = useRef(0);
 
   useEffect(() => {
     if (!ready) return;
@@ -46,24 +38,30 @@ export default function CameraViewfinder({ onCapture }: CameraViewfinderProps) {
     const tick = () => {
       frameCount.current++;
 
-      const detScale =
-        video.videoWidth > 0
-          ? Math.min(BASE_DETECTION_SCALE, DETECTION_MAX_DIM / Math.max(video.videoWidth, video.videoHeight))
-          : BASE_DETECTION_SCALE;
-      detScaleRef.current = detScale;
-
       if (frameCount.current % 5 === 0 && video.videoWidth > 0 && !detecting.current) {
         detecting.current = true;
-        offscreen.width = Math.round(video.videoWidth * detScale);
-        offscreen.height = Math.round(video.videoHeight * detScale);
+        offscreen.width = Math.round(video.videoWidth * DETECTION_SCALE);
+        offscreen.height = Math.round(video.videoHeight * DETECTION_SCALE);
         const ctx = offscreen.getContext("2d")!;
         ctx.drawImage(video, 0, 0, offscreen.width, offscreen.height);
         const imageData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
+        const diag = Math.hypot(offscreen.width, offscreen.height);
 
-        detectCorners(imageData)
-          .then((corners) => {
-            cornersRef.current = corners;
-            setDocumentDetected(!!corners);
+        detector
+          .detect(imageData, detectorParams)
+          .then((result) => {
+            smoother.push(result, diag);
+            const ema = smoother.getEMA();
+            cornersRef.current = ema;
+            setDocumentDetected(!!ema);
+
+            if (ema && onAutoCapture && smoother.shouldAutoCapture()) {
+              const now = performance.now();
+              if (now - lastAutoCaptureRef.current > 2000) {
+                lastAutoCaptureRef.current = now;
+                onAutoCapture();
+              }
+            }
             detecting.current = false;
           })
           .catch(() => {
@@ -82,8 +80,8 @@ export default function CameraViewfinder({ onCapture }: CameraViewfinderProps) {
 
         const corners = cornersRef.current;
         if (corners) {
-          const scaleX = overlay.width / (video.videoWidth * detScale);
-          const scaleY = overlay.height / (video.videoHeight * detScale);
+          const scaleX = overlay.width / (video.videoWidth * DETECTION_SCALE);
+          const scaleY = overlay.height / (video.videoHeight * DETECTION_SCALE);
           const pts = [corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft];
 
           ctx.beginPath();
@@ -115,29 +113,19 @@ export default function CameraViewfinder({ onCapture }: CameraViewfinderProps) {
 
     animId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animId);
-  }, [ready, videoRef]);
+  }, [ready, videoRef, detector, detectorParams, smoother, onAutoCapture]);
 
-  const handleCapture = useCallback(async () => {
-    if (capturingRef.current) return;
-    capturingRef.current = true;
-    setCapturing(true);
-    try {
-      const result = await capturePhoto();
-      if (!result) return;
-      if (result.source === "photo") {
-        // Full-resolution still: the viewfinder corners were detected against
-        // the preview stream (different resolution / field of view), so they
-        // don't apply. Pass null to make extractAndEnhance re-detect on this
-        // image.
-        onCapture(result.imageData, null, 1);
-      } else {
-        onCapture(result.imageData, cornersRef.current, detScaleRef.current);
-      }
-    } finally {
-      capturingRef.current = false;
-      setCapturing(false);
-    }
-  }, [capturePhoto, onCapture]);
+  const handleCapture = useCallback(() => {
+    const video = videoRef.current;
+    if (!video || !ready) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(video, 0, 0);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    onCapture(imageData, cornersRef.current);
+  }, [videoRef, ready, onCapture]);
 
   if (error) {
     return (
@@ -170,8 +158,8 @@ export default function CameraViewfinder({ onCapture }: CameraViewfinderProps) {
       <div className="absolute bottom-8 left-0 right-0 flex justify-center">
         <button
           onClick={handleCapture}
-          disabled={!ready || capturing}
-          className={`w-20 h-20 rounded-full border-4 border-white flex items-center justify-center transition-all active:scale-90 disabled:opacity-60 ${
+          disabled={!ready}
+          className={`w-20 h-20 rounded-full border-4 border-white flex items-center justify-center transition-all active:scale-90 ${
             documentDetected ? "bg-[#006d37]/80" : "bg-white/20"
           }`}
         >
