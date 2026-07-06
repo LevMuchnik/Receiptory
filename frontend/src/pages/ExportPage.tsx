@@ -65,11 +65,11 @@ export default function ExportPage() {
   const doExport = async (body: any) => {
     setExporting(true);
     try {
-      const blob = await api.exportDocs(body);
+      const { blob, filename } = await api.exportDocs(body);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "receiptory_export.zip";
+      a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
       setLastExport(new Date().toLocaleString());

@@ -199,6 +199,15 @@ export default function SettingsPage() {
                     onChange={(e) => setSettings({ ...settings, business_names: e.target.value })}
                   />
                 </FieldGroup>
+                <FieldGroup label="Export Name (used in export file names; defaults to first business name)">
+                  <Input
+                    className={inputCls}
+                    value={settings.export_name ?? ""}
+                    placeholder="e.g. Lev_Muchnik"
+                    onBlur={(e) => save({ export_name: e.target.value.trim() })}
+                    onChange={(e) => setSettings({ ...settings, export_name: e.target.value })}
+                  />
+                </FieldGroup>
                 <FieldGroup label="Business Addresses (semicolon-separated)">
                   <Input
                     className={inputCls}

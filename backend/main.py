@@ -90,6 +90,7 @@ def create_app(data_dir: str | None = None, run_background: bool = True) -> Fast
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["Content-Disposition"],
     )
 
     # Register API routes

@@ -1,5 +1,21 @@
 const API_BASE = import.meta.env.DEV ? `http://localhost:${import.meta.env.VITE_API_PORT || "8484"}/api` : "/api";
 
+function parseFilename(disposition: string | null): string {
+  const fallback = "receiptory_export.zip";
+  if (!disposition) return fallback;
+  // Prefer RFC 5987 filename* (UTF-8, may contain non-ASCII names).
+  const utf8 = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8) {
+    try {
+      return decodeURIComponent(utf8[1]);
+    } catch {
+      /* fall through */
+    }
+  }
+  const ascii = disposition.match(/filename="?([^";]+)"?/i);
+  return ascii ? ascii[1] : fallback;
+}
+
 async function request<T>(path: string, options: RequestInit & { skipAuthRedirect?: boolean } = {}): Promise<T> {
   const { skipAuthRedirect, ...fetchOptions } = options;
   const headers: Record<string, string> = { ...fetchOptions.headers as Record<string, string> };
@@ -48,7 +64,7 @@ export const api = {
     if (!res.ok) throw new Error("Upload failed");
     return res.json();
   },
-  exportDocs: async (body: unknown) => {
+  exportDocs: async (body: unknown): Promise<{ blob: Blob; filename: string }> => {
     const res = await fetch(`${API_BASE}/export`, {
       method: "POST",
       credentials: "include",
@@ -56,7 +72,7 @@ export const api = {
       body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error("Export failed");
-    return res.blob();
+    return { blob: await res.blob(), filename: parseFilename(res.headers.get("Content-Disposition")) };
   },
   uploadScannerTestFrame: async (
     blob: Blob,

@@ -99,11 +99,11 @@ export default function DocumentsPage() {
     if (selected.size === 0) return;
     setExporting(true);
     try {
-      const blob = await api.exportDocs({ document_ids: Array.from(selected) });
+      const { blob, filename } = await api.exportDocs({ document_ids: Array.from(selected) });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "receiptory_export.zip";
+      a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
     } finally {

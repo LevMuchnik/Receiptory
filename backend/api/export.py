@@ -1,18 +1,62 @@
 import csv
 import io
 import os
+import re
 import zipfile
 import logging
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from backend.auth import require_auth
+from backend.config import get_setting
 from backend.database import get_connection
 from backend.models import ExportRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _slugify(value: str) -> str:
+    """Collapse whitespace/unsafe filename chars into single underscores."""
+    value = re.sub(r"[^\w\-]+", "_", value.strip(), flags=re.UNICODE)
+    return value.strip("_")
+
+
+def _export_basename(body: ExportRequest, rows: list) -> str:
+    """Build a descriptive export filename: <name>_receiptory_<dates>."""
+    export_name = (get_setting("export_name") or "").strip()
+    if not export_name:
+        names = get_setting("business_names") or []
+        export_name = names[0] if names else ""
+    name_part = _slugify(export_name)
+
+    date_part = ""
+    if body.preset == "month" and body.month:
+        try:
+            date_part = datetime.strptime(body.month, "%Y-%m").strftime("%Y_%m")
+        except ValueError:
+            date_part = body.month
+    elif body.preset == "full_year" and body.year is not None:
+        date_part = f"{body.year:04d}"
+    elif body.date_from or body.date_to:
+        date_part = "_to_".join(d.replace("-", "_") for d in (body.date_from, body.date_to) if d)
+    else:
+        # Derive range from the exported rows, else fall back to today.
+        date_col = "submission_date" if body.date_basis == "ingestion" else "receipt_date"
+        dates = sorted(str(r[date_col])[:10].replace("-", "_") for r in rows if r[date_col])
+        if dates and dates[0] == dates[-1]:
+            date_part = dates[0]
+        elif dates:
+            date_part = f"{dates[0]}_to_{dates[-1]}"
+        else:
+            date_part = datetime.now(timezone.utc).strftime("%Y_%m_%d")
+
+    parts = [p for p in (name_part, "receiptory", date_part) if p]
+    # Final slugify sanitizes any unvalidated input (e.g. date_from on the
+    # since_last_export path) before it reaches the Content-Disposition header.
+    return _slugify("_".join(parts))
 
 EXPORT_CSV_FIELDS = [
     "id", "document_type", "original_filename", "stored_filename", "receipt_date",
@@ -160,8 +204,15 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
             )
 
     buf.seek(0)
+    filename = f"{_export_basename(body, rows)}.zip"
+    # ASCII fallback for legacy clients; RFC 5987 for unicode (e.g. Hebrew names).
+    ascii_name = filename.encode("ascii", "ignore").decode("ascii") or "receiptory_export.zip"
+    disposition = (
+        f"attachment; filename=\"{ascii_name}\"; "
+        f"filename*=UTF-8''{quote(filename)}"
+    )
     return StreamingResponse(
         buf,
         media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=receiptory_export.zip"},
+        headers={"Content-Disposition": disposition},
     )
