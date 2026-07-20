@@ -65,13 +65,16 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
     issued_categories = [{"name": c["name"], "description": c["description"] or ""} for c in cats if c["section"] == "issued"]
     temperature = get_setting("llm_temperature")
     max_tokens = get_setting("llm_max_tokens")
-    llm_result = extract_document(page_images=page_images, model=model, api_key=api_key, business_names=business_names, business_addresses=business_addresses, business_tax_ids=business_tax_ids, expense_categories=expense_categories, issued_categories=issued_categories, temperature=temperature, max_tokens=max_tokens)
+    json_mode = get_setting("llm_json_mode")
+    llm_result = extract_document(page_images=page_images, model=model, api_key=api_key, business_names=business_names, business_addresses=business_addresses, business_tax_ids=business_tax_ids, expense_categories=expense_categories, issued_categories=issued_categories, temperature=temperature, max_tokens=max_tokens, json_mode=json_mode)
     ext = llm_result.extraction
     doc_type = ext.document_type
     if ext.vendor_tax_id and ext.vendor_tax_id in business_tax_ids:
         doc_type = "issued_invoice"
     status = "processed"
-    if ext.extraction_confidence is not None and ext.extraction_confidence < confidence_threshold:
+    # Missing confidence is NOT full confidence — a response that omitted the
+    # score (wrong-shaped but salvageable JSON) deserves a human eye.
+    if ext.extraction_confidence is None or ext.extraction_confidence < confidence_threshold:
         status = "needs_review"
     stored_filename = generate_stored_filename(receipt_date=ext.receipt_date, vendor_receipt_id=ext.vendor_receipt_id, file_hash=file_hash)
     save_filed(pdf_path, stored_filename, data_dir)
@@ -93,7 +96,7 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with get_connection() as conn:
         conn.execute("""UPDATE documents SET document_type = ?, stored_filename = ?, page_count = ?, receipt_date = ?, document_title = ?, vendor_name = ?, vendor_tax_id = ?, vendor_receipt_id = ?, client_name = ?, client_tax_id = ?, description = ?, line_items = ?, subtotal = ?, tax_amount = ?, total_amount = ?, currency = ?, payment_method = ?, payment_identifier = ?, language = ?, additional_fields = ?, raw_extracted_text = ?, category_id = ?, status = ?, extraction_confidence = ?, processing_model = ?, processing_tokens_in = ?, processing_tokens_out = ?, processing_cost_usd = ?, processing_date = ?, processing_attempts = processing_attempts + 1, processing_error = NULL, updated_at = ? WHERE id = ?""",
-            (doc_type, stored_filename, page_count, ext.receipt_date, ext.document_title, ext.vendor_name, ext.vendor_tax_id, ext.vendor_receipt_id, ext.client_name, ext.client_tax_id, ext.description, json.dumps(ext.line_items) if ext.line_items else None, ext.subtotal, ext.tax_amount, ext.total_amount, ext.currency, ext.payment_method, ext.payment_identifier, ext.language, json.dumps(ext.additional_fields) if ext.additional_fields else None, ext.raw_extracted_text, category_id, status, ext.extraction_confidence, llm_result.model, llm_result.tokens_in, llm_result.tokens_out, _estimate_cost(llm_result.model, llm_result.tokens_in, llm_result.tokens_out), now, now, doc_id))
+            (doc_type, stored_filename, page_count, ext.receipt_date, ext.document_title, ext.vendor_name, ext.vendor_tax_id, ext.vendor_receipt_id, ext.client_name, ext.client_tax_id, ext.description, json.dumps(ext.line_items) if ext.line_items else None, ext.subtotal, ext.tax_amount, ext.total_amount, ext.currency, ext.payment_method, ext.payment_identifier, ext.language, json.dumps(ext.additional_fields) if ext.additional_fields else None, ext.raw_extracted_text, category_id, status, ext.extraction_confidence, llm_result.model, llm_result.tokens_in, llm_result.tokens_out, estimate_cost(llm_result.model, llm_result.tokens_in, llm_result.tokens_out), now, now, doc_id))
     logger.info(f"Document {doc_id} processed successfully: {status}")
     try:
         from backend.notifications.notifier import notify
@@ -114,7 +117,7 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
         pass
 
 
-def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
+def estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
     pricing = {"gemini/gemini-3-flash-preview": (0.10, 0.40), "gpt-4o": (2.50, 10.00), "claude-sonnet-4-20250514": (3.00, 15.00)}
     in_rate, out_rate = pricing.get(model, (1.0, 3.0))
     return (tokens_in * in_rate + tokens_out * out_rate) / 1_000_000

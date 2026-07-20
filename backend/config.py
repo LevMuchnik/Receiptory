@@ -17,6 +17,7 @@ DEFAULTS: dict[str, Any] = {
     "llm_api_key": "",
     "llm_temperature": 0.0,
     "llm_max_tokens": 8192,
+    "llm_json_mode": True,
     "llm_sleep_interval": 0.0,
     "confidence_threshold": 0.7,
     "auth_username": "admin",
