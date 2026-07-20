@@ -159,7 +159,7 @@ All data lives in `data/` (mounted as a Docker volume) and survives container re
 
 ## Configuration
 
-All settings are configurable via the admin UI. Environment variables take precedence over database values.
+Most settings are configurable via the admin UI. Environment variables take precedence over database values.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -341,6 +341,7 @@ receiptory/
 │   ├── contexts/              # Auth + Theme providers
 │   └── lib/                   # API client, hooks, utilities
 ├── migrations/                # Numbered SQL migration files
+├── scripts/                   # Dev utilities (JSON-mode A/B harness)
 ├── tests/                     # pytest test suite
 ├── Dockerfile                 # Multi-stage build
 └── docker-compose.yml
