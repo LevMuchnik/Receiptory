@@ -80,9 +80,9 @@ cd .claude/skills/gstack && ./setup
 ## Key Design Decisions
 
 - **Config precedence:** environment variable > database setting > default value
-- **Categories:** soft-delete (`is_deleted` flag). System categories (`pending`, `not_a_receipt`, `failed`) cannot be deleted. Category `description` field is fed into the LLM prompt to guide classification.
+- **Categories:** soft-delete (`is_deleted` flag). System categories (`pending`, `uncategorized`, `failed`) cannot be deleted. Category `description` field is fed into the LLM prompt to guide classification.
 - **Document type detection:** LLM classifies, but code overrides to `issued_invoice` if `vendor_tax_id` matches any of the user's `business_tax_ids`.
-- **LLM JSON handling:** extraction requests JSON mode (`llm_json_mode` setting, env `RECEIPTORY_LLM_JSON_MODE`, default true; litellm `drop_params` skips it on models without `response_format` support). Salvaged parses get a confidence penalty; missing `extraction_confidence` routes the document to `needs_review`. A/B harness: `scripts/compare_json_mode.py`.
+- **LLM JSON handling:** extraction requests JSON mode (`llm_json_mode` setting, env `RECEIPTORY_LLM_JSON_MODE`, default true; litellm `drop_params` skips it on models without `response_format` support). Salvaged parses get a confidence penalty; missing or below-threshold `extraction_confidence` routes the document to `needs_review`. A/B harness: `scripts/compare_json_mode.py`.
 - **Deduplication:** SHA-256 file hash. Exact duplicates rejected at upload.
 - **Filing:** Stored as `yyyy-mm-dd-vendor_receipt_id-hash.pdf`. Three copies: `originals/` (by hash), `converted/` (if format conversion), `filed/` (human-readable name).
 - **FTS5:** Virtual table indexes `raw_extracted_text`, `vendor_name`, `description`, `document_title`. Sync triggers on insert/update/delete.
