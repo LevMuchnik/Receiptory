@@ -1,3 +1,4 @@
+from pathlib import Path
 from backend.database import init_db, get_connection, _get_current_version
 
 def test_init_creates_tables(db_conn):
@@ -14,8 +15,11 @@ def test_wal_mode(db_conn):
     assert mode == "wal"
 
 def test_migration_version(db_conn):
+    # Derive from the migrations dir so this assert can't go stale when a
+    # migration is added (it sat at 5 while 006 and 007 landed).
+    migration_count = len(list((Path(__file__).parent.parent / "migrations").glob("*.sql")))
     version = _get_current_version(db_conn)
-    assert version == 5
+    assert version == migration_count
 
 def test_system_categories_seeded(db_conn):
     rows = db_conn.execute("SELECT name FROM categories WHERE is_system = 1 ORDER BY name").fetchall()
