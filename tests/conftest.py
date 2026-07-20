@@ -1,7 +1,9 @@
+import json
 import os
 import tempfile
 import pytest
 from pathlib import Path
+from unittest.mock import MagicMock
 from backend.database import init_db, get_connection
 
 @pytest.fixture
@@ -41,3 +43,26 @@ def db_conn(db_path):
 @pytest.fixture
 def sample_pdf_path():
     return str(Path(__file__).parent.parent / "test_documents" / "Receipt - esim.pdf")
+
+
+SAMPLE_LLM_RESPONSE = json.dumps({
+    "receipt_date": "2026-01-15", "document_title": "Tax Invoice", "vendor_name": "Office Depot",
+    "vendor_tax_id": "515234567", "vendor_receipt_id": "INV-2026-001", "client_name": None, "client_tax_id": None,
+    "description": "Office supplies purchase",
+    "line_items": [{"description": "Paper A4", "quantity": 5, "unit_price": 25.0}, {"description": "Ink cartridge", "quantity": 2, "unit_price": 89.0}],
+    "subtotal": 303.0, "tax_amount": 51.51, "total_amount": 354.51, "currency": "ILS",
+    "payment_method": "credit_card", "payment_identifier": "4580", "language": "he",
+    "additional_fields": [], "raw_extracted_text": "Office Depot\nTax Invoice\n...",
+    "document_type": "expense_receipt", "category": "office_supplies", "extraction_confidence": 0.95,
+})
+
+
+def mock_llm_response(content=SAMPLE_LLM_RESPONSE, finish_reason="stop"):
+    """Build a litellm-shaped mock response for extract_document tests."""
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = content
+    mock_response.choices[0].finish_reason = finish_reason
+    mock_response.usage.prompt_tokens = 1000
+    mock_response.usage.completion_tokens = 500
+    return mock_response

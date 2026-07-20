@@ -1,6 +1,6 @@
 import json
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from backend.processing.pipeline import process_document
 from backend.database import get_connection
 from backend.config import set_setting, init_settings
@@ -68,3 +68,39 @@ def test_process_document_type_override(mock_extract, pending_doc, setup_db):
     with get_connection() as conn:
         doc = conn.execute("SELECT document_type FROM documents WHERE id = ?", (pending_doc,)).fetchone()
     assert doc["document_type"] == "issued_invoice"
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_process_document_missing_confidence_needs_review(mock_extract, pending_doc, setup_db):
+    # Missing confidence is not full confidence — route to a human.
+    no_conf = LLMExtractionResult(extraction=ExtractionResult(**{**MOCK_EXTRACTION.__dict__, "extraction_confidence": None}), tokens_in=1000, tokens_out=500, model="gemini/gemini-3-flash-preview")
+    mock_extract.return_value = no_conf
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT status FROM documents WHERE id = ?", (pending_doc,)).fetchone()
+    assert doc["status"] == "needs_review"
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_process_document_threads_json_mode_setting(mock_extract, pending_doc, setup_db):
+    set_setting("llm_json_mode", False)
+    mock_extract.return_value = MOCK_LLM_RESULT
+    process_document(pending_doc, setup_db)
+    assert mock_extract.call_args.kwargs["json_mode"] is False
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_process_document_with_trailing_junk_response(mock_completion, pending_doc, setup_db):
+    # End-to-end regression for issue #10 (docs #70/#215): the LLM emits a
+    # complete JSON object then keeps generating. The document must end up
+    # 'processed', not 'failed' — this patches the raw LLM call so the real
+    # parse ladder runs inside the pipeline.
+    from tests.conftest import SAMPLE_LLM_RESPONSE, mock_llm_response
+    mock_completion.return_value = mock_llm_response(content=SAMPLE_LLM_RESPONSE + "\n\nAs requested, all fields were extracted from the document image.")
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT status, vendor_name, total_amount, processing_error FROM documents WHERE id = ?", (pending_doc,)).fetchone()
+    assert doc["status"] == "processed"
+    assert doc["vendor_name"] == "Office Depot"
+    assert doc["total_amount"] == 354.51
+    assert doc["processing_error"] is None
