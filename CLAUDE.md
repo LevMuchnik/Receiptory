@@ -30,6 +30,7 @@ frontend/src/           # React SPA
   pages/                # Page components
   components/           # Reusable UI components
 migrations/             # Numbered SQL files (001_initial_schema.sql, ...)
+scripts/                # Dev utilities (compare_json_mode.py A/B harness)
 tests/                  # pytest test suite
 ```
 
@@ -66,7 +67,7 @@ cd .claude/skills/gstack && ./setup
 - **Single process:** FastAPI app with background asyncio tasks for the processing queue and backup scheduler. No separate worker or message broker.
 - **Database:** SQLite in WAL mode. Hand-rolled migrations (numbered SQL files in `migrations/`). `schema_version` table tracks applied versions. Global `_db_path` is set by `init_db()` and protected by a threading lock.
 - **Processing pipeline:** Documents are processed sequentially. Queue polls for `status='pending'`, sets to `processing`, runs normalize → LLM extract → file → update DB. Failures set `status='failed'` with error message.
-- **LLM extraction:** Single-pass via litellm. Prompt includes user's business info (names, addresses, tax IDs in multiple languages) and category list with descriptions. Response is JSON parsed into `ExtractionResult` dataclass.
+- **LLM extraction:** Single-pass via litellm. Prompt includes user's business info (names, addresses, tax IDs in multiple languages) and category list with descriptions. Response is parsed into `ExtractionResult` via a tolerant JSON parse ladder (strict parse → fence/salvage recovery).
 - **Static files in production:** `app.mount("/", StaticFiles(...))` serves `frontend/dist/`. This catch-all mount MUST be registered last (after all API routes) and is disabled when `RECEIPTORY_DEV=1`.
 
 ## Testing
@@ -81,6 +82,7 @@ cd .claude/skills/gstack && ./setup
 - **Config precedence:** environment variable > database setting > default value
 - **Categories:** soft-delete (`is_deleted` flag). System categories (`pending`, `not_a_receipt`, `failed`) cannot be deleted. Category `description` field is fed into the LLM prompt to guide classification.
 - **Document type detection:** LLM classifies, but code overrides to `issued_invoice` if `vendor_tax_id` matches any of the user's `business_tax_ids`.
+- **LLM JSON handling:** extraction requests JSON mode (`llm_json_mode` setting, env `RECEIPTORY_LLM_JSON_MODE`, default true; litellm `drop_params` skips it on models without `response_format` support). Salvaged parses get a confidence penalty; missing `extraction_confidence` routes the document to `needs_review`. A/B harness: `scripts/compare_json_mode.py`.
 - **Deduplication:** SHA-256 file hash. Exact duplicates rejected at upload.
 - **Filing:** Stored as `yyyy-mm-dd-vendor_receipt_id-hash.pdf`. Three copies: `originals/` (by hash), `converted/` (if format conversion), `filed/` (human-readable name).
 - **FTS5:** Virtual table indexes `raw_extracted_text`, `vendor_name`, `description`, `document_title`. Sync triggers on insert/update/delete.
