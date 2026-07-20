@@ -10,12 +10,15 @@
 FROM node:20-bookworm
 
 # Dev tools for the Claude Code CLI.
+# jq: required by gstack skills for JSONL task artifacts, review-log, and the
+# review-readiness dashboard; without it those writes silently no-op.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       ripgrep \
       less \
       ca-certificates \
       curl \
+      jq \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker CLI + Compose v2 plugin ONLY (no daemon) from Docker's official repo.
@@ -44,7 +47,10 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code
+# claude-code CLI + bun. bun is the JS runtime several gstack skill scripts
+# shell out to (e.g. gstack-review-log validates JSON via `bun -e`, gstack-
+# learnings-log runs under bun); without it those writes silently no-op.
+RUN npm install -g @anthropic-ai/claude-code bun
 
 # The repo is bind-mounted and owned by the host user (e.g. UNRAID's nobody:users,
 # 99:100), while this container runs as root. Without this, git 2.39 refuses to
