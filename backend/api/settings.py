@@ -101,6 +101,47 @@ def model_info(model: str | None = None, username: str = Depends(require_auth)):
     return result
 
 
+_llm_models_cache: list[dict] | None = None
+
+
+def _build_llm_models() -> list[dict]:
+    """Shape litellm's registry into the vision-capable chat models the picker
+    offers (issue #13, PR3). Receipts are page images, so a usable extraction
+    model must support vision; mode=="chat" drops embedding/rerank/image-gen
+    rows. Cached process-wide — the registry is a static JSON bundled with the
+    installed litellm, so it never changes at runtime."""
+    import litellm
+
+    models = []
+    for mid, info in litellm.model_cost.items():
+        if not isinstance(info, dict):
+            continue
+        if info.get("mode") != "chat" or not info.get("supports_vision"):
+            continue
+        in_rate = info.get("input_cost_per_token")
+        out_rate = info.get("output_cost_per_token")
+        models.append({
+            "id": mid,
+            "provider": info.get("litellm_provider"),
+            "input_price_per_1m": round(in_rate * 1_000_000, 4) if in_rate is not None else None,
+            "output_price_per_1m": round(out_rate * 1_000_000, 4) if out_rate is not None else None,
+            "supports_reasoning": bool(info.get("supports_reasoning")),
+            "max_output_tokens": info.get("max_output_tokens"),
+        })
+    models.sort(key=lambda m: m["id"])
+    return models
+
+
+@router.get("/settings/llm-models")
+def llm_models(username: str = Depends(require_auth)):
+    """The vision-capable chat models the model picker filters over, with prices
+    (issue #13, PR3). Cached in memory after the first call."""
+    global _llm_models_cache
+    if _llm_models_cache is None:
+        _llm_models_cache = _build_llm_models()
+    return {"models": _llm_models_cache}
+
+
 @router.get("/settings/telegram-status")
 async def telegram_status(username: str = Depends(require_auth)):
     """Check Telegram bot connection status."""

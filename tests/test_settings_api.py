@@ -79,3 +79,26 @@ def test_model_info_defaults_to_configured_model(authed_client):
 def test_model_info_requires_auth(app):
     resp = TestClient(app).get("/api/settings/model-info?model=gpt-4o")
     assert resp.status_code == 401
+
+
+def test_llm_models_lists_vision_chat_models(authed_client):
+    # PR3: the picker registry — vision-capable chat models with prices (#13).
+    resp = authed_client.get("/api/settings/llm-models")
+    assert resp.status_code == 200
+    models = resp.json()["models"]
+    assert len(models) > 100  # ~749 in litellm 1.93
+    ids = {m["id"] for m in models}
+    # The default extraction model must be offerable in the picker.
+    assert "gemini/gemini-3-flash-preview" in ids
+    sample = next(m for m in models if m["id"] == "gemini/gemini-3-flash-preview")
+    assert sample["supports_reasoning"] is True
+    assert sample["input_price_per_1m"] is not None
+    # Sorted by id, and every entry carries the picker's required shape.
+    assert ids == set(sorted(ids))
+    for m in models[:20]:
+        assert set(m) >= {"id", "provider", "input_price_per_1m", "output_price_per_1m", "supports_reasoning"}
+
+
+def test_llm_models_requires_auth(app):
+    resp = TestClient(app).get("/api/settings/llm-models")
+    assert resp.status_code == 401
