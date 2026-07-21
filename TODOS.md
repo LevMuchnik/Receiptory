@@ -46,6 +46,33 @@ Deferred items captured during planning and review. Organized by component, sort
 **Priority:** P2
 **Depends on:** Issue #10 shipped (json_object mode live and stable)
 
+## Ingestion
+
+### Harden url_triage JSON parsing (mirror extraction #10)
+
+**What:** Give the three `url_triage.py` LLM calls (`triage_telegram_urls`, `triage_email_urls`, `classify_email_documents`) the same JSON robustness extraction got in #10: `response_format={"type":"json_object"}` + `drop_params=True`, and reuse the tolerant parse ladder instead of a single strict `json.loads(_strip_code_fences(...))`.
+
+**Why:** Today a malformed/degenerate LLM response makes triage fall through to its fallback — `return list(urls)` / `return fallback` — which silently ingests ALL urls/documents, including junk. Extraction is protected against this; triage is not.
+
+**Pros:**
+- Closes the last unprotected LLM-parse path in the pipeline
+- Makes triage failure explicit (drop) rather than silent (ingest everything)
+- json_object mode also suppresses the class of litellm unsupported-param warnings that extraction avoids via `drop_params`
+
+**Cons:**
+- Touches a second subsystem's robustness — deliberately kept out of the temperature-alignment PR (issue #11) to stay right-sized
+- Needs its own tests for all three call sites (malformed response → correct fallback)
+- The tolerant ladder lives in `extract.py` (`parse_llm_response`) — sharing it means a small refactor to expose it
+
+**Context:**
+- Source: eng review of issue #11 (2026-07-20), tension 2 / deferred from the temperature work
+- Call sites + strict parse: `backend/ingestion/url_triage.py:67-78, 133-148, 215-231`
+- Reference implementation: extraction's json_mode + tolerant ladder in `backend/processing/extract.py` (see the `drop_params` comment at :304-311)
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** None (independent of #11; can land any time)
+
 ## Scanner
 
 ### Expand test corpus + per-bucket tagging

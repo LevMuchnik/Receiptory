@@ -329,6 +329,14 @@ def test_extract_document_json_mode_off(mock_completion):
 
 
 @patch("backend.processing.extract.litellm_completion")
+def test_extract_document_default_temperature_is_one(mock_completion):
+    # Issue #11: Gemini 3 is tuned for temperature 1.0 — the default must match.
+    mock_completion.return_value = mock_llm_response()
+    extract_document(**_EXTRACT_ARGS)
+    assert mock_completion.call_args.kwargs["temperature"] == 1.0
+
+
+@patch("backend.processing.extract.litellm_completion")
 def test_extract_document_truncated_response_raises(mock_completion):
     mock_completion.return_value = mock_llm_response(content='{"vendor_name": "Off', finish_reason="length")
     with pytest.raises(ValueError, match="truncated at max_tokens"):

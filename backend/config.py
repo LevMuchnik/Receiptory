@@ -15,7 +15,7 @@ DEFAULTS: dict[str, Any] = {
     "reference_currency": "ILS",
     "llm_model": "gemini/gemini-3-flash-preview",
     "llm_api_key": "",
-    "llm_temperature": 0.0,
+    "llm_temperature": 1.0,
     "llm_max_tokens": 8192,
     "llm_json_mode": True,
     "llm_sleep_interval": 0.0,
@@ -88,7 +88,13 @@ def get_setting(key: str) -> Any:
     env_key = f"RECEIPTORY_{key.upper()}"
     env_val = os.environ.get(env_key)
     if env_val is not None and env_val != "":
-        return _parse_value(key, env_val)
+        # A malformed env override (bad number, invalid JSON list) must not crash
+        # callers, nor jump straight to the code default — precedence is env > db >
+        # default, so an unusable override is ignored and resolution continues.
+        try:
+            return _parse_value(key, env_val)
+        except ValueError:
+            logger.warning("Invalid env %s=%r; ignoring override, falling back to db/default", env_key, env_val)
     with get_connection() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         if row is not None:

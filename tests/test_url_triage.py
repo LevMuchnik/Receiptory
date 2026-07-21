@@ -6,8 +6,27 @@ from unittest.mock import MagicMock, patch
 
 from backend.ingestion.url_triage import (
     triage_telegram_urls,
+    triage_email_urls,
+    classify_email_documents,
+    ClassificationDocument,
     _strip_code_fences,
 )
+
+# 1x1 transparent PNG, for classify_email_documents (needs first_page_image bytes).
+_PNG_1PX = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01"
+    b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+def _stub_settings(key):
+    """get_setting stub returning correctly-typed values (temperature is numeric)."""
+    return {
+        "llm_model": "gpt-4o",
+        "llm_api_key": "test-key",
+        "llm_temperature": 0.5,
+    }.get(key, "test-key")
 
 
 def _make_llm_response(content: str):
@@ -46,7 +65,7 @@ class TestTriageTelegramUrls:
         )
 
         with patch("backend.ingestion.url_triage.litellm_completion", return_value=llm_response) as mock_llm, \
-             patch("backend.ingestion.url_triage.get_setting", side_effect=lambda k: "gpt-4o" if k == "llm_model" else "test-key"):
+             patch("backend.ingestion.url_triage.get_setting", side_effect=_stub_settings):
             result = await triage_telegram_urls("Here's my receipt", urls)
 
         assert result == ["https://store.example.com/receipt/12345"]
@@ -58,7 +77,7 @@ class TestTriageTelegramUrls:
         urls = ["https://a.com", "https://b.com"]
 
         with patch("backend.ingestion.url_triage.litellm_completion", side_effect=Exception("API error")), \
-             patch("backend.ingestion.url_triage.get_setting", side_effect=lambda k: "gpt-4o" if k == "llm_model" else "test-key"):
+             patch("backend.ingestion.url_triage.get_setting", side_effect=_stub_settings):
             result = await triage_telegram_urls("some text", urls)
 
         assert result == urls
@@ -88,7 +107,7 @@ class TestTriageTelegramUrls:
         )
 
         with patch("backend.ingestion.url_triage.litellm_completion", return_value=llm_response), \
-             patch("backend.ingestion.url_triage.get_setting", side_effect=lambda k: "gpt-4o" if k == "llm_model" else "test-key"):
+             patch("backend.ingestion.url_triage.get_setting", side_effect=_stub_settings):
             result = await triage_telegram_urls("text", urls)
 
         assert result == ["https://a.com"]
@@ -102,9 +121,38 @@ class TestTriageTelegramUrls:
         )
 
         with patch("backend.ingestion.url_triage.litellm_completion", return_value=llm_response), \
-             patch("backend.ingestion.url_triage.get_setting", side_effect=lambda k: "gpt-4o" if k == "llm_model" else "test-key"):
+             patch("backend.ingestion.url_triage.get_setting", side_effect=_stub_settings):
             result = await triage_telegram_urls("Invoice link", urls)
 
         assert result == ["https://invoice.example.com/dl/789"]
+
+
+class TestTemperatureFlowsToLLM:
+    """Issue #11: the configured llm_temperature must reach litellm at all 3 triage sites."""
+
+    @pytest.mark.asyncio
+    async def test_telegram_passes_temperature(self, db_path):
+        llm_response = _make_llm_response(json.dumps([]))
+        with patch("backend.ingestion.url_triage.litellm_completion", return_value=llm_response) as mock_llm, \
+             patch("backend.ingestion.url_triage.get_setting", side_effect=_stub_settings):
+            await triage_telegram_urls("text", ["https://a.com"])
+        assert mock_llm.call_args.kwargs["temperature"] == 0.5
+
+    @pytest.mark.asyncio
+    async def test_email_urls_passes_temperature(self, db_path):
+        llm_response = _make_llm_response(json.dumps([]))
+        with patch("backend.ingestion.url_triage.litellm_completion", return_value=llm_response) as mock_llm, \
+             patch("backend.ingestion.url_triage.get_setting", side_effect=_stub_settings):
+            await triage_email_urls("s@x.com", "subject", "body", ["https://a.com"])
+        assert mock_llm.call_args.kwargs["temperature"] == 0.5
+
+    @pytest.mark.asyncio
+    async def test_classify_documents_passes_temperature(self, db_path):
+        llm_response = _make_llm_response(json.dumps([]))
+        docs = [ClassificationDocument(identifier="a.pdf", source="attachment", first_page_image=_PNG_1PX)]
+        with patch("backend.ingestion.url_triage.litellm_completion", return_value=llm_response) as mock_llm, \
+             patch("backend.ingestion.url_triage.get_setting", side_effect=_stub_settings):
+            await classify_email_documents("s@x.com", "subject", "body", docs)
+        assert mock_llm.call_args.kwargs["temperature"] == 0.5
 
 

@@ -37,6 +37,7 @@ async def triage_telegram_urls(message_text: str, urls: list[str]) -> list[str]:
 
     model = get_setting("llm_model")
     api_key = get_setting("llm_api_key")
+    temperature = get_setting("llm_temperature")
 
     if not model or not api_key:
         logger.warning("LLM not configured for URL triage, returning all URLs")
@@ -64,7 +65,7 @@ async def triage_telegram_urls(message_text: str, urls: list[str]) -> list[str]:
             model=model,
             api_key=api_key,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
+            temperature=temperature,
         )
         raw = response.choices[0].message.content
         parsed = json.loads(_strip_code_fences(raw))
@@ -97,6 +98,7 @@ async def triage_email_urls(
     try:
         model = get_setting("llm_model")
         api_key = get_setting("llm_api_key")
+        temperature = get_setting("llm_temperature")
     except RuntimeError:
         logger.warning("Database not available for URL triage settings, returning all URLs")
         return fallback
@@ -135,7 +137,7 @@ async def triage_email_urls(
             model=model,
             api_key=api_key,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
+            temperature=temperature,
         )
         raw = response.choices[0].message.content
         parsed = json.loads(_strip_code_fences(raw))
@@ -170,6 +172,7 @@ async def classify_email_documents(
     try:
         model = get_setting("llm_model")
         api_key = get_setting("llm_api_key")
+        temperature = get_setting("llm_temperature")
     except RuntimeError:
         logger.warning("Database not available for document classification settings, returning all")
         return fallback
@@ -217,7 +220,7 @@ async def classify_email_documents(
             model=model,
             api_key=api_key,
             messages=[{"role": "user", "content": content}],
-            temperature=0.0,
+            temperature=temperature,
         )
         raw = response.choices[0].message.content
         parsed = json.loads(_strip_code_fences(raw))

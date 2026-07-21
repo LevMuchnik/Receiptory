@@ -294,7 +294,7 @@ def litellm_completion(**kwargs):
     return litellm.completion(**kwargs)
 
 
-def extract_document(page_images: list[bytes], model: str, api_key: str, business_names: list[str], business_addresses: list[str], business_tax_ids: list[str], expense_categories: list[dict[str, str]], issued_categories: list[dict[str, str]], temperature: float = 0.0, max_tokens: int = 8192, json_mode: bool = True) -> LLMExtractionResult:
+def extract_document(page_images: list[bytes], model: str, api_key: str, business_names: list[str], business_addresses: list[str], business_tax_ids: list[str], expense_categories: list[dict[str, str]], issued_categories: list[dict[str, str]], temperature: float = 1.0, max_tokens: int = 8192, json_mode: bool = True) -> LLMExtractionResult:
     prompt = build_extraction_prompt(business_names=business_names, business_addresses=business_addresses, business_tax_ids=business_tax_ids, expense_categories=expense_categories, issued_categories=issued_categories)
     content: list[dict] = [{"type": "text", "text": prompt}]
     for img_bytes in page_images:

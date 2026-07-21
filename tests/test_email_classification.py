@@ -8,6 +8,7 @@ def mock_llm_settings(monkeypatch):
     """Provide LLM settings for triage tests."""
     monkeypatch.setenv("RECEIPTORY_LLM_MODEL", "test-model")
     monkeypatch.setenv("RECEIPTORY_LLM_API_KEY", "test-key")
+    monkeypatch.setenv("RECEIPTORY_LLM_TEMPERATURE", "1.0")
 
 
 def _make_doc(identifier: str, source: str = "attachment", image: bytes = b"fake-png") -> ClassificationDocument:

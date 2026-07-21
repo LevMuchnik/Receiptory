@@ -40,11 +40,12 @@ function SectionCard({ title, icon, children, badge }: { title: string; icon: st
   );
 }
 
-function FieldGroup({ label, children }: { label: string; children: React.ReactNode }) {
+function FieldGroup({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
   return (
     <div className="space-y-1.5">
       <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider block">{label}</Label>
       {children}
+      {hint && <p className="text-[11px] text-muted-foreground leading-snug">{hint}</p>}
     </div>
   );
 }
@@ -288,8 +289,8 @@ export default function SettingsPage() {
                   <FieldGroup label="API Key">
                     <Input className={inputCls} type="password" value={settings.llm_api_key || ""} onBlur={(e) => { if (e.target.value && !e.target.value.includes("***")) save({ llm_api_key: e.target.value }); }} onChange={(e) => setSettings({ ...settings, llm_api_key: e.target.value })} />
                   </FieldGroup>
-                  <FieldGroup label="Temperature (0 = deterministic)">
-                    <Input className={inputCls} type="number" step="0.1" min="0" max="2" value={settings.llm_temperature ?? 0} onBlur={(e) => save({ llm_temperature: parseFloat(e.target.value) })} onChange={(e) => setSettings({ ...settings, llm_temperature: e.target.value })} />
+                  <FieldGroup label="Temperature" hint="Gemini 3 is tuned for 1.0. Lower values can degrade extraction quality.">
+                    <Input className={inputCls} type="number" step="0.1" min="0" max="2" value={settings.llm_temperature ?? 1} onBlur={(e) => save({ llm_temperature: parseFloat(e.target.value) })} onChange={(e) => setSettings({ ...settings, llm_temperature: e.target.value })} />
                   </FieldGroup>
                   <FieldGroup label="Max Output Tokens">
                     <Input className={inputCls} type="number" step="1024" min="1024" max="32768" value={settings.llm_max_tokens ?? 8192} onBlur={(e) => save({ llm_max_tokens: parseInt(e.target.value) || 8192 })} onChange={(e) => setSettings({ ...settings, llm_max_tokens: e.target.value })} />
