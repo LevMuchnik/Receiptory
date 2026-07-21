@@ -5,6 +5,7 @@ import { useTheme } from "@/contexts/ThemeContext";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
+import ModelCombobox, { type ModelOption } from "@/components/ModelCombobox";
 import CategoryManager from "@/components/CategoryManager";
 import BackupPanel from "@/components/BackupPanel";
 import CloudBackupPanel from "@/components/CloudBackupPanel";
@@ -94,6 +95,13 @@ export default function SettingsPage() {
   const [gmailPollResult, setGmailPollResult] = useState<string | null>(null);
   const [notifyTestResult, setNotifyTestResult] = useState<string | null>(null);
   const [modelInfo, setModelInfo] = useState<any>(null);
+  const [models, setModels] = useState<ModelOption[]>([]);
+
+  // Load the vision-capable chat model registry once for the picker (#13, PR3).
+  // Cached server-side; failure just leaves the combobox as a free-text field.
+  useEffect(() => {
+    api.get("/settings/llm-models").then((r: any) => setModels(r.models || [])).catch(() => setModels([]));
+  }, []);
 
   // Look up price + reasoning support for the current model (issue #13).
   // Debounced so typing into the free-text model field doesn't fire a request
@@ -297,7 +305,12 @@ export default function SettingsPage() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="space-y-4">
                   <FieldGroup label="Extraction Model">
-                    <Input className={inputCls} value={settings.llm_model || ""} onBlur={(e) => save({ llm_model: e.target.value })} onChange={(e) => setSettings({ ...settings, llm_model: e.target.value })} placeholder="gpt-4o" />
+                    <ModelCombobox
+                      value={settings.llm_model || ""}
+                      models={models}
+                      className={`${inputCls} w-full px-3`}
+                      onCommit={(id) => { setSettings({ ...settings, llm_model: id }); save({ llm_model: id }); }}
+                    />
                     {modelInfo && modelInfo.model === settings.llm_model && (
                       <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
                         {modelInfo.in_registry ? (
