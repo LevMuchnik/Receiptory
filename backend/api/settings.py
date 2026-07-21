@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.auth import require_auth
-from backend.config import get_all_settings_masked, set_setting, get_setting
+from backend.config import get_all_settings_masked, set_setting, get_setting, env_overridden_keys
 from backend.models import SettingsUpdate
 
 router = APIRouter()
@@ -10,6 +10,13 @@ router = APIRouter()
 @router.get("/settings")
 def get_settings(username: str = Depends(require_auth)):
     return get_all_settings_masked()
+
+
+@router.get("/settings/env-overrides")
+def settings_env_overrides(username: str = Depends(require_auth)):
+    """Keys currently pinned by an env var (env > db precedence). The UI shows
+    these fields as read-only so edits aren't silently discarded (#13)."""
+    return {"keys": env_overridden_keys()}
 
 
 @router.patch("/settings")

@@ -96,12 +96,22 @@ export default function SettingsPage() {
   const [notifyTestResult, setNotifyTestResult] = useState<string | null>(null);
   const [modelInfo, setModelInfo] = useState<any>(null);
   const [models, setModels] = useState<ModelOption[]>([]);
+  const [envKeys, setEnvKeys] = useState<string[]>([]);
 
   // Load the vision-capable chat model registry once for the picker (#13, PR3).
   // Cached server-side; failure just leaves the combobox as a free-text field.
   useEffect(() => {
     api.get("/settings/llm-models").then((r: any) => setModels(r.models || [])).catch(() => setModels([]));
+    // Which settings are pinned by an env var (env > db). Edits to these are
+    // silently discarded, so the UI shows them read-only instead (#13).
+    api.get("/settings/env-overrides").then((r: any) => setEnvKeys(r.keys || [])).catch(() => setEnvKeys([]));
   }, []);
+
+  const envLocked = (k: string) => envKeys.includes(k);
+  const envHint = (k: string, base?: string) =>
+    envLocked(k)
+      ? `Managed by RECEIPTORY_${k.toUpperCase()} in .env — edit the environment to change (UI edits are ignored while set).`
+      : base;
 
   // Look up price + reasoning support for the current model (issue #13).
   // Debounced so typing into the free-text model field doesn't fire a request
@@ -304,11 +314,12 @@ export default function SettingsPage() {
             <SectionCard title="LLM Intelligence Engine" icon="psychology" badge="Active">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="space-y-4">
-                  <FieldGroup label="Extraction Model">
+                  <FieldGroup label="Extraction Model" hint={envHint("llm_model")}>
                     <ModelCombobox
                       value={settings.llm_model || ""}
                       models={models}
-                      className={`${inputCls} w-full px-3`}
+                      disabled={envLocked("llm_model")}
+                      className={`${inputCls} w-full px-3 disabled:opacity-50 disabled:cursor-not-allowed`}
                       onCommit={(id) => { setSettings({ ...settings, llm_model: id }); save({ llm_model: id }); }}
                     />
                     {modelInfo && modelInfo.model === settings.llm_model && (
@@ -328,27 +339,28 @@ export default function SettingsPage() {
                       </div>
                     )}
                   </FieldGroup>
-                  <FieldGroup label="API Key">
-                    <Input className={inputCls} type="password" value={settings.llm_api_key || ""} onBlur={(e) => { if (e.target.value && !e.target.value.includes("***")) save({ llm_api_key: e.target.value }); }} onChange={(e) => setSettings({ ...settings, llm_api_key: e.target.value })} />
+                  <FieldGroup label="API Key" hint={envHint("llm_api_key")}>
+                    <Input className={inputCls} type="password" disabled={envLocked("llm_api_key")} value={settings.llm_api_key || ""} onBlur={(e) => { if (e.target.value && !e.target.value.includes("***")) save({ llm_api_key: e.target.value }); }} onChange={(e) => setSettings({ ...settings, llm_api_key: e.target.value })} />
                   </FieldGroup>
-                  <FieldGroup label="Temperature" hint="Gemini 3 is tuned for 1.0. Lower values can degrade extraction quality.">
-                    <Input className={inputCls} type="number" step="0.1" min="0" max="2" value={settings.llm_temperature ?? 1} onBlur={(e) => save({ llm_temperature: parseFloat(e.target.value) })} onChange={(e) => setSettings({ ...settings, llm_temperature: e.target.value })} />
+                  <FieldGroup label="Temperature" hint={envHint("llm_temperature", "Gemini 3 is tuned for 1.0. Lower values can degrade extraction quality.")}>
+                    <Input className={inputCls} type="number" step="0.1" min="0" max="2" disabled={envLocked("llm_temperature")} value={settings.llm_temperature ?? 1} onBlur={(e) => save({ llm_temperature: parseFloat(e.target.value) })} onChange={(e) => setSettings({ ...settings, llm_temperature: e.target.value })} />
                   </FieldGroup>
-                  <FieldGroup label="Max Output Tokens">
-                    <Input className={inputCls} type="number" step="1024" min="1024" max="32768" value={settings.llm_max_tokens ?? 8192} onBlur={(e) => save({ llm_max_tokens: parseInt(e.target.value) || 8192 })} onChange={(e) => setSettings({ ...settings, llm_max_tokens: e.target.value })} />
+                  <FieldGroup label="Max Output Tokens" hint={envHint("llm_max_tokens")}>
+                    <Input className={inputCls} type="number" step="1024" min="1024" max="32768" disabled={envLocked("llm_max_tokens")} value={settings.llm_max_tokens ?? 8192} onBlur={(e) => save({ llm_max_tokens: parseInt(e.target.value) || 8192 })} onChange={(e) => setSettings({ ...settings, llm_max_tokens: e.target.value })} />
                   </FieldGroup>
                   <FieldGroup
                     label="Reasoning Effort"
                     hint={
-                      modelInfo && modelInfo.model === settings.llm_model && !modelInfo.supports_reasoning
-                        ? "The selected model does not support reasoning. Effort is ignored."
-                        : "Higher effort spends more reasoning (output) tokens per document, raising cost. \"None\" sends no reasoning parameter."
+                      envHint("llm_reasoning_effort",
+                        modelInfo && modelInfo.model === settings.llm_model && !modelInfo.supports_reasoning
+                          ? "The selected model does not support reasoning. Effort is ignored."
+                          : "Higher effort spends more reasoning (output) tokens per document, raising cost. \"None\" sends no reasoning parameter.")
                     }
                   >
                     <select
                       className={`${inputCls} w-full px-3 disabled:opacity-50 disabled:cursor-not-allowed`}
                       value={typeof settings.llm_reasoning_effort === "string" ? settings.llm_reasoning_effort : "none"}
-                      disabled={!!(modelInfo && modelInfo.model === settings.llm_model && !modelInfo.supports_reasoning)}
+                      disabled={envLocked("llm_reasoning_effort") || !!(modelInfo && modelInfo.model === settings.llm_model && !modelInfo.supports_reasoning)}
                       onChange={(e) => { setSettings({ ...settings, llm_reasoning_effort: e.target.value }); save({ llm_reasoning_effort: e.target.value }); }}
                     >
                       <option value="none">None (default)</option>
@@ -358,12 +370,12 @@ export default function SettingsPage() {
                       <option value="high">High</option>
                     </select>
                   </FieldGroup>
-                  <FieldGroup label="Sleep Between Calls (seconds)">
-                    <Input className={inputCls} type="number" step="0.1" value={settings.llm_sleep_interval ?? ""} onBlur={(e) => save({ llm_sleep_interval: parseFloat(e.target.value) })} onChange={(e) => setSettings({ ...settings, llm_sleep_interval: e.target.value })} />
+                  <FieldGroup label="Sleep Between Calls (seconds)" hint={envHint("llm_sleep_interval")}>
+                    <Input className={inputCls} type="number" step="0.1" disabled={envLocked("llm_sleep_interval")} value={settings.llm_sleep_interval ?? ""} onBlur={(e) => save({ llm_sleep_interval: parseFloat(e.target.value) })} onChange={(e) => setSettings({ ...settings, llm_sleep_interval: e.target.value })} />
                   </FieldGroup>
                 </div>
                 <div className="space-y-4">
-                  <FieldGroup label="Confidence Threshold">
+                  <FieldGroup label="Confidence Threshold" hint={envHint("confidence_threshold")}>
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-xs text-muted-foreground">Documents below this are flagged for review</span>
                       <span className="text-xs font-mono bg-muted px-2 py-0.5 rounded">{Math.round((settings.confidence_threshold ?? 0.8) * 100)}%</span>
@@ -371,8 +383,9 @@ export default function SettingsPage() {
                     <input
                       type="range"
                       min="0" max="1" step="0.05"
+                      disabled={envLocked("confidence_threshold")}
                       value={settings.confidence_threshold ?? 0.8}
-                      className="w-full h-1.5 bg-accent rounded-lg appearance-none cursor-pointer accent-primary"
+                      className="w-full h-1.5 bg-accent rounded-lg appearance-none cursor-pointer accent-primary disabled:opacity-50 disabled:cursor-not-allowed"
                       onChange={(e) => setSettings({ ...settings, confidence_threshold: parseFloat(e.target.value) })}
                       onMouseUp={(e) => save({ confidence_threshold: parseFloat((e.target as HTMLInputElement).value) })}
                     />
