@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone
 
 from backend.database import get_connection
-from backend.config import get_setting
+from backend.config import get_setting, resolve_llm_api_key
 from backend.storage import (get_file_path, save_filed, render_all_pages_to_memory, get_pdf_page_count)
 from backend.processing.normalize import normalize_file
 from backend.processing.extract import extract_document, ExtractionResult
@@ -54,7 +54,7 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
     dpi = get_setting("page_render_dpi")
     page_images = render_all_pages_to_memory(pdf_path, dpi=dpi)
     model = get_setting("llm_model")
-    api_key = get_setting("llm_api_key")
+    api_key = resolve_llm_api_key()
     business_names = get_setting("business_names")
     business_addresses = get_setting("business_addresses")
     business_tax_ids = get_setting("business_tax_ids")

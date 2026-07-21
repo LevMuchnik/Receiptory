@@ -97,6 +97,7 @@ export default function SettingsPage() {
   const [modelInfo, setModelInfo] = useState<any>(null);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [envKeys, setEnvKeys] = useState<string[]>([]);
+  const [apiKeyLabels, setApiKeyLabels] = useState<string[]>([]);
 
   // Load the vision-capable chat model registry once for the picker (#13, PR3).
   // Cached server-side; failure just leaves the combobox as a free-text field.
@@ -105,6 +106,8 @@ export default function SettingsPage() {
     // Which settings are pinned by an env var (env > db). Edits to these are
     // silently discarded, so the UI shows them read-only instead (#13).
     api.get("/settings/env-overrides").then((r: any) => setEnvKeys(r.keys || [])).catch(() => setEnvKeys([]));
+    // Named provider API keys from .env (RECEIPTORY_LLM_API_KEY_<LABEL>) for the picker (#13).
+    api.get("/settings/llm-api-keys").then((r: any) => setApiKeyLabels(r.keys || [])).catch(() => setApiKeyLabels([]));
   }, []);
 
   const envLocked = (k: string) => envKeys.includes(k);
@@ -345,8 +348,38 @@ export default function SettingsPage() {
                       </div>
                     )}
                   </FieldGroup>
-                  <FieldGroup label="API Key" hint={envHint("llm_api_key")}>
-                    <Input className={inputCls} type="password" disabled={envLocked("llm_api_key")} value={settings.llm_api_key || ""} onBlur={(e) => { if (e.target.value && !e.target.value.includes("***")) save({ llm_api_key: e.target.value }); }} onChange={(e) => setSettings({ ...settings, llm_api_key: e.target.value })} />
+                  {(apiKeyLabels.length > 0 || (typeof settings.llm_api_key_ref === "string" && settings.llm_api_key_ref)) && (
+                    <FieldGroup
+                      label="Provider Key (from .env)"
+                      hint={
+                        `Named keys defined as RECEIPTORY_LLM_API_KEY_<LABEL> in .env.` +
+                        (modelInfo && modelInfo.model === settings.llm_model && modelInfo.provider
+                          ? ` Selected model provider: ${modelInfo.provider} — pick the matching key.`
+                          : "")
+                      }
+                    >
+                      <select
+                        className={`${inputCls} w-full px-3`}
+                        value={typeof settings.llm_api_key_ref === "string" ? settings.llm_api_key_ref : ""}
+                        onChange={(e) => { setSettings({ ...settings, llm_api_key_ref: e.target.value }); save({ llm_api_key_ref: e.target.value }); }}
+                      >
+                        <option value="">Use single key below</option>
+                        {apiKeyLabels.map((k) => <option key={k} value={k}>{k}</option>)}
+                        {typeof settings.llm_api_key_ref === "string" && settings.llm_api_key_ref && !apiKeyLabels.includes(settings.llm_api_key_ref) && (
+                          <option value={settings.llm_api_key_ref}>{settings.llm_api_key_ref} (not found in .env)</option>
+                        )}
+                      </select>
+                    </FieldGroup>
+                  )}
+                  <FieldGroup
+                    label="API Key"
+                    hint={
+                      (typeof settings.llm_api_key_ref === "string" && settings.llm_api_key_ref)
+                        ? `Overridden by the selected provider key "${settings.llm_api_key_ref}". Set the picker to "Use single key below" to use this field.`
+                        : envHint("llm_api_key")
+                    }
+                  >
+                    <Input className={inputCls} type="password" disabled={envLocked("llm_api_key") || !!(typeof settings.llm_api_key_ref === "string" && settings.llm_api_key_ref)} value={settings.llm_api_key || ""} onBlur={(e) => { if (e.target.value && !e.target.value.includes("***")) save({ llm_api_key: e.target.value }); }} onChange={(e) => setSettings({ ...settings, llm_api_key: e.target.value })} />
                   </FieldGroup>
                   <FieldGroup label="Temperature" hint={envHint("llm_temperature", "Gemini 3 is tuned for 1.0. Lower values can degrade extraction quality.")}>
                     <Input className={inputCls} type="number" step="0.1" min="0" max="2" disabled={envLocked("llm_temperature")} value={settings.llm_temperature ?? 1} onBlur={(e) => save({ llm_temperature: parseFloat(e.target.value) })} onChange={(e) => setSettings({ ...settings, llm_temperature: e.target.value })} />

@@ -131,3 +131,22 @@ def test_env_overrides_empty_without_env(authed_client):
 def test_env_overrides_requires_auth(app):
     resp = TestClient(app).get("/api/settings/env-overrides")
     assert resp.status_code == 401
+
+
+def test_llm_api_keys_lists_labels_and_provider(authed_client, monkeypatch):
+    # PR: named provider keys picker (#13). Labels only, never values.
+    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY_GEMINI", "gk")
+    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY_OPENAI", "sk")
+    resp = authed_client.get("/api/settings/llm-api-keys")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["keys"] == ["GEMINI", "OPENAI"]
+    # default model is gemini/* -> provider resolves to gemini
+    assert data["model_provider"] == "gemini"
+    # secret values are never returned
+    assert "gk" not in resp.text and "sk" not in resp.text
+
+
+def test_llm_api_keys_requires_auth(app):
+    resp = TestClient(app).get("/api/settings/llm-api-keys")
+    assert resp.status_code == 401

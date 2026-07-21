@@ -65,6 +65,7 @@ class TestTriageTelegramUrls:
         )
 
         with patch("backend.ingestion.url_triage.litellm_completion", return_value=llm_response) as mock_llm, \
+             patch("backend.ingestion.url_triage.resolve_llm_api_key", return_value="test-key"), \
              patch("backend.ingestion.url_triage.get_setting", side_effect=_stub_settings):
             result = await triage_telegram_urls("Here's my receipt", urls)
 
@@ -134,6 +135,7 @@ class TestTemperatureFlowsToLLM:
     async def test_telegram_passes_temperature(self, db_path):
         llm_response = _make_llm_response(json.dumps([]))
         with patch("backend.ingestion.url_triage.litellm_completion", return_value=llm_response) as mock_llm, \
+             patch("backend.ingestion.url_triage.resolve_llm_api_key", return_value="test-key"), \
              patch("backend.ingestion.url_triage.get_setting", side_effect=_stub_settings):
             await triage_telegram_urls("text", ["https://a.com"])
         assert mock_llm.call_args.kwargs["temperature"] == 0.5
@@ -142,6 +144,7 @@ class TestTemperatureFlowsToLLM:
     async def test_email_urls_passes_temperature(self, db_path):
         llm_response = _make_llm_response(json.dumps([]))
         with patch("backend.ingestion.url_triage.litellm_completion", return_value=llm_response) as mock_llm, \
+             patch("backend.ingestion.url_triage.resolve_llm_api_key", return_value="test-key"), \
              patch("backend.ingestion.url_triage.get_setting", side_effect=_stub_settings):
             await triage_email_urls("s@x.com", "subject", "body", ["https://a.com"])
         assert mock_llm.call_args.kwargs["temperature"] == 0.5
@@ -151,6 +154,7 @@ class TestTemperatureFlowsToLLM:
         llm_response = _make_llm_response(json.dumps([]))
         docs = [ClassificationDocument(identifier="a.pdf", source="attachment", first_page_image=_PNG_1PX)]
         with patch("backend.ingestion.url_triage.litellm_completion", return_value=llm_response) as mock_llm, \
+             patch("backend.ingestion.url_triage.resolve_llm_api_key", return_value="test-key"), \
              patch("backend.ingestion.url_triage.get_setting", side_effect=_stub_settings):
             await classify_email_documents("s@x.com", "subject", "body", docs)
         assert mock_llm.call_args.kwargs["temperature"] == 0.5

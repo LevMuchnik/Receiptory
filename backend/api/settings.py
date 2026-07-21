@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.auth import require_auth
-from backend.config import get_all_settings_masked, set_setting, get_setting, env_overridden_keys
+from backend.config import get_all_settings_masked, set_setting, get_setting, env_overridden_keys, list_named_api_keys, resolve_llm_api_key
 from backend.models import SettingsUpdate
 
 router = APIRouter()
@@ -10,6 +10,31 @@ router = APIRouter()
 @router.get("/settings")
 def get_settings(username: str = Depends(require_auth)):
     return get_all_settings_masked()
+
+
+@router.get("/settings/llm-api-keys")
+def llm_api_keys(username: str = Depends(require_auth)):
+    """Named provider API keys available for the picker (#13). Returns the LABELS
+    of RECEIPTORY_LLM_API_KEY_<LABEL> env vars (never the secret values), which
+    one is selected, and the provider of the currently selected model so the
+    user can pick the matching key."""
+    import litellm
+
+    model = get_setting("llm_model")
+    provider = None
+    if model:
+        try:
+            provider = litellm.get_llm_provider(model=model)[1]
+        except Exception:
+            provider = None
+    ref = get_setting("llm_api_key_ref")
+    return {
+        "keys": list_named_api_keys(),
+        "selected": ref if isinstance(ref, str) else "",
+        "legacy_key_set": bool(get_setting("llm_api_key")),
+        "model": model,
+        "model_provider": provider,
+    }
 
 
 @router.get("/settings/env-overrides")
@@ -38,7 +63,7 @@ def test_llm(username: str = Depends(require_auth)):
     import litellm
 
     model = get_setting("llm_model")
-    api_key = get_setting("llm_api_key")
+    api_key = resolve_llm_api_key()
     if not api_key:
         raise HTTPException(status_code=400, detail="No API key configured")
 
