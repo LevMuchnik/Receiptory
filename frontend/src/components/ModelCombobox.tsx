@@ -25,12 +25,14 @@ export default function ModelCombobox({
   onCommit,
   className,
   placeholder,
+  disabled,
 }: {
   value: string;
   models: ModelOption[];
   onCommit: (id: string) => void;
   className?: string;
   placeholder?: string;
+  disabled?: boolean;
 }) {
   const [text, setText] = useState(value ?? "");
   // Keep local input text in sync when the saved value changes elsewhere.
@@ -82,6 +84,7 @@ export default function ModelCombobox({
       <Autocomplete.Input
         placeholder={placeholder ?? "gpt-4o"}
         className={className}
+        disabled={disabled}
         onBlur={() => commit(text)}
       />
       <Autocomplete.Portal>

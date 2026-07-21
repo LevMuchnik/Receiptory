@@ -121,6 +121,22 @@ def get_all_settings() -> dict[str, Any]:
     return {key: get_setting(key) for key in DEFAULTS}
 
 
+def env_overridden_keys() -> list[str]:
+    """Settings whose value is currently pinned by an environment variable.
+
+    Config precedence is env > db > default, so for these keys a UI edit writes
+    the DB but is never read back — get_setting always returns the env value.
+    The UI uses this to show such fields as read-only ("managed by .env") instead
+    of silently discarding edits. Mirrors get_setting's env check exactly
+    (present and non-empty)."""
+    out = []
+    for key in DEFAULTS:
+        val = os.environ.get(f"RECEIPTORY_{key.upper()}")
+        if val is not None and val != "":
+            out.append(key)
+    return out
+
+
 def get_all_settings_masked() -> dict[str, Any]:
     settings = get_all_settings()
     for key in SENSITIVE_KEYS:

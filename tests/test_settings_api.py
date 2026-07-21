@@ -102,3 +102,23 @@ def test_llm_models_lists_vision_chat_models(authed_client):
 def test_llm_models_requires_auth(app):
     resp = TestClient(app).get("/api/settings/llm-models")
     assert resp.status_code == 401
+
+
+def test_env_overrides_reports_pinned_keys(authed_client, monkeypatch):
+    # A setting pinned by an env var must be reported so the UI can lock it (#13).
+    monkeypatch.setenv("RECEIPTORY_LLM_MODEL", "gpt-4o")
+    resp = authed_client.get("/api/settings/env-overrides")
+    assert resp.status_code == 200
+    assert "llm_model" in resp.json()["keys"]
+
+
+def test_env_overrides_empty_without_env(authed_client):
+    # No RECEIPTORY_* env set (conftest clears them) -> nothing locked.
+    resp = authed_client.get("/api/settings/env-overrides")
+    assert resp.status_code == 200
+    assert resp.json()["keys"] == []
+
+
+def test_env_overrides_requires_auth(app):
+    resp = TestClient(app).get("/api/settings/env-overrides")
+    assert resp.status_code == 401
