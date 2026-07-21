@@ -309,7 +309,54 @@ def litellm_completion(**kwargs):
     return litellm.completion(**kwargs)
 
 
-def extract_document(page_images: list[bytes], model: str, api_key: str, business_names: list[str], business_addresses: list[str], business_tax_ids: list[str], expense_categories: list[dict[str, str]], issued_categories: list[dict[str, str]], temperature: float = 1.0, max_tokens: int = 8192, json_mode: bool = True, parse_retries: int = 0) -> LLMExtractionResult:
+# Allowed reasoning-effort levels. "none" means "don't send the param" — the
+# byte-identical-to-today path (issue #13). The rest are the OpenAI-style scale
+# litellm translates per provider (Gemini thinkingBudget, Anthropic
+# thinking.budget_tokens, OpenAI reasoning_effort natively).
+REASONING_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high")
+
+
+def normalize_reasoning_effort(raw: Any) -> str:
+    """Coerce an llm_reasoning_effort setting to a known value.
+
+    get_setting only runs the ENV override through _parse_value; a DB settings
+    row returns raw json (could be a string, None, or anything an old row held),
+    so validate at the use site rather than trust the caller — same pattern as
+    llm_parse_retries. Anything unrecognized collapses to "none" (param not
+    sent), so a bad value can never brick extraction, only fail safe to today's
+    behavior."""
+    if isinstance(raw, str):
+        v = raw.strip().lower()
+        if v in REASONING_EFFORT_VALUES:
+            return v
+    return "none"
+
+
+def reasoning_effort_kwargs(model: str, effort: Any) -> dict[str, Any]:
+    """Return litellm kwargs to request reasoning at `effort`, or {} to send
+    nothing.
+
+    Returns {} when effort is "none" OR the model can't reason — gating on
+    litellm.supports_reasoning keeps a non-reasoning model from raising
+    UnsupportedParamsError without relying on drop_params. When we DO inject the
+    param we also set drop_params=True so a reasoning model that rejects a
+    specific level (a provider that lacks "minimal", say) drops it rather than
+    erroring — the acceptance bar is "no UnsupportedParamsError in any
+    combination". drop_params is added ONLY on the inject path, so the effort==
+    "none" case stays byte-identical to today."""
+    value = normalize_reasoning_effort(effort)
+    if value == "none":
+        return {}
+    try:
+        if not litellm.supports_reasoning(model=model):
+            return {}
+    except Exception:
+        # Unknown model (not in the registry) — fail safe, don't send.
+        return {}
+    return {"reasoning_effort": value, "drop_params": True}
+
+
+def extract_document(page_images: list[bytes], model: str, api_key: str, business_names: list[str], business_addresses: list[str], business_tax_ids: list[str], expense_categories: list[dict[str, str]], issued_categories: list[dict[str, str]], temperature: float = 1.0, max_tokens: int = 8192, json_mode: bool = True, parse_retries: int = 0, reasoning_effort: Any = "none") -> LLMExtractionResult:
     prompt = build_extraction_prompt(business_names=business_names, business_addresses=business_addresses, business_tax_ids=business_tax_ids, expense_categories=expense_categories, issued_categories=issued_categories)
     content: list[dict] = [{"type": "text", "text": prompt}]
     for img_bytes in page_images:
@@ -324,6 +371,10 @@ def extract_document(page_images: list[bytes], model: str, api_key: str, busines
         # never brick extraction; the tolerant parser is the net.
         completion_kwargs["response_format"] = {"type": "json_object"}
         completion_kwargs["drop_params"] = True
+    # Reasoning effort (issue #13): merged in only for reasoning-capable models
+    # when the setting is not "none"; on the inject path this also flips
+    # drop_params=True (a no-op when json_mode already set it).
+    completion_kwargs.update(reasoning_effort_kwargs(model, reasoning_effort))
     truncation_error = f"LLM response truncated at max_tokens={max_tokens} — increase the llm_max_tokens setting"
     # Retry the LLM call on PARSE failures only (issue #12). A single
     # unparseable response is often transient at temperature 1.0 (doc #215

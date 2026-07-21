@@ -9,6 +9,7 @@ def mock_llm_settings(monkeypatch):
     monkeypatch.setenv("RECEIPTORY_LLM_MODEL", "test-model")
     monkeypatch.setenv("RECEIPTORY_LLM_API_KEY", "test-key")
     monkeypatch.setenv("RECEIPTORY_LLM_TEMPERATURE", "1.0")
+    monkeypatch.setenv("RECEIPTORY_LLM_REASONING_EFFORT", "none")
 
 
 def _make_doc(identifier: str, source: str = "attachment", image: bytes = b"fake-png") -> ClassificationDocument:
