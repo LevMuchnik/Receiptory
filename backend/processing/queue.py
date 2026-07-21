@@ -2,7 +2,7 @@ import asyncio
 import logging
 
 from backend.database import get_connection
-from backend.config import get_setting
+from backend.config import get_setting, resolve_llm_api_key
 from backend.processing.pipeline import process_document
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ async def run_queue_loop(data_dir: str) -> None:
             if doc is None:
                 await asyncio.sleep(2.0)
                 continue
-            api_key = get_setting("llm_api_key")
+            api_key = resolve_llm_api_key()
             if not api_key:
                 logger.warning("No LLM API key configured, skipping processing")
                 await asyncio.sleep(10.0)

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import logging
 from typing import Any
 
@@ -15,6 +16,7 @@ DEFAULTS: dict[str, Any] = {
     "reference_currency": "ILS",
     "llm_model": "gemini/gemini-3-flash-preview",
     "llm_api_key": "",
+    "llm_api_key_ref": "",
     "llm_temperature": 1.0,
     "llm_max_tokens": 8192,
     "llm_json_mode": True,
@@ -83,6 +85,42 @@ SENSITIVE_KEYS = {
     "gdrive_client_secret", "onedrive_client_secret",
     "cloud_auth_gdrive_token", "cloud_auth_onedrive_token", "cloud_auth_state",
 }
+
+
+# Named provider API keys: RECEIPTORY_LLM_API_KEY_<LABEL> (e.g. _GEMINI, _OPENAI,
+# _TOGETHERAI). The suffix labels which provider a key is for; the user picks one
+# (llm_api_key_ref) to match the selected model. Distinct from the legacy
+# single-key RECEIPTORY_LLM_API_KEY (no suffix), which stays the fallback.
+_NAMED_API_KEY_RE = re.compile(r"^RECEIPTORY_LLM_API_KEY_(.+)$")
+
+
+def list_named_api_keys() -> list[str]:
+    """Labels of non-empty RECEIPTORY_LLM_API_KEY_<LABEL> env vars (values never
+    exposed). Drives the API-key picker."""
+    out = []
+    for k, v in os.environ.items():
+        m = _NAMED_API_KEY_RE.match(k)
+        if m and v:
+            out.append(m.group(1))
+    return sorted(out)
+
+
+def resolve_llm_api_key() -> str:
+    """The API key to send to litellm. If a named key is selected
+    (llm_api_key_ref) and present in the environment, use it; otherwise fall
+    back to the legacy single llm_api_key (env > db)."""
+    # The ref lookup is best-effort: if the DB isn't available (e.g. an early
+    # env-only code path), fall straight through to the legacy key rather than
+    # letting a RuntimeError escape — the legacy read preserves prior behavior.
+    try:
+        ref = get_setting("llm_api_key_ref")
+    except Exception:
+        ref = ""
+    if isinstance(ref, str) and ref:
+        v = os.environ.get(f"RECEIPTORY_LLM_API_KEY_{ref}")
+        if v:
+            return v
+    return get_setting("llm_api_key") or ""
 
 
 def get_setting(key: str) -> Any:

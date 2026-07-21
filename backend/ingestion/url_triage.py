@@ -6,7 +6,7 @@ import logging
 import re
 from dataclasses import dataclass
 
-from backend.config import get_setting
+from backend.config import get_setting, resolve_llm_api_key
 from backend.processing.extract import litellm_completion, reasoning_effort_kwargs
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ async def triage_telegram_urls(message_text: str, urls: list[str]) -> list[str]:
         return []
 
     model = get_setting("llm_model")
-    api_key = get_setting("llm_api_key")
+    api_key = resolve_llm_api_key()
     temperature = get_setting("llm_temperature")
     reasoning_effort = get_setting("llm_reasoning_effort")
 
@@ -99,7 +99,7 @@ async def triage_email_urls(
 
     try:
         model = get_setting("llm_model")
-        api_key = get_setting("llm_api_key")
+        api_key = resolve_llm_api_key()
         temperature = get_setting("llm_temperature")
         reasoning_effort = get_setting("llm_reasoning_effort")
     except RuntimeError:
@@ -175,7 +175,7 @@ async def classify_email_documents(
 
     try:
         model = get_setting("llm_model")
-        api_key = get_setting("llm_api_key")
+        api_key = resolve_llm_api_key()
         temperature = get_setting("llm_temperature")
         reasoning_effort = get_setting("llm_reasoning_effort")
     except RuntimeError:

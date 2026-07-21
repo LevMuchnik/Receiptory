@@ -64,3 +64,36 @@ def test_init_settings_seeds_defaults(db_path):
     with get_connection() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = 'llm_model'").fetchone()
         assert row is not None
+
+
+# --- Named provider API keys (#13) ---
+
+def test_list_named_api_keys_filters_empty_and_legacy(db_path, monkeypatch):
+    from backend.config import list_named_api_keys
+    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY_GEMINI", "gk")
+    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY_OPENAI", "sk")
+    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY_EMPTY", "")   # empty -> excluded
+    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY", "legacy")   # no suffix -> excluded
+    assert list_named_api_keys() == ["GEMINI", "OPENAI"]
+
+
+def test_resolve_llm_api_key_uses_selected_named_key(db_path, monkeypatch):
+    from backend.config import resolve_llm_api_key
+    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY_OPENAI", "sk-openai")
+    set_setting("llm_api_key_ref", "OPENAI")
+    set_setting("llm_api_key", "legacy-gemini")
+    assert resolve_llm_api_key() == "sk-openai"
+
+
+def test_resolve_llm_api_key_falls_back_to_legacy_when_ref_missing(db_path, monkeypatch):
+    from backend.config import resolve_llm_api_key
+    # ref points at a label with no env var present -> legacy key.
+    set_setting("llm_api_key_ref", "GHOST")
+    set_setting("llm_api_key", "legacy-key")
+    assert resolve_llm_api_key() == "legacy-key"
+
+
+def test_resolve_llm_api_key_no_ref_uses_legacy(db_path):
+    from backend.config import resolve_llm_api_key
+    set_setting("llm_api_key", "legacy-key")
+    assert resolve_llm_api_key() == "legacy-key"
