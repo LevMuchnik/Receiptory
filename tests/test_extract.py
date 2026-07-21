@@ -566,6 +566,71 @@ def test_extract_document_list_content_raises_cleanly(mock_completion):
         extract_document(**_EXTRACT_ARGS)
 
 
+# --- Reasoning effort (issue #13) ---
+
+from backend.processing.extract import normalize_reasoning_effort, reasoning_effort_kwargs
+
+_EXTRACT_ARGS_NO_MODEL = {k: v for k, v in _EXTRACT_ARGS.items() if k != "model"}
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("high", "high"), ("HIGH", "high"), (" low ", "low"), ("medium", "medium"),
+    ("minimal", "minimal"), ("none", "none"),
+    ("bogus", "none"), ("", "none"), (None, "none"), (5, "none"), (["high"], "none"),
+])
+def test_normalize_reasoning_effort(raw, expected):
+    assert normalize_reasoning_effort(raw) == expected
+
+
+def test_reasoning_effort_kwargs_supporting_model():
+    assert reasoning_effort_kwargs("gemini/gemini-3-flash-preview", "high") == {"reasoning_effort": "high", "drop_params": True}
+
+
+def test_reasoning_effort_kwargs_none_sends_nothing():
+    assert reasoning_effort_kwargs("gemini/gemini-3-flash-preview", "none") == {}
+
+
+def test_reasoning_effort_kwargs_nonreasoning_model_sends_nothing():
+    assert reasoning_effort_kwargs("gpt-4o", "high") == {}
+
+
+def test_reasoning_effort_kwargs_unknown_model_sends_nothing():
+    assert reasoning_effort_kwargs("some/unknown-model-xyz", "high") == {}
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_no_reasoning_by_default(mock_completion):
+    # Default (none) must be byte-identical to today: no reasoning_effort sent.
+    mock_completion.return_value = mock_llm_response()
+    extract_document(**_EXTRACT_ARGS)
+    assert "reasoning_effort" not in mock_completion.call_args.kwargs
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_reasoning_effort_on_supporting_model(mock_completion):
+    mock_completion.return_value = mock_llm_response()
+    extract_document(**_EXTRACT_ARGS, reasoning_effort="high")
+    kwargs = mock_completion.call_args.kwargs
+    assert kwargs["reasoning_effort"] == "high"
+    assert kwargs["drop_params"] is True
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_reasoning_effort_skipped_on_nonreasoning_model(mock_completion):
+    # gpt-4o can't reason: the param must be withheld so litellm never raises
+    # UnsupportedParamsError, even when the user set an effort level.
+    mock_completion.return_value = mock_llm_response()
+    extract_document(**_EXTRACT_ARGS_NO_MODEL, model="gpt-4o", reasoning_effort="high")
+    assert "reasoning_effort" not in mock_completion.call_args.kwargs
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_invalid_reasoning_effort_ignored(mock_completion):
+    mock_completion.return_value = mock_llm_response()
+    extract_document(**_EXTRACT_ARGS, reasoning_effort="turbo")
+    assert "reasoning_effort" not in mock_completion.call_args.kwargs
+
+
 def test_build_prompt_separates_expense_and_issued_categories():
     prompt = build_extraction_prompt(
         business_names=["Acme"],

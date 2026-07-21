@@ -100,6 +100,37 @@ def test_process_document_threads_parse_retries_setting(mock_extract, pending_do
     assert mock_extract.call_args.kwargs["parse_retries"] == 3
 
 
+@patch("backend.processing.pipeline.extract_document")
+def test_process_document_threads_reasoning_effort_setting(mock_extract, pending_doc, setup_db):
+    # Issue #13: the pipeline must forward llm_reasoning_effort into
+    # extract_document. Dropping the kwarg would silently revert to "none".
+    set_setting("llm_reasoning_effort", "high")
+    mock_extract.return_value = MOCK_LLM_RESULT
+    process_document(pending_doc, setup_db)
+    assert mock_extract.call_args.kwargs["reasoning_effort"] == "high"
+
+
+def test_estimate_cost_uses_registry():
+    from backend.processing.pipeline import estimate_cost
+    # gpt-4o is $2.50 / $10.00 per 1M in litellm's registry.
+    assert estimate_cost("gpt-4o", 1000, 2000) == pytest.approx((1000 * 2.50 + 2000 * 10.00) / 1_000_000)
+
+
+def test_estimate_cost_strips_provider_prefix():
+    from backend.processing.pipeline import estimate_cost
+    # Provider-prefixed id must resolve to the same cost as the bare id.
+    assert estimate_cost("gemini/gemini-3-flash-preview", 1000, 2000) == pytest.approx(
+        estimate_cost("gemini-3-flash-preview", 1000, 2000)
+    )
+    assert estimate_cost("gemini/gemini-3-flash-preview", 1000, 2000) > 0
+
+
+def test_estimate_cost_unknown_model_falls_back():
+    from backend.processing.pipeline import estimate_cost
+    # Unknown model -> generic $1 / $3 per 1M, matching the old default tuple.
+    assert estimate_cost("totally/unknown-model", 1000, 2000) == pytest.approx((1000 * 1.0 + 2000 * 3.0) / 1_000_000)
+
+
 @patch("backend.processing.extract.litellm_completion")
 def test_process_document_with_trailing_junk_response(mock_completion, pending_doc, setup_db):
     # End-to-end regression for issue #10 (docs #70/#215): the LLM emits a

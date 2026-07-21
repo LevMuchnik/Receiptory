@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 
 from backend.config import get_setting
-from backend.processing.extract import litellm_completion
+from backend.processing.extract import litellm_completion, reasoning_effort_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,7 @@ async def triage_telegram_urls(message_text: str, urls: list[str]) -> list[str]:
     model = get_setting("llm_model")
     api_key = get_setting("llm_api_key")
     temperature = get_setting("llm_temperature")
+    reasoning_effort = get_setting("llm_reasoning_effort")
 
     if not model or not api_key:
         logger.warning("LLM not configured for URL triage, returning all URLs")
@@ -66,6 +67,7 @@ async def triage_telegram_urls(message_text: str, urls: list[str]) -> list[str]:
             api_key=api_key,
             messages=[{"role": "user", "content": prompt}],
             temperature=temperature,
+            **reasoning_effort_kwargs(model, reasoning_effort),
         )
         raw = response.choices[0].message.content
         parsed = json.loads(_strip_code_fences(raw))
@@ -99,6 +101,7 @@ async def triage_email_urls(
         model = get_setting("llm_model")
         api_key = get_setting("llm_api_key")
         temperature = get_setting("llm_temperature")
+        reasoning_effort = get_setting("llm_reasoning_effort")
     except RuntimeError:
         logger.warning("Database not available for URL triage settings, returning all URLs")
         return fallback
@@ -138,6 +141,7 @@ async def triage_email_urls(
             api_key=api_key,
             messages=[{"role": "user", "content": prompt}],
             temperature=temperature,
+            **reasoning_effort_kwargs(model, reasoning_effort),
         )
         raw = response.choices[0].message.content
         parsed = json.loads(_strip_code_fences(raw))
@@ -173,6 +177,7 @@ async def classify_email_documents(
         model = get_setting("llm_model")
         api_key = get_setting("llm_api_key")
         temperature = get_setting("llm_temperature")
+        reasoning_effort = get_setting("llm_reasoning_effort")
     except RuntimeError:
         logger.warning("Database not available for document classification settings, returning all")
         return fallback
@@ -221,6 +226,7 @@ async def classify_email_documents(
             api_key=api_key,
             messages=[{"role": "user", "content": content}],
             temperature=temperature,
+            **reasoning_effort_kwargs(model, reasoning_effort),
         )
         raw = response.choices[0].message.content
         parsed = json.loads(_strip_code_fences(raw))
