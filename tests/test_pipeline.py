@@ -116,19 +116,29 @@ def test_estimate_cost_uses_registry():
     assert estimate_cost("gpt-4o", 1000, 2000) == pytest.approx((1000 * 2.50 + 2000 * 10.00) / 1_000_000)
 
 
-def test_estimate_cost_strips_provider_prefix():
+def test_estimate_cost_resolves_provider_prefixed_model():
     from backend.processing.pipeline import estimate_cost
-    # Provider-prefixed id must resolve to the same cost as the bare id.
-    assert estimate_cost("gemini/gemini-3-flash-preview", 1000, 2000) == pytest.approx(
-        estimate_cost("gemini-3-flash-preview", 1000, 2000)
-    )
+    # litellm resolves the provider-prefixed id to a real, non-zero price.
     assert estimate_cost("gemini/gemini-3-flash-preview", 1000, 2000) > 0
 
 
 def test_estimate_cost_unknown_model_falls_back():
     from backend.processing.pipeline import estimate_cost
-    # Unknown model -> generic $1 / $3 per 1M, matching the old default tuple.
+    # Unmappable model -> litellm.cost_per_token raises -> generic $1 / $3 per 1M,
+    # matching the old default tuple. Guards the wrong-price collision that a naive
+    # prefix strip caused (azure/* landing on a cheaper bare registry row).
     assert estimate_cost("totally/unknown-model", 1000, 2000) == pytest.approx((1000 * 1.0 + 2000 * 3.0) / 1_000_000)
+
+
+def test_estimate_cost_falls_back_when_resolver_raises(monkeypatch):
+    import litellm
+    from backend.processing import pipeline
+    # Any resolver failure (unmapped model, partial-cost row, litellm internals)
+    # must fall back to the generic estimate rather than crash the pipeline.
+    def boom(*a, **k):
+        raise Exception("This model isn't mapped yet")
+    monkeypatch.setattr(litellm, "cost_per_token", boom)
+    assert pipeline.estimate_cost("some/model", 1000, 2000) == pytest.approx((1000 * 1.0 + 2000 * 3.0) / 1_000_000)
 
 
 @patch("backend.processing.extract.litellm_completion")
