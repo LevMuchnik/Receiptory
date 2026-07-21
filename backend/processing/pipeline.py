@@ -120,26 +120,19 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
 
 
 def estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
-    """Cost in USD for a completion, from litellm's per-token registry so the
-    number stays correct when the model changes (issue #13). model_cost rates
-    are already per single token (not per million). Falls back to a generic
-    $1/$3-per-1M estimate when the model isn't in the registry (self-hosted,
-    brand-new, or a bare id litellm can't resolve) — same default the old
-    hardcoded table used for unknown models. Reasoning tokens are billed by the
-    provider as output tokens, so tokens_out already includes them."""
-    in_rate = out_rate = None
+    """Cost in USD for a completion, via litellm's own price resolver so the
+    number stays correct when the model changes (issue #13). litellm.cost_per_token
+    does proper provider resolution (e.g. azure/*, bedrock/*) and RAISES for a
+    model it can't map — unlike a naive prefix strip, which can silently land on
+    a different-priced registry row. On any miss we fall back to a generic
+    $1/$3-per-1M estimate, the same default the old hardcoded table used for
+    unknown models. Reasoning tokens are billed by the provider as output tokens,
+    so tokens_out already includes them."""
     try:
         import litellm
-        info = litellm.model_cost.get(model)
-        if info is None:
-            # Registry keys sometimes drop the provider prefix
-            # ("gemini/gemini-3-flash-preview" -> "gemini-3-flash-preview").
-            info = litellm.model_cost.get(model.split("/", 1)[-1])
-        if info:
-            in_rate = info.get("input_cost_per_token")
-            out_rate = info.get("output_cost_per_token")
+        prompt_cost, completion_cost = litellm.cost_per_token(model=model, prompt_tokens=tokens_in, completion_tokens=tokens_out)
+        if prompt_cost is not None and completion_cost is not None:
+            return prompt_cost + completion_cost
     except Exception:
         logger.debug("litellm cost lookup failed for model %s; using fallback", model, exc_info=True)
-    if in_rate is None or out_rate is None:
-        return (tokens_in * 1.0 + tokens_out * 3.0) / 1_000_000
-    return tokens_in * in_rate + tokens_out * out_rate
+    return (tokens_in * 1.0 + tokens_out * 3.0) / 1_000_000

@@ -73,7 +73,13 @@ def model_info(model: str | None = None, username: str = Depends(require_auth)):
     if not model:
         return result
 
-    info = litellm.model_cost.get(model) or litellm.model_cost.get(model.split("/", 1)[-1])
+    # get_model_info does proper provider resolution and raises for a model it
+    # can't map — safer than model_cost.get + prefix strip, which can land on a
+    # different-priced registry row (e.g. azure/deepseek-v4-pro -> deepseek-v4-pro).
+    try:
+        info = litellm.get_model_info(model)
+    except Exception:
+        info = None
     if info:
         result["in_registry"] = True
         result["provider"] = info.get("litellm_provider")
