@@ -49,7 +49,17 @@ export default function ModelCombobox({
           (m) => m.id.toLowerCase().includes(q) || (m.provider ?? "").toLowerCase().includes(q)
         )
       : models;
-    return { filtered: matches.slice(0, MAX_RESULTS), total: matches.length };
+    // Pin the currently-selected model to the top so it's visible on open even
+    // when it sorts alphabetically past the result cap. Only when it's in the
+    // match set (i.e. not while the user is searching for a different model).
+    let ordered = matches;
+    if (value && matches.some((m) => m.id === value)) {
+      ordered = [
+        ...matches.filter((m) => m.id === value),
+        ...matches.filter((m) => m.id !== value),
+      ];
+    }
+    return { filtered: ordered.slice(0, MAX_RESULTS), total: ordered.length };
   }, [text, value, models]);
 
   const fmtPrice = (m: ModelOption) =>
