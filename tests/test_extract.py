@@ -2,7 +2,7 @@ import json
 import logging
 import pytest
 from unittest.mock import patch
-from backend.processing.extract import (build_extraction_prompt, parse_llm_response, extract_document)
+from backend.processing.extract import (build_extraction_prompt, parse_llm_response, extract_document, ParseFailure, _MAX_PARSE_RETRIES)
 from tests.conftest import SAMPLE_LLM_RESPONSE, mock_llm_response
 
 EXTRACT_LOGGER = "backend.processing.extract"
@@ -366,6 +366,157 @@ def test_extract_document_unparseable_non_truncated_reraises(mock_completion):
     mock_completion.return_value = mock_llm_response(content="this is not json", finish_reason="stop")
     with pytest.raises(ValueError, match="Failed to parse"):
         extract_document(**_EXTRACT_ARGS)
+
+
+# --- Issue #12: retry LLM extraction on parse failure -----------------------
+#
+#   parse_retries=N  ── garbage ──► retry ──► valid ──► return (tokens summed)
+#                    └─ garbage ──► ... ──► garbage ──► raise last ParseFailure
+#   parse_retries=0  ── garbage ──► raise immediately (0 retries)
+#   truncated/empty  ── raise plain ValueError, NEVER retried (call_count == 1)
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_retries_parse_failure_then_succeeds(mock_completion):
+    # Case 1 (AC): a garbage response followed by a valid one processes the
+    # document normally when a retry is allowed.
+    mock_completion.side_effect = [mock_llm_response(content="this is not json"), mock_llm_response()]
+    result = extract_document(**_EXTRACT_ARGS, parse_retries=1)
+    assert result.extraction.vendor_name == "Office Depot"
+    assert mock_completion.call_count == 2
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_retries_exhausted_raises_last_parse_error(mock_completion):
+    # Case 2: retries exhausted -> the document fails with the parse error,
+    # exactly as today. N=1 means one original + one retry = 2 calls.
+    mock_completion.side_effect = [mock_llm_response(content="not json"), mock_llm_response(content="still not json")]
+    with pytest.raises(ParseFailure, match="Failed to parse"):
+        extract_document(**_EXTRACT_ARGS, parse_retries=1)
+    assert mock_completion.call_count == 2
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_zero_retries_fails_immediately(mock_completion):
+    # Case 3 (AC): N=0 preserves current behavior — fail on the first parse
+    # failure with no retry.
+    mock_completion.side_effect = [mock_llm_response(content="not json"), mock_llm_response()]
+    with pytest.raises(ParseFailure, match="Failed to parse"):
+        extract_document(**_EXTRACT_ARGS, parse_retries=0)
+    assert mock_completion.call_count == 1
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_accumulates_tokens_across_attempts(mock_completion):
+    # Case 4: tokens/cost must count ALL attempts (issue #12), including the
+    # failed parse. Each mock response reports 1000 in / 500 out.
+    mock_completion.side_effect = [mock_llm_response(content="not json"), mock_llm_response()]
+    result = extract_document(**_EXTRACT_ARGS, parse_retries=1)
+    assert result.tokens_in == 2000
+    assert result.tokens_out == 1000
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_logs_warning_per_retry(mock_completion, caplog):
+    # Case 5: each retry is logged at WARNING with the attempt count.
+    mock_completion.side_effect = [mock_llm_response(content="not json"), mock_llm_response()]
+    with caplog.at_level(logging.WARNING, logger=EXTRACT_LOGGER):
+        extract_document(**_EXTRACT_ARGS, parse_retries=1)
+    assert "parse failed (attempt 1/2), retrying" in caplog.text
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_truncated_response_not_retried(mock_completion):
+    # Case 6a: a truncated response is a max_tokens problem, not transient —
+    # it must fail fast without consuming a retry.
+    mock_completion.side_effect = [mock_llm_response(content='{"vendor_name": "Off', finish_reason="length"), mock_llm_response()]
+    with pytest.raises(ValueError, match="truncated at max_tokens"):
+        extract_document(**_EXTRACT_ARGS, parse_retries=1)
+    assert mock_completion.call_count == 1
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_empty_response_not_retried(mock_completion):
+    # Case 6b: an empty (content-filter/safety-block) response must not retry —
+    # re-calling a blocked prompt only burns tokens.
+    mock_completion.side_effect = [mock_llm_response(content=None), mock_llm_response()]
+    with pytest.raises(ValueError, match="empty response"):
+        extract_document(**_EXTRACT_ARGS, parse_retries=1)
+    assert mock_completion.call_count == 1
+
+
+# --- Issue #12 (review hardening): parse_retries is coerced and clamped -------
+# A negative value would make range() empty -> the loop falls off the end and
+# returns None -> the pipeline crashes with a cryptic AttributeError. A non-int
+# (reachable via the DB settings path, which skips _parse_value) would raise
+# TypeError inside range(). A huge value would fire hundreds of paid LLM calls.
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_negative_retries_clamped_to_zero(mock_completion):
+    # A negative config must degrade to "no retry", not silently return None.
+    mock_completion.side_effect = [mock_llm_response(content="not json"), mock_llm_response()]
+    with pytest.raises(ParseFailure, match="Failed to parse"):
+        extract_document(**_EXTRACT_ARGS, parse_retries=-3)
+    assert mock_completion.call_count == 1
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_string_retries_coerced(mock_completion):
+    # The DB settings path can return a JSON string; extract_document must
+    # coerce it rather than blow up in range().
+    mock_completion.side_effect = [mock_llm_response(content="not json"), mock_llm_response()]
+    result = extract_document(**_EXTRACT_ARGS, parse_retries="1")
+    assert result.extraction.vendor_name == "Office Depot"
+    assert mock_completion.call_count == 2
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_non_numeric_retries_treated_as_zero(mock_completion):
+    # A non-numeric junk value must not crash — treat as 0 retries.
+    mock_completion.side_effect = [mock_llm_response(content="not json"), mock_llm_response()]
+    with pytest.raises(ParseFailure, match="Failed to parse"):
+        extract_document(**_EXTRACT_ARGS, parse_retries="lots")
+    assert mock_completion.call_count == 1
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_retries_capped(mock_completion):
+    # A huge config is clamped so one poison document can't fire unbounded
+    # sequential paid calls. Cap+1 attempts, then fail.
+    mock_completion.side_effect = [mock_llm_response(content="not json")] * (_MAX_PARSE_RETRIES + 5)
+    with pytest.raises(ParseFailure, match="Failed to parse"):
+        extract_document(**_EXTRACT_ARGS, parse_retries=999)
+    assert mock_completion.call_count == _MAX_PARSE_RETRIES + 1
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_retry_then_truncated_raises_truncation(mock_completion):
+    # Retry interaction (review D2): a parse failure that RETRIES into a
+    # truncated response must surface the truncation error, not loop again —
+    # the retry consumed attempt 1, the truncation ends it at attempt 2.
+    mock_completion.side_effect = [
+        mock_llm_response(content="not json"),
+        mock_llm_response(content='{"vendor_name": "Off', finish_reason="length"),
+    ]
+    with pytest.raises(ValueError, match="truncated at max_tokens"):
+        extract_document(**_EXTRACT_ARGS, parse_retries=1)
+    assert mock_completion.call_count == 2
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_salvaged_parse_on_retry_succeeds(mock_completion):
+    # Retry interaction (review D2): a salvage-tier (T2/T3) parse that succeeds
+    # on the retry attempt returns normally — salvage is only rejected when the
+    # response is ALSO truncated, which this one is not.
+    mock_completion.side_effect = [
+        mock_llm_response(content="not json"),
+        mock_llm_response(content="Sure! Here is the data:\n" + SAMPLE_LLM_RESPONSE),
+    ]
+    result = extract_document(**_EXTRACT_ARGS, parse_retries=1)
+    assert result.extraction.vendor_name == "Office Depot"
+    assert result.extraction.parse_salvaged is True
+    assert mock_completion.call_count == 2
 
 
 @patch("backend.processing.extract.litellm_completion")

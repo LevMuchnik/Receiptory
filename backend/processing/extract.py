@@ -11,6 +11,16 @@ import litellm
 logger = logging.getLogger(__name__)
 
 
+class ParseFailure(ValueError):
+    """Raised when the tolerant parse ladder cannot recover a document object
+    from the LLM response. Distinct from the plain ValueErrors extract_document
+    raises for truncation / empty / content-filter responses: only ParseFailure
+    is retryable (issue #12) — a garbage response is often transient at
+    temperature 1.0, whereas a max_tokens cutoff or a safety block will not
+    change on re-call. Subclasses ValueError so existing `except ValueError`
+    callers keep working."""
+
+
 @dataclass
 class ExtractionResult:
     receipt_date: str | None = None
@@ -113,6 +123,11 @@ _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # keep \t and 
 _TRAILING_SNIPPET_CHARS = 500
 _FAILURE_LOG_CHARS = 2000
 _MAX_SALVAGE_ATTEMPTS = 1000
+# Safety cap on llm_parse_retries: retries are sequential paid LLM calls on the
+# single-process queue, so a misconfigured huge value would block the queue and
+# run up cost on one poison document. 5 is far above the transient-failure need
+# (issue #12 saw success on the first retry).
+_MAX_PARSE_RETRIES = 5
 
 
 def _sanitize_for_log(text: str) -> str:
@@ -246,7 +261,7 @@ def parse_llm_response(response_text: str) -> ExtractionResult:
             detail = str(e)
         else:
             detail = "leading JSON object does not match the extraction schema" if isinstance(value, dict) else "leading JSON value is not an object"
-        raise ValueError(f"Failed to parse LLM response as JSON: {detail}")
+        raise ParseFailure(f"Failed to parse LLM response as JSON: {detail}")
 
     data, trailing = decoded
     trailing = trailing.strip()
@@ -294,7 +309,7 @@ def litellm_completion(**kwargs):
     return litellm.completion(**kwargs)
 
 
-def extract_document(page_images: list[bytes], model: str, api_key: str, business_names: list[str], business_addresses: list[str], business_tax_ids: list[str], expense_categories: list[dict[str, str]], issued_categories: list[dict[str, str]], temperature: float = 1.0, max_tokens: int = 8192, json_mode: bool = True) -> LLMExtractionResult:
+def extract_document(page_images: list[bytes], model: str, api_key: str, business_names: list[str], business_addresses: list[str], business_tax_ids: list[str], expense_categories: list[dict[str, str]], issued_categories: list[dict[str, str]], temperature: float = 1.0, max_tokens: int = 8192, json_mode: bool = True, parse_retries: int = 0) -> LLMExtractionResult:
     prompt = build_extraction_prompt(business_names=business_names, business_addresses=business_addresses, business_tax_ids=business_tax_ids, expense_categories=expense_categories, issued_categories=issued_categories)
     content: list[dict] = [{"type": "text", "text": prompt}]
     for img_bytes in page_images:
@@ -309,37 +324,84 @@ def extract_document(page_images: list[bytes], model: str, api_key: str, busines
         # never brick extraction; the tolerant parser is the net.
         completion_kwargs["response_format"] = {"type": "json_object"}
         completion_kwargs["drop_params"] = True
-    response = litellm_completion(**completion_kwargs)
-    choice = response.choices[0]
-    raw_content = choice.message.content
-    finish_reason = getattr(choice, "finish_reason", None)
-    truncated = finish_reason == "length"
     truncation_error = f"LLM response truncated at max_tokens={max_tokens} — increase the llm_max_tokens setting"
-    if not raw_content:
-        if truncated:
-            raise ValueError(truncation_error)
-        # Gemini safety/recitation blocks arrive as finish_reason=content_filter
-        # with empty content — carry the reason so the stored error is diagnosable.
-        raise ValueError(f"LLM returned an empty response (finish_reason={finish_reason})")
-    if not isinstance(raw_content, str):
-        raise ValueError(f"LLM returned unexpected content type: {type(raw_content).__name__}")
-    logger.debug(f"LLM response ({response.usage.completion_tokens} tokens):\n{_sanitize_for_log(raw_content[:500])}")
+    # Retry the LLM call on PARSE failures only (issue #12). A single
+    # unparseable response is often transient at temperature 1.0 (doc #215
+    # re-ran clean 5/5). The retry loop must wrap the WHOLE block below so the
+    # ordering is unambiguous: truncation / empty / content-filter responses
+    # raise plain ValueError and propagate immediately (re-calling won't change
+    # a max_tokens cutoff or a safety block, only burn tokens), while only a
+    # non-truncated ParseFailure loops. litellm's own num_retries can't cover
+    # this — the HTTP call succeeded (200); it's the *content* our ladder can't
+    # parse. Tokens accumulate BEFORE each parse, so a doc that returns after a
+    # retry bills every attempt (including the failed parses) — processing_cost
+    # reflects the real spend on the SUCCESS path. On a hard-fail path
+    # (truncation/empty/content-type raises after one or more attempts) the
+    # accumulated totals are discarded, exactly as any failed doc records no
+    # cost today.
+    # Coerce and clamp the retry count. get_setting only runs the ENV override
+    # through _parse_value; a DB settings row returns raw json (could be a
+    # string "2", a float, or None), and range() is type-strict — so guard
+    # here rather than trust the caller. Negative -> 0 (an empty range would
+    # fall off the end returning None and crash the pipeline); over-large ->
+    # capped (see _MAX_PARSE_RETRIES).
     try:
-        extraction = parse_llm_response(raw_content)
-    except ValueError:
-        # A response that rambled into the token cap may still carry a
-        # complete leading object (the issue #10 shape) — only when the
-        # ladder can't recover one is truncation the actionable error.
+        retries = int(parse_retries)
+    except (TypeError, ValueError):
+        logger.warning(f"llm_parse_retries={parse_retries!r} is not an integer; treating as 0")
+        retries = 0
+    if retries < 0:
+        logger.warning(f"llm_parse_retries={retries} is negative; treating as 0")
+        retries = 0
+    if retries > _MAX_PARSE_RETRIES:
+        logger.warning(f"llm_parse_retries={retries} exceeds the cap; clamping to {_MAX_PARSE_RETRIES}")
+        retries = _MAX_PARSE_RETRIES
+    tokens_in_total = 0
+    tokens_out_total = 0
+    for attempt in range(retries + 1):
+        response = litellm_completion(**completion_kwargs)
+        usage = response.usage
+        tokens_in_total += getattr(usage, "prompt_tokens", 0) or 0
+        tokens_out_total += getattr(usage, "completion_tokens", 0) or 0
+        choice = response.choices[0]
+        raw_content = choice.message.content
+        finish_reason = getattr(choice, "finish_reason", None)
+        truncated = finish_reason == "length"
+        if not raw_content:
+            if truncated:
+                raise ValueError(truncation_error)
+            # Gemini safety/recitation blocks arrive as finish_reason=content_filter
+            # with empty content — carry the reason so the stored error is diagnosable.
+            raise ValueError(f"LLM returned an empty response (finish_reason={finish_reason})")
+        if not isinstance(raw_content, str):
+            raise ValueError(f"LLM returned unexpected content type: {type(raw_content).__name__}")
+        logger.debug(f"LLM response ({getattr(usage, 'completion_tokens', 0)} tokens):\n{_sanitize_for_log(raw_content[:500])}")
+        try:
+            extraction = parse_llm_response(raw_content)
+        except ParseFailure as e:
+            # A response that rambled into the token cap may still carry a
+            # complete leading object (the issue #10 shape) — only when the
+            # ladder can't recover one is truncation the actionable error.
+            # Truncation is deterministic, not transient: do NOT retry it.
+            if truncated:
+                logger.error(f"LLM response truncated at max_tokens={max_tokens} and no complete JSON object found. Tail:\n{_sanitize_for_log(raw_content[-_FAILURE_LOG_CHARS:])}")
+                raise ValueError(truncation_error)
+            # Non-truncated parse failure: retry if attempts remain, else fail
+            # the document with the last parse error (unchanged from today).
+            if attempt < retries:
+                logger.warning(f"LLM response parse failed (attempt {attempt + 1}/{retries + 1}), retrying: {e}")
+                continue
+            raise
         if truncated:
-            logger.error(f"LLM response truncated at max_tokens={max_tokens} and no complete JSON object found. Tail:\n{_sanitize_for_log(raw_content[-_FAILURE_LOG_CHARS:])}")
-            raise ValueError(truncation_error)
-        raise
-    if truncated:
-        # A T2/T3-salvaged parse of a TRUNCATED response is untrustworthy: the
-        # ladder may have latched onto an inner fragment (e.g. a line item) of
-        # the incomplete document. Only a clean leading object (T1) counts.
-        if extraction.parse_salvaged:
-            logger.error(f"LLM response truncated at max_tokens={max_tokens}; salvage tier matched only a fragment — rejecting. Tail:\n{_sanitize_for_log(raw_content[-_FAILURE_LOG_CHARS:])}")
-            raise ValueError(truncation_error)
-        logger.warning(f"LLM response hit max_tokens={max_tokens} but a complete leading JSON object was parsed")
-    return LLMExtractionResult(extraction=extraction, tokens_in=response.usage.prompt_tokens, tokens_out=response.usage.completion_tokens, model=model)
+            # A T2/T3-salvaged parse of a TRUNCATED response is untrustworthy: the
+            # ladder may have latched onto an inner fragment (e.g. a line item) of
+            # the incomplete document. Only a clean leading object (T1) counts.
+            if extraction.parse_salvaged:
+                logger.error(f"LLM response truncated at max_tokens={max_tokens}; salvage tier matched only a fragment — rejecting. Tail:\n{_sanitize_for_log(raw_content[-_FAILURE_LOG_CHARS:])}")
+                raise ValueError(truncation_error)
+            logger.warning(f"LLM response hit max_tokens={max_tokens} but a complete leading JSON object was parsed")
+        return LLMExtractionResult(extraction=extraction, tokens_in=tokens_in_total, tokens_out=tokens_out_total, model=model)
+    # Unreachable: retries is clamped >= 0 so the loop runs at least once, and
+    # each iteration returns or raises. Guard against a future edit that breaks
+    # that invariant rather than silently returning None.
+    raise RuntimeError("extract_document retry loop exited without returning")

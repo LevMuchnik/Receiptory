@@ -89,6 +89,17 @@ def test_process_document_threads_json_mode_setting(mock_extract, pending_doc, s
     assert mock_extract.call_args.kwargs["json_mode"] is False
 
 
+@patch("backend.processing.pipeline.extract_document")
+def test_process_document_threads_parse_retries_setting(mock_extract, pending_doc, setup_db):
+    # Issue #12: the pipeline must forward llm_parse_retries into extract_document.
+    # A future edit dropping the kwarg would silently revert to 0 retries — this
+    # one-line assertion catches that wiring regression.
+    set_setting("llm_parse_retries", 3)
+    mock_extract.return_value = MOCK_LLM_RESULT
+    process_document(pending_doc, setup_db)
+    assert mock_extract.call_args.kwargs["parse_retries"] == 3
+
+
 @patch("backend.processing.extract.litellm_completion")
 def test_process_document_with_trailing_junk_response(mock_completion, pending_doc, setup_db):
     # End-to-end regression for issue #10 (docs #70/#215): the LLM emits a

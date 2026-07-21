@@ -190,6 +190,22 @@ Deferred items captured during planning and review. Organized by component, sort
 **Priority:** P4
 **Depends on:** Fine-tune flywheel active, or a recurring need to compare many model versions
 
+## Observability
+
+### Persist `parse_retry_count` for LLM parse-retry visibility
+
+**What:** Add a persisted counter (e.g. `documents.parse_retry_count`) recording how many parse-retry attempts a document needed, surfaced in stats/UI.
+
+**Why:** Issue #12 adds a parse-failure retry loop that logs each retry at WARNING but stores nothing. If the model degrades and retries become common, there's no at-a-glance signal — you'd be grepping logs to notice. A stored counter turns "retries are happening" into a dashboard number.
+
+**Cons / why deferred:** Requires a schema migration + touching the large UPDATE in `pipeline.py:98` and the stats endpoints. Wider surface than the core fix warrants until retries prove common. The WARNING-per-retry log satisfies issue #12's acceptance criteria in the meantime.
+
+**Context:**
+- Raised by the outside voice during /plan-eng-review of issue #12 (2026-07-21).
+- Where to start: new numbered migration adding the column; increment it in `_run_pipeline`'s UPDATE alongside `processing_attempts`; expose in `backend/api/stats.py`.
+
+**Depends on:** Issue #12 (parse-retry loop) landing first.
+
 ## Completed
 
 _No completed items yet._

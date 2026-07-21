@@ -66,7 +66,8 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
     temperature = get_setting("llm_temperature")
     max_tokens = get_setting("llm_max_tokens")
     json_mode = get_setting("llm_json_mode")
-    llm_result = extract_document(page_images=page_images, model=model, api_key=api_key, business_names=business_names, business_addresses=business_addresses, business_tax_ids=business_tax_ids, expense_categories=expense_categories, issued_categories=issued_categories, temperature=temperature, max_tokens=max_tokens, json_mode=json_mode)
+    parse_retries = get_setting("llm_parse_retries")
+    llm_result = extract_document(page_images=page_images, model=model, api_key=api_key, business_names=business_names, business_addresses=business_addresses, business_tax_ids=business_tax_ids, expense_categories=expense_categories, issued_categories=issued_categories, temperature=temperature, max_tokens=max_tokens, json_mode=json_mode, parse_retries=parse_retries)
     ext = llm_result.extraction
     doc_type = ext.document_type
     if ext.vendor_tax_id and ext.vendor_tax_id in business_tax_ids:
