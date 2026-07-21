@@ -112,6 +112,15 @@ def test_env_overrides_reports_pinned_keys(authed_client, monkeypatch):
     assert "llm_model" in resp.json()["keys"]
 
 
+def test_env_overrides_flags_auth_password_special_case(authed_client, monkeypatch):
+    # verify_password checks plain-text RECEIPTORY_AUTH_PASSWORD before the
+    # auth_password_hash setting, so the password field must be flagged even
+    # though the env var name doesn't match the setting key (#13).
+    monkeypatch.setenv("RECEIPTORY_AUTH_PASSWORD", "secret")
+    resp = authed_client.get("/api/settings/env-overrides")
+    assert "auth_password_hash" in resp.json()["keys"]
+
+
 def test_env_overrides_empty_without_env(authed_client):
     # No RECEIPTORY_* env set (conftest clears them) -> nothing locked.
     resp = authed_client.get("/api/settings/env-overrides")
