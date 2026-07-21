@@ -283,9 +283,12 @@ uv run pytest tests/ -v
 
 ### Claude Code Dev Container
 
-A sidecar container for in-place development on UNRAID (no host installs needed):
+A sidecar container for in-place development on UNRAID (no host installs needed).
+Run these from the repo directory on the NAS (the `docker-compose.claude.yml` path is relative):
 
 ```bash
+cd /mnt/user/appdata/Receiptory
+
 # First run / after Dockerfile changes — rebuild then launch:
 docker compose -f docker-compose.claude.yml up -d --build && docker exec -it claude-dev claude-yolo
 
