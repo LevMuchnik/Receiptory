@@ -51,6 +51,56 @@ def test_llm(username: str = Depends(require_auth)):
         raise HTTPException(status_code=500, detail=f"LLM test failed: {e}")
 
 
+@router.get("/settings/model-info")
+def model_info(model: str | None = None, username: str = Depends(require_auth)):
+    """Economics + reasoning support for a single model, from litellm's registry
+    (issue #13). Drives the Settings LLM-Engine price line and the reasoning
+    control's enabled/disabled state. `model` defaults to the configured
+    llm_model. Prices are per 1M tokens for display; `in_registry` is false for
+    self-hosted / brand-new ids litellm can't resolve (the free-text case)."""
+    import litellm
+
+    model = model or get_setting("llm_model")
+    result = {
+        "model": model,
+        "in_registry": False,
+        "provider": None,
+        "supports_reasoning": False,
+        "input_price_per_1m": None,
+        "output_price_per_1m": None,
+        "max_output_tokens": None,
+    }
+    if not model:
+        return result
+
+    # get_model_info does proper provider resolution and raises for a model it
+    # can't map — safer than model_cost.get + prefix strip, which can land on a
+    # different-priced registry row (e.g. azure/deepseek-v4-pro -> deepseek-v4-pro).
+    try:
+        info = litellm.get_model_info(model)
+    except Exception:
+        info = None
+    if info:
+        result["in_registry"] = True
+        result["provider"] = info.get("litellm_provider")
+        result["max_output_tokens"] = info.get("max_output_tokens")
+        in_rate = info.get("input_cost_per_token")
+        out_rate = info.get("output_cost_per_token")
+        if in_rate is not None:
+            result["input_price_per_1m"] = round(in_rate * 1_000_000, 4)
+        if out_rate is not None:
+            result["output_price_per_1m"] = round(out_rate * 1_000_000, 4)
+
+    # supports_reasoning resolves even for some ids missing a model_cost row, so
+    # probe it independently of the price lookup.
+    try:
+        result["supports_reasoning"] = bool(litellm.supports_reasoning(model=model))
+    except Exception:
+        result["supports_reasoning"] = False
+
+    return result
+
+
 @router.get("/settings/telegram-status")
 async def telegram_status(username: str = Depends(require_auth)):
     """Check Telegram bot connection status."""

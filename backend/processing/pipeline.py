@@ -67,7 +67,8 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
     max_tokens = get_setting("llm_max_tokens")
     json_mode = get_setting("llm_json_mode")
     parse_retries = get_setting("llm_parse_retries")
-    llm_result = extract_document(page_images=page_images, model=model, api_key=api_key, business_names=business_names, business_addresses=business_addresses, business_tax_ids=business_tax_ids, expense_categories=expense_categories, issued_categories=issued_categories, temperature=temperature, max_tokens=max_tokens, json_mode=json_mode, parse_retries=parse_retries)
+    reasoning_effort = get_setting("llm_reasoning_effort")
+    llm_result = extract_document(page_images=page_images, model=model, api_key=api_key, business_names=business_names, business_addresses=business_addresses, business_tax_ids=business_tax_ids, expense_categories=expense_categories, issued_categories=issued_categories, temperature=temperature, max_tokens=max_tokens, json_mode=json_mode, parse_retries=parse_retries, reasoning_effort=reasoning_effort)
     ext = llm_result.extraction
     doc_type = ext.document_type
     if ext.vendor_tax_id and ext.vendor_tax_id in business_tax_ids:
@@ -119,6 +120,19 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
 
 
 def estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
-    pricing = {"gemini/gemini-3-flash-preview": (0.10, 0.40), "gpt-4o": (2.50, 10.00), "claude-sonnet-4-20250514": (3.00, 15.00)}
-    in_rate, out_rate = pricing.get(model, (1.0, 3.0))
-    return (tokens_in * in_rate + tokens_out * out_rate) / 1_000_000
+    """Cost in USD for a completion, via litellm's own price resolver so the
+    number stays correct when the model changes (issue #13). litellm.cost_per_token
+    does proper provider resolution (e.g. azure/*, bedrock/*) and RAISES for a
+    model it can't map — unlike a naive prefix strip, which can silently land on
+    a different-priced registry row. On any miss we fall back to a generic
+    $1/$3-per-1M estimate, the same default the old hardcoded table used for
+    unknown models. Reasoning tokens are billed by the provider as output tokens,
+    so tokens_out already includes them."""
+    try:
+        import litellm
+        prompt_cost, completion_cost = litellm.cost_per_token(model=model, prompt_tokens=tokens_in, completion_tokens=tokens_out)
+        if prompt_cost is not None and completion_cost is not None:
+            return prompt_cost + completion_cost
+    except Exception:
+        logger.debug("litellm cost lookup failed for model %s; using fallback", model, exc_info=True)
+    return (tokens_in * 1.0 + tokens_out * 3.0) / 1_000_000

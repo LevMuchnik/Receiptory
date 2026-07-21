@@ -19,6 +19,7 @@ DEFAULTS: dict[str, Any] = {
     "llm_max_tokens": 8192,
     "llm_json_mode": True,
     "llm_parse_retries": 1,
+    "llm_reasoning_effort": "none",
     "llm_sleep_interval": 0.0,
     "confidence_threshold": 0.7,
     "auth_username": "admin",
