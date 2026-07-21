@@ -134,6 +134,11 @@ def env_overridden_keys() -> list[str]:
         val = os.environ.get(f"RECEIPTORY_{key.upper()}")
         if val is not None and val != "":
             out.append(key)
+    # Special case: the password field maps to auth_password_hash, but
+    # verify_password checks the plain-text RECEIPTORY_AUTH_PASSWORD first — so a
+    # UI password change is ignored while that is set, under a non-standard name.
+    if os.environ.get("RECEIPTORY_AUTH_PASSWORD") and "auth_password_hash" not in out:
+        out.append("auth_password_hash")
     return out
 
 

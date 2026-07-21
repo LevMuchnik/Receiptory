@@ -223,50 +223,55 @@ export default function SettingsPage() {
           <div className="lg:col-span-8 space-y-6">
             <SectionCard title="Business Information" icon="business">
               <div className="space-y-4">
-                <FieldGroup label="Business Names (semicolon-separated, multi-language)">
+                <FieldGroup label="Business Names (semicolon-separated, multi-language)" hint={envHint("business_names")}>
                   <Input
                     className={inputCls}
+                    disabled={envLocked("business_names")}
                     value={Array.isArray(settings.business_names) ? settings.business_names.join("; ") : (settings.business_names ?? "")}
                     onBlur={(e) => save({ business_names: e.target.value.split(";").map((s: string) => s.trim()).filter(Boolean) })}
                     onChange={(e) => setSettings({ ...settings, business_names: e.target.value })}
                   />
                 </FieldGroup>
-                <FieldGroup label="Export Name (used in export file names; defaults to first business name)">
+                <FieldGroup label="Export Name (used in export file names; defaults to first business name)" hint={envHint("export_name")}>
                   <Input
                     className={inputCls}
+                    disabled={envLocked("export_name")}
                     value={settings.export_name ?? ""}
                     placeholder="e.g. Lev_Muchnik"
                     onBlur={(e) => save({ export_name: e.target.value.trim() })}
                     onChange={(e) => setSettings({ ...settings, export_name: e.target.value })}
                   />
                 </FieldGroup>
-                <FieldGroup label="Business Addresses (semicolon-separated)">
+                <FieldGroup label="Business Addresses (semicolon-separated)" hint={envHint("business_addresses")}>
                   <Input
                     className={inputCls}
+                    disabled={envLocked("business_addresses")}
                     value={Array.isArray(settings.business_addresses) ? settings.business_addresses.join("; ") : (settings.business_addresses ?? "")}
                     onBlur={(e) => save({ business_addresses: e.target.value.split(";").map((s: string) => s.trim()).filter(Boolean) })}
                     onChange={(e) => setSettings({ ...settings, business_addresses: e.target.value })}
                   />
                 </FieldGroup>
-                <FieldGroup label="Business Tax IDs (semicolon-separated)">
+                <FieldGroup label="Business Tax IDs (semicolon-separated)" hint={envHint("business_tax_ids")}>
                   <Input
                     className={inputCls}
+                    disabled={envLocked("business_tax_ids")}
                     value={Array.isArray(settings.business_tax_ids) ? settings.business_tax_ids.join("; ") : (settings.business_tax_ids ?? "")}
                     onBlur={(e) => save({ business_tax_ids: e.target.value.split(";").map((s: string) => s.trim()).filter(Boolean) })}
                     onChange={(e) => setSettings({ ...settings, business_tax_ids: e.target.value })}
                   />
                 </FieldGroup>
-                <FieldGroup label="Reference Currency">
-                  <Input className={inputCls} value={settings.reference_currency || ""} onBlur={(e) => save({ reference_currency: e.target.value })} onChange={(e) => setSettings({ ...settings, reference_currency: e.target.value })} />
+                <FieldGroup label="Reference Currency" hint={envHint("reference_currency")}>
+                  <Input className={inputCls} disabled={envLocked("reference_currency")} value={settings.reference_currency || ""} onBlur={(e) => save({ reference_currency: e.target.value })} onChange={(e) => setSettings({ ...settings, reference_currency: e.target.value })} />
                 </FieldGroup>
               </div>
             </SectionCard>
 
             <SectionCard title="Watched Folder" icon="folder_shared">
               <div className="space-y-4">
-                <FieldGroup label="Folder Path (leave empty to disable)">
+                <FieldGroup label="Folder Path (leave empty to disable)" hint={envHint("watched_folder_path")}>
                   <Input
                     className={inputCls}
+                    disabled={envLocked("watched_folder_path")}
                     value={settings.watched_folder_path || ""}
                     onBlur={(e) => save({ watched_folder_path: e.target.value })}
                     onChange={(e) => setSettings({ ...settings, watched_folder_path: e.target.value })}
@@ -274,10 +279,11 @@ export default function SettingsPage() {
                   />
                   <p className="text-xs text-muted-foreground">Files dropped here are auto-ingested and moved to a "processed" subfolder.</p>
                 </FieldGroup>
-                <FieldGroup label="Poll Interval (seconds)">
+                <FieldGroup label="Poll Interval (seconds)" hint={envHint("watched_folder_poll_interval")}>
                   <Input
                     className={inputCls}
                     type="number"
+                    disabled={envLocked("watched_folder_poll_interval")}
                     value={settings.watched_folder_poll_interval ?? 10}
                     onBlur={(e) => save({ watched_folder_poll_interval: parseInt(e.target.value) || 10 })}
                     onChange={(e) => setSettings({ ...settings, watched_folder_poll_interval: e.target.value })}
@@ -294,13 +300,13 @@ export default function SettingsPage() {
 
             <SectionCard title="Master Authentication" icon="lock">
               <div className="space-y-4">
-                <FieldGroup label="Admin Username">
-                  <Input className={inputCls} value={settings.auth_username || ""} onBlur={(e) => save({ auth_username: e.target.value })} onChange={(e) => setSettings({ ...settings, auth_username: e.target.value })} />
+                <FieldGroup label="Admin Username" hint={envHint("auth_username")}>
+                  <Input className={inputCls} disabled={envLocked("auth_username")} value={settings.auth_username || ""} onBlur={(e) => save({ auth_username: e.target.value })} onChange={(e) => setSettings({ ...settings, auth_username: e.target.value })} />
                 </FieldGroup>
-                <FieldGroup label="New Password">
-                  <Input className={inputCls} type="password" placeholder="Enter new password" onBlur={(e) => { if (e.target.value) save({ auth_password_hash: e.target.value }); }} />
+                <FieldGroup label="New Password" hint={envHint("auth_password_hash", envLocked("auth_password_hash") ? "Login uses RECEIPTORY_AUTH_PASSWORD from .env — edit the environment to change." : undefined)}>
+                  <Input className={inputCls} type="password" disabled={envLocked("auth_password_hash")} placeholder="Enter new password" onBlur={(e) => { if (e.target.value) save({ auth_password_hash: e.target.value }); }} />
                 </FieldGroup>
-                <button className="w-full py-2 bg-primary text-white text-sm font-bold rounded-lg shadow-md hover:opacity-90 transition-opacity">Update Credentials</button>
+                <button disabled={envLocked("auth_username") && envLocked("auth_password_hash")} className="w-full py-2 bg-primary text-white text-sm font-bold rounded-lg shadow-md hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed">Update Credentials</button>
               </div>
             </SectionCard>
           </div>
@@ -436,19 +442,21 @@ export default function SettingsPage() {
           <div className="lg:col-span-6">
             <SectionCard title="Telegram Bot" icon="send">
               <div className="space-y-4">
-                <FieldGroup label="Bot Token">
+                <FieldGroup label="Bot Token" hint={envHint("telegram_bot_token")}>
                   <Input
                     className={inputCls}
                     type="password"
+                    disabled={envLocked("telegram_bot_token")}
                     value={settings.telegram_bot_token || ""}
                     onBlur={(e) => { if (e.target.value && !e.target.value.includes("***")) save({ telegram_bot_token: e.target.value }); }}
                     onChange={(e) => setSettings({ ...settings, telegram_bot_token: e.target.value })}
                     placeholder="Get from @BotFather on Telegram"
                   />
                 </FieldGroup>
-                <FieldGroup label="Authorized User IDs (semicolon-separated, empty = all)">
+                <FieldGroup label="Authorized User IDs (semicolon-separated, empty = all)" hint={envHint("telegram_authorized_users")}>
                   <Input
                     className={inputCls}
+                    disabled={envLocked("telegram_authorized_users")}
                     value={Array.isArray(settings.telegram_authorized_users) ? settings.telegram_authorized_users.join("; ") : (settings.telegram_authorized_users ?? "")}
                     onBlur={(e) => save({ telegram_authorized_users: e.target.value.split(";").map((s: string) => s.trim()).filter(Boolean) })}
                     onChange={(e) => setSettings({ ...settings, telegram_authorized_users: e.target.value })}
@@ -503,19 +511,21 @@ export default function SettingsPage() {
           <div className="lg:col-span-8">
             <SectionCard title="Email Ingestion (IMAP)" icon="mail">
               <div className="space-y-4">
-                <FieldGroup label="Email Address">
+                <FieldGroup label="Email Address" hint={envHint("gmail_address")}>
                   <Input
                     className={inputCls}
+                    disabled={envLocked("gmail_address")}
                     value={settings.gmail_address || ""}
                     onBlur={(e) => save({ gmail_address: e.target.value })}
                     onChange={(e) => setSettings({ ...settings, gmail_address: e.target.value })}
                     placeholder="you@gmail.com"
                   />
                 </FieldGroup>
-                <FieldGroup label="App Password">
+                <FieldGroup label="App Password" hint={envHint("gmail_app_password")}>
                   <Input
                     className={inputCls}
                     type="password"
+                    disabled={envLocked("gmail_app_password")}
                     value={settings.gmail_app_password || ""}
                     onBlur={(e) => { if (e.target.value && !e.target.value.includes("***")) save({ gmail_app_password: e.target.value }); }}
                     onChange={(e) => setSettings({ ...settings, gmail_app_password: e.target.value })}
@@ -531,17 +541,18 @@ export default function SettingsPage() {
                 </FieldGroup>
 
                 <div className="grid grid-cols-2 gap-4">
-                  <FieldGroup label="IMAP Host">
-                    <Input className={inputCls} value={settings.gmail_imap_host || "imap.gmail.com"} onBlur={(e) => save({ gmail_imap_host: e.target.value })} onChange={(e) => setSettings({ ...settings, gmail_imap_host: e.target.value })} />
+                  <FieldGroup label="IMAP Host" hint={envHint("gmail_imap_host")}>
+                    <Input className={inputCls} disabled={envLocked("gmail_imap_host")} value={settings.gmail_imap_host || "imap.gmail.com"} onBlur={(e) => save({ gmail_imap_host: e.target.value })} onChange={(e) => setSettings({ ...settings, gmail_imap_host: e.target.value })} />
                   </FieldGroup>
-                  <FieldGroup label="IMAP Port">
-                    <Input className={inputCls} type="number" value={settings.gmail_imap_port ?? 993} onBlur={(e) => save({ gmail_imap_port: parseInt(e.target.value) || 993 })} onChange={(e) => setSettings({ ...settings, gmail_imap_port: e.target.value })} />
+                  <FieldGroup label="IMAP Port" hint={envHint("gmail_imap_port")}>
+                    <Input className={inputCls} type="number" disabled={envLocked("gmail_imap_port")} value={settings.gmail_imap_port ?? 993} onBlur={(e) => save({ gmail_imap_port: parseInt(e.target.value) || 993 })} onChange={(e) => setSettings({ ...settings, gmail_imap_port: e.target.value })} />
                   </FieldGroup>
                 </div>
 
-                <FieldGroup label="Labels to Monitor (semicolon-separated)">
+                <FieldGroup label="Labels to Monitor (semicolon-separated)" hint={envHint("gmail_labels")}>
                   <Input
                     className={inputCls}
+                    disabled={envLocked("gmail_labels")}
                     value={Array.isArray(settings.gmail_labels) ? settings.gmail_labels.join("; ") : (settings.gmail_labels ?? "")}
                     onBlur={(e) => save({ gmail_labels: e.target.value.split(";").map((s: string) => s.trim()).filter(Boolean) })}
                     onChange={(e) => setSettings({ ...settings, gmail_labels: e.target.value })}
@@ -550,32 +561,38 @@ export default function SettingsPage() {
                   <p className="text-xs text-muted-foreground">Only emails in these labels are ingested. No labels = email ingestion disabled.</p>
                 </FieldGroup>
 
-                <div className="flex items-center gap-3">
-                  <Checkbox
-                    checked={settings.gmail_unread_only !== false}
-                    onCheckedChange={(checked) => save({ gmail_unread_only: !!checked })}
-                  />
-                  <Label className="text-sm font-medium">Unread only</Label>
-                  <span className="text-xs text-muted-foreground">
-                    {settings.gmail_unread_only !== false
-                      ? "Only unread emails are processed"
-                      : "All emails checked — duplicates skipped by hash"}
-                  </span>
+                <div>
+                  <div className="flex items-center gap-3">
+                    <Checkbox
+                      disabled={envLocked("gmail_unread_only")}
+                      checked={settings.gmail_unread_only !== false}
+                      onCheckedChange={(checked) => save({ gmail_unread_only: !!checked })}
+                    />
+                    <Label className="text-sm font-medium">Unread only</Label>
+                    <span className="text-xs text-muted-foreground">
+                      {settings.gmail_unread_only !== false
+                        ? "Only unread emails are processed"
+                        : "All emails checked — duplicates skipped by hash"}
+                    </span>
+                  </div>
+                  {envLocked("gmail_unread_only") && <p className="text-[11px] text-muted-foreground leading-snug mt-1.5">{envHint("gmail_unread_only")}</p>}
                 </div>
 
-                <FieldGroup label="Poll Interval (seconds)">
+                <FieldGroup label="Poll Interval (seconds)" hint={envHint("gmail_poll_interval")}>
                   <Input
                     className={inputCls}
                     type="number"
+                    disabled={envLocked("gmail_poll_interval")}
                     value={settings.gmail_poll_interval ?? 300}
                     onBlur={(e) => save({ gmail_poll_interval: parseInt(e.target.value) || 300 })}
                     onChange={(e) => setSettings({ ...settings, gmail_poll_interval: e.target.value })}
                   />
                 </FieldGroup>
 
-                <FieldGroup label="Authorized Senders (semicolon-separated, @domain.com for domain rules)">
+                <FieldGroup label="Authorized Senders (semicolon-separated, @domain.com for domain rules)" hint={envHint("gmail_authorized_senders")}>
                   <Input
                     className={inputCls}
+                    disabled={envLocked("gmail_authorized_senders")}
                     value={Array.isArray(settings.gmail_authorized_senders) ? settings.gmail_authorized_senders.join("; ") : (settings.gmail_authorized_senders ?? "")}
                     onBlur={(e) => save({ gmail_authorized_senders: e.target.value.split(";").map((s: string) => s.trim()).filter(Boolean) })}
                     onChange={(e) => setSettings({ ...settings, gmail_authorized_senders: e.target.value })}
@@ -645,9 +662,10 @@ export default function SettingsPage() {
 
             <SectionCard title="Backup Schedule" icon="schedule">
               <div className="space-y-4">
-                <FieldGroup label="Schedule (cron expression)">
+                <FieldGroup label="Schedule (cron expression)" hint={envHint("backup_schedule")}>
                   <Input
                     className={inputCls}
+                    disabled={envLocked("backup_schedule")}
                     value={settings.backup_schedule || ""}
                     onBlur={(e) => save({ backup_schedule: e.target.value })}
                     onChange={(e) => setSettings({ ...settings, backup_schedule: e.target.value })}
@@ -668,6 +686,7 @@ export default function SettingsPage() {
                         className={inputCls}
                         type="number"
                         min={1}
+                        disabled={envLocked("backup_retention_daily")}
                         value={settings.backup_retention_daily ?? 7}
                         onBlur={(e) => save({ backup_retention_daily: parseInt(e.target.value) || 7 })}
                         onChange={(e) => setSettings({ ...settings, backup_retention_daily: e.target.value })}
@@ -679,6 +698,7 @@ export default function SettingsPage() {
                         className={inputCls}
                         type="number"
                         min={1}
+                        disabled={envLocked("backup_retention_weekly")}
                         value={settings.backup_retention_weekly ?? 4}
                         onBlur={(e) => save({ backup_retention_weekly: parseInt(e.target.value) || 4 })}
                         onChange={(e) => setSettings({ ...settings, backup_retention_weekly: e.target.value })}
@@ -690,6 +710,7 @@ export default function SettingsPage() {
                         className={inputCls}
                         type="number"
                         min={1}
+                        disabled={envLocked("backup_retention_monthly")}
                         value={settings.backup_retention_monthly ?? 3}
                         onBlur={(e) => save({ backup_retention_monthly: parseInt(e.target.value) || 3 })}
                         onChange={(e) => setSettings({ ...settings, backup_retention_monthly: e.target.value })}
@@ -731,9 +752,10 @@ export default function SettingsPage() {
           <div className="lg:col-span-8 space-y-6">
             <SectionCard title="Notification Settings" icon="notifications">
               <div className="space-y-4">
-                <FieldGroup label="Base URL (for document links in notifications)">
+                <FieldGroup label="Base URL (for document links in notifications)" hint={envHint("base_url")}>
                   <Input
                     className={inputCls}
+                    disabled={envLocked("base_url")}
                     value={settings.base_url || ""}
                     onBlur={(e) => save({ base_url: e.target.value })}
                     onChange={(e) => setSettings({ ...settings, base_url: e.target.value })}
@@ -741,18 +763,20 @@ export default function SettingsPage() {
                   />
                   <p className="text-xs text-muted-foreground">Used to generate clickable links in notifications. Leave empty to omit links.</p>
                 </FieldGroup>
-                <FieldGroup label="From Name (email sender display name)">
+                <FieldGroup label="From Name (email sender display name)" hint={envHint("notify_from_name")}>
                   <Input
                     className={inputCls}
+                    disabled={envLocked("notify_from_name")}
                     value={settings.notify_from_name || ""}
                     onBlur={(e) => save({ notify_from_name: e.target.value })}
                     onChange={(e) => setSettings({ ...settings, notify_from_name: e.target.value })}
                     placeholder="Receiptory"
                   />
                 </FieldGroup>
-                <FieldGroup label="Email Recipient (leave empty to use Gmail address)">
+                <FieldGroup label="Email Recipient (leave empty to use Gmail address)" hint={envHint("notify_email_to")}>
                   <Input
                     className={inputCls}
+                    disabled={envLocked("notify_email_to")}
                     value={settings.notify_email_to || ""}
                     onBlur={(e) => save({ notify_email_to: e.target.value })}
                     onChange={(e) => setSettings({ ...settings, notify_email_to: e.target.value })}

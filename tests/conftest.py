@@ -17,12 +17,19 @@ def _reset_test_env(monkeypatch):
     """Reset database global and clear RECEIPTORY_ env vars for test isolation.
     litellm auto-loads .env on import, and dotenv.load_dotenv in create_app
     also loads .env. We set vars to empty string (not delete) so load_dotenv
-    with override=False won't re-populate them."""
+    with override=False won't re-populate them.
+
+    Clearing only the vars *currently* in os.environ is not enough: create_app's
+    later load_dotenv pulls any not-yet-present key (e.g. RECEIPTORY_AUTH_PASSWORD)
+    straight from a developer's real .env, breaking login/settings in isolation.
+    So blank the full known keyset up front — every DEFAULTS-derived var plus the
+    special-cased RECEIPTORY_AUTH_PASSWORD — regardless of current presence."""
     import backend.database as _db_mod
+    from backend.config import DEFAULTS
     _db_mod._db_path = None
-    for key in list(os.environ):
-        if key.startswith("RECEIPTORY_"):
-            monkeypatch.setenv(key, "")
+    known = {f"RECEIPTORY_{k.upper()}" for k in DEFAULTS} | {"RECEIPTORY_AUTH_PASSWORD"}
+    for key in known | {k for k in os.environ if k.startswith("RECEIPTORY_")}:
+        monkeypatch.setenv(key, "")
     # Ensure DEV mode is on for tests (prevents static file mount from intercepting API routes)
     monkeypatch.setenv("RECEIPTORY_DEV", "1")
     yield
