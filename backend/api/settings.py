@@ -1,8 +1,13 @@
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.auth import require_auth
-from backend.config import get_all_settings_masked, set_setting, get_setting, env_overridden_keys, list_named_api_keys, resolve_llm_api_key
-from backend.models import SettingsUpdate
+from backend.config import (
+    get_all_settings_masked, set_setting, get_setting, env_overridden_keys,
+    resolve_llm_api_key, list_llm_api_keys, mutate_llm_api_keys, provider_of,
+)
+from backend.models import SettingsUpdate, ApiKeyCreate, SelectedKeyUpdate
 
 router = APIRouter()
 
@@ -12,29 +17,85 @@ def get_settings(username: str = Depends(require_auth)):
     return get_all_settings_masked()
 
 
+def _api_keys_payload():
+    """Shared response for the key-manager: masked key list, selection, model
+    provider, and whether the legacy env fallback is present. Never returns key
+    material — only name + last4 (issue #25)."""
+    model = get_setting("llm_model")
+    ref = get_setting("llm_api_key_ref")
+    keys = [
+        {"name": e.get("name", ""), "last4": (e.get("key") or "")[-4:]}
+        for e in list_llm_api_keys()
+        if isinstance(e, dict)
+    ]
+    return {
+        "keys": keys,
+        "selected": ref if isinstance(ref, str) else "",
+        "legacy_env_key_set": bool(os.environ.get("RECEIPTORY_LLM_API_KEY")),
+        "model": model,
+        "model_provider": provider_of(model),
+    }
+
+
 @router.get("/settings/llm-api-keys")
 def llm_api_keys(username: str = Depends(require_auth)):
-    """Named provider API keys available for the picker (#13). Returns the LABELS
-    of RECEIPTORY_LLM_API_KEY_<LABEL> env vars (never the secret values), which
-    one is selected, and the provider of the currently selected model so the
-    user can pick the matching key."""
-    import litellm
+    """The DB-managed LLM API keys for the Settings key manager (issue #25).
+    Returns each key's name + last-4 (never the full secret), which one is
+    selected, the model, and its provider so the user can pick a matching key."""
+    return _api_keys_payload()
 
-    model = get_setting("llm_model")
-    provider = None
-    if model:
-        try:
-            provider = litellm.get_llm_provider(model=model)[1]
-        except Exception:
-            provider = None
+
+@router.post("/settings/llm-api-keys")
+def add_llm_api_key(body: ApiKeyCreate, username: str = Depends(require_auth)):
+    """Add or replace a named key. Case-insensitive name match, so 'OpenAI'
+    updates 'openai' instead of duplicating it (the newest casing wins)."""
+    name = body.name.strip()
+    key = body.key.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Key name is required")
+    if not key:
+        raise HTTPException(status_code=400, detail="Key value is required")
+    if "/" in name:
+        # The name is the DELETE path segment; a slash would make the entry
+        # unreachable by that route (undeletable from the UI).
+        raise HTTPException(status_code=400, detail="Key name cannot contain '/'")
+
+    def _apply(entries):
+        kept = [e for e in entries if isinstance(e, dict)
+                and e.get("name", "").lower() != name.lower()]
+        kept.append({"name": name, "key": key})
+        return kept
+
+    mutate_llm_api_keys(_apply)
+    return _api_keys_payload()
+
+
+@router.delete("/settings/llm-api-keys/{name}")
+def delete_llm_api_key(name: str, username: str = Depends(require_auth)):
+    """Remove a named key (case-insensitive). If it was the active selection,
+    clear the ref so resolution falls back to the legacy env key."""
+    def _apply(entries):
+        return [e for e in entries if isinstance(e, dict)
+                and e.get("name", "").lower() != name.lower()]
+
+    mutate_llm_api_keys(_apply)
     ref = get_setting("llm_api_key_ref")
-    return {
-        "keys": list_named_api_keys(),
-        "selected": ref if isinstance(ref, str) else "",
-        "legacy_key_set": bool(get_setting("llm_api_key")),
-        "model": model,
-        "model_provider": provider,
-    }
+    if isinstance(ref, str) and ref.lower() == name.lower():
+        set_setting("llm_api_key_ref", "")
+    return _api_keys_payload()
+
+
+@router.put("/settings/llm-api-keys/selected")
+def set_selected_llm_api_key(body: SelectedKeyUpdate, username: str = Depends(require_auth)):
+    """Set the active key by name (empty string clears). Validates membership so
+    the ref can't point at a nonexistent entry."""
+    name = body.name.strip()
+    if name:
+        names = {e.get("name", "").lower() for e in list_llm_api_keys() if isinstance(e, dict)}
+        if name.lower() not in names:
+            raise HTTPException(status_code=400, detail=f"No API key named {name!r}")
+    set_setting("llm_api_key_ref", name)
+    return _api_keys_payload()
 
 
 @router.get("/settings/env-overrides")

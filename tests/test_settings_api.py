@@ -133,18 +133,54 @@ def test_env_overrides_requires_auth(app):
     assert resp.status_code == 401
 
 
-def test_llm_api_keys_lists_labels_and_provider(authed_client, monkeypatch):
-    # PR: named provider keys picker (#13). Labels only, never values.
-    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY_GEMINI", "gk")
-    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY_OPENAI", "sk")
-    resp = authed_client.get("/api/settings/llm-api-keys")
+def test_llm_api_keys_add_list_and_mask(authed_client):
+    # DB-managed keys (#25): add returns name + last4 only, never the secret.
+    resp = authed_client.post("/api/settings/llm-api-keys", json={"name": "OpenAI", "key": "sk-secret-123456"})
     assert resp.status_code == 200
     data = resp.json()
-    assert data["keys"] == ["GEMINI", "OPENAI"]
+    assert data["keys"] == [{"name": "OpenAI", "last4": "3456"}]
     # default model is gemini/* -> provider resolves to gemini
     assert data["model_provider"] == "gemini"
-    # secret values are never returned
-    assert "gk" not in resp.text and "sk" not in resp.text
+    # secret value is never returned
+    assert "sk-secret-123456" not in resp.text
+    assert "secret" not in resp.text
+
+
+def test_settings_get_never_leaks_key_material(authed_client):
+    authed_client.post("/api/settings/llm-api-keys", json={"name": "OpenAI", "key": "sk-verysecret-abcdef"})
+    resp = authed_client.get("/api/settings")
+    assert "sk-verysecret-abcdef" not in resp.text
+    assert "verysecret" not in resp.text
+
+
+def test_llm_api_keys_replace_by_name_case_insensitive(authed_client):
+    authed_client.post("/api/settings/llm-api-keys", json={"name": "openai", "key": "sk-old-1111"})
+    resp = authed_client.post("/api/settings/llm-api-keys", json={"name": "OpenAI", "key": "sk-new-2222"})
+    keys = resp.json()["keys"]
+    assert len(keys) == 1
+    assert keys[0]["name"] == "OpenAI" and keys[0]["last4"] == "2222"
+
+
+def test_llm_api_keys_rejects_empty_name_or_key(authed_client):
+    assert authed_client.post("/api/settings/llm-api-keys", json={"name": "  ", "key": "sk-x"}).status_code == 400
+    assert authed_client.post("/api/settings/llm-api-keys", json={"name": "OpenAI", "key": ""}).status_code == 400
+
+
+def test_llm_api_keys_rejects_slash_in_name(authed_client):
+    # A slash would make the entry unreachable by the DELETE path route.
+    assert authed_client.post("/api/settings/llm-api-keys", json={"name": "a/b", "key": "sk-x"}).status_code == 400
+
+
+def test_llm_api_keys_select_and_delete_clears_ref(authed_client):
+    authed_client.post("/api/settings/llm-api-keys", json={"name": "Gemini", "key": "gk-1234"})
+    sel = authed_client.put("/api/settings/llm-api-keys/selected", json={"name": "Gemini"})
+    assert sel.status_code == 200 and sel.json()["selected"] == "Gemini"
+    # unknown selection is rejected
+    assert authed_client.put("/api/settings/llm-api-keys/selected", json={"name": "Ghost"}).status_code == 400
+    # deleting the selected key clears the ref
+    dele = authed_client.delete("/api/settings/llm-api-keys/Gemini")
+    assert dele.status_code == 200
+    assert dele.json()["keys"] == [] and dele.json()["selected"] == ""
 
 
 def test_llm_api_keys_requires_auth(app):

@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.database import init_db
-from backend.config import init_settings
+from backend.config import init_settings, migrate_llm_api_keys
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ def create_app(data_dir: str | None = None, run_background: bool = True) -> Fast
         db_path = os.path.join(data_dir, "receiptory.db")
         init_db(db_path)
         init_settings()
+        migrate_llm_api_keys()  # one-time env -> DB key import (issue #25)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

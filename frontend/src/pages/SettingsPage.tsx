@@ -97,7 +97,11 @@ export default function SettingsPage() {
   const [modelInfo, setModelInfo] = useState<any>(null);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [envKeys, setEnvKeys] = useState<string[]>([]);
-  const [apiKeyLabels, setApiKeyLabels] = useState<string[]>([]);
+  const [apiKeys, setApiKeys] = useState<{ name: string; last4: string }[]>([]);
+  const [apiKeySelected, setApiKeySelected] = useState<string>("");
+  const [legacyEnvKeySet, setLegacyEnvKeySet] = useState<boolean>(false);
+  const [newKeyName, setNewKeyName] = useState<string>("");
+  const [newKeyValue, setNewKeyValue] = useState<string>("");
 
   // Load the vision-capable chat model registry once for the picker (#13, PR3).
   // Cached server-side; failure just leaves the combobox as a free-text field.
@@ -106,9 +110,31 @@ export default function SettingsPage() {
     // Which settings are pinned by an env var (env > db). Edits to these are
     // silently discarded, so the UI shows them read-only instead (#13).
     api.get("/settings/env-overrides").then((r: any) => setEnvKeys(r.keys || [])).catch(() => setEnvKeys([]));
-    // Named provider API keys from .env (RECEIPTORY_LLM_API_KEY_<LABEL>) for the picker (#13).
-    api.get("/settings/llm-api-keys").then((r: any) => setApiKeyLabels(r.keys || [])).catch(() => setApiKeyLabels([]));
+    loadApiKeys();
   }, []);
+
+  // DB-managed LLM API keys (issue #25): name + last4 only, never full secrets.
+  const loadApiKeys = () =>
+    api.get("/settings/llm-api-keys").then((r: any) => {
+      setApiKeys(r.keys || []);
+      setApiKeySelected(r.selected || "");
+      setLegacyEnvKeySet(!!r.legacy_env_key_set);
+    }).catch(() => { setApiKeys([]); setApiKeySelected(""); });
+
+  const addApiKey = async () => {
+    if (!newKeyName.trim() || !newKeyValue.trim()) return;
+    await api.post("/settings/llm-api-keys", { name: newKeyName.trim(), key: newKeyValue.trim() });
+    setNewKeyName(""); setNewKeyValue("");
+    await loadApiKeys();
+  };
+  const deleteApiKey = async (name: string) => {
+    await api.delete(`/settings/llm-api-keys/${encodeURIComponent(name)}`);
+    await loadApiKeys();
+  };
+  const selectApiKey = async (name: string) => {
+    await api.put("/settings/llm-api-keys/selected", { name });
+    await loadApiKeys();
+  };
 
   const envLocked = (k: string) => envKeys.includes(k);
   const envHint = (k: string, base?: string) =>
@@ -348,38 +374,68 @@ export default function SettingsPage() {
                       </div>
                     )}
                   </FieldGroup>
-                  {(apiKeyLabels.length > 0 || (typeof settings.llm_api_key_ref === "string" && settings.llm_api_key_ref)) && (
-                    <FieldGroup
-                      label="Provider Key (from .env)"
-                      hint={
-                        `Named keys defined as RECEIPTORY_LLM_API_KEY_<LABEL> in .env.` +
-                        (modelInfo && modelInfo.model === settings.llm_model && modelInfo.provider
-                          ? ` Selected model provider: ${modelInfo.provider} — pick the matching key.`
-                          : "")
-                      }
-                    >
-                      <select
-                        className={`${inputCls} w-full px-3`}
-                        value={typeof settings.llm_api_key_ref === "string" ? settings.llm_api_key_ref : ""}
-                        onChange={(e) => { setSettings({ ...settings, llm_api_key_ref: e.target.value }); save({ llm_api_key_ref: e.target.value }); }}
-                      >
-                        <option value="">Use single key below</option>
-                        {apiKeyLabels.map((k) => <option key={k} value={k}>{k}</option>)}
-                        {typeof settings.llm_api_key_ref === "string" && settings.llm_api_key_ref && !apiKeyLabels.includes(settings.llm_api_key_ref) && (
-                          <option value={settings.llm_api_key_ref}>{settings.llm_api_key_ref} (not found in .env)</option>
-                        )}
-                      </select>
-                    </FieldGroup>
-                  )}
                   <FieldGroup
-                    label="API Key"
+                    label="API Keys"
                     hint={
-                      (typeof settings.llm_api_key_ref === "string" && settings.llm_api_key_ref)
-                        ? `Overridden by the selected provider key "${settings.llm_api_key_ref}". Set the picker to "Use single key below" to use this field.`
-                        : envHint("llm_api_key")
+                      `Provider keys are stored in the database and editable here. The selected key is sent to the model.` +
+                      (modelInfo && modelInfo.model === settings.llm_model && modelInfo.provider
+                        ? ` Selected model provider: ${modelInfo.provider} — pick the matching key.`
+                        : "")
                     }
                   >
-                    <Input className={inputCls} type="password" disabled={envLocked("llm_api_key") || !!(typeof settings.llm_api_key_ref === "string" && settings.llm_api_key_ref)} value={settings.llm_api_key || ""} onBlur={(e) => { if (e.target.value && !e.target.value.includes("***")) save({ llm_api_key: e.target.value }); }} onChange={(e) => setSettings({ ...settings, llm_api_key: e.target.value })} />
+                    <div className="flex flex-col gap-2">
+                      {apiKeys.length === 0 && (
+                        <p className="text-[12px] text-muted-foreground">No API keys stored yet. Add one below.</p>
+                      )}
+                      {apiKeys.map((k) => (
+                        <div key={k.name} className="flex items-center gap-2 rounded-md border px-3 py-2">
+                          <input
+                            type="radio"
+                            name="apiKeySelected"
+                            checked={apiKeySelected.toLowerCase() === k.name.toLowerCase()}
+                            onChange={() => selectApiKey(k.name)}
+                            title="Use this key"
+                          />
+                          <span className="font-medium text-[13px]">{k.name}</span>
+                          <span className="font-mono text-[12px] text-muted-foreground">••••{k.last4}</span>
+                          <button
+                            type="button"
+                            className="ml-auto text-[12px] text-red-500 hover:underline"
+                            onClick={() => deleteApiKey(k.name)}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      ))}
+                      <div className="flex items-center gap-2 pt-1">
+                        <Input
+                          className={`${inputCls} w-40`}
+                          placeholder="Name (e.g. Gemini)"
+                          value={newKeyName}
+                          onChange={(e) => setNewKeyName(e.target.value)}
+                        />
+                        <Input
+                          className={`${inputCls} flex-1`}
+                          type="password"
+                          placeholder="API key"
+                          value={newKeyValue}
+                          onChange={(e) => setNewKeyValue(e.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="px-4 py-2 bg-primary text-white text-sm font-bold rounded-lg shadow-md hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+                          onClick={addApiKey}
+                          disabled={!newKeyName.trim() || !newKeyValue.trim()}
+                        >
+                          Save
+                        </button>
+                      </div>
+                      {legacyEnvKeySet && !apiKeySelected && (
+                        <p className="text-[11px] text-muted-foreground">
+                          No key selected — falling back to RECEIPTORY_LLM_API_KEY from .env.
+                        </p>
+                      )}
+                    </div>
                   </FieldGroup>
                   <FieldGroup label="Temperature" hint={envHint("llm_temperature", "Gemini 3 is tuned for 1.0. Lower values can degrade extraction quality.")}>
                     <Input className={inputCls} type="number" step="0.1" min="0" max="2" disabled={envLocked("llm_temperature")} value={settings.llm_temperature ?? 1} onBlur={(e) => save({ llm_temperature: parseFloat(e.target.value) })} onChange={(e) => setSettings({ ...settings, llm_temperature: e.target.value })} />
