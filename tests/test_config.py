@@ -52,11 +52,11 @@ def test_get_all_settings(db_path):
     assert "auth_username" in settings
 
 def test_masked_settings(db_path):
-    set_setting("llm_api_key", "sk-secret-key-12345")
+    set_setting("telegram_bot_token", "sk-secret-key-12345")
     from backend.config import get_all_settings_masked
     settings = get_all_settings_masked()
-    assert settings["llm_api_key"] != "sk-secret-key-12345"
-    assert "***" in settings["llm_api_key"]
+    assert settings["telegram_bot_token"] != "sk-secret-key-12345"
+    assert "***" in settings["telegram_bot_token"]
 
 def test_init_settings_seeds_defaults(db_path):
     init_settings()
@@ -66,34 +66,88 @@ def test_init_settings_seeds_defaults(db_path):
         assert row is not None
 
 
-# --- Named provider API keys (#13) ---
+# --- DB-managed LLM API keys (#25) ---
 
-def test_list_named_api_keys_filters_empty_and_legacy(db_path, monkeypatch):
-    from backend.config import list_named_api_keys
-    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY_GEMINI", "gk")
-    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY_OPENAI", "sk")
-    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY_EMPTY", "")   # empty -> excluded
-    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY", "legacy")   # no suffix -> excluded
-    assert list_named_api_keys() == ["GEMINI", "OPENAI"]
-
-
-def test_resolve_llm_api_key_uses_selected_named_key(db_path, monkeypatch):
-    from backend.config import resolve_llm_api_key
-    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY_OPENAI", "sk-openai")
-    set_setting("llm_api_key_ref", "OPENAI")
-    set_setting("llm_api_key", "legacy-gemini")
+def test_resolve_selected_db_key_wins_over_env(db_path, monkeypatch):
+    """The INVERTED precedence: a UI-selected DB key beats the legacy env key."""
+    from backend.config import resolve_llm_api_key, set_llm_api_keys
+    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY", "env-legacy")
+    set_llm_api_keys([{"name": "OpenAI", "key": "sk-openai"}])
+    set_setting("llm_api_key_ref", "OpenAI")
     assert resolve_llm_api_key() == "sk-openai"
 
 
-def test_resolve_llm_api_key_falls_back_to_legacy_when_ref_missing(db_path, monkeypatch):
-    from backend.config import resolve_llm_api_key
-    # ref points at a label with no env var present -> legacy key.
-    set_setting("llm_api_key_ref", "GHOST")
-    set_setting("llm_api_key", "legacy-key")
-    assert resolve_llm_api_key() == "legacy-key"
+def test_resolve_falls_back_to_legacy_env_when_ref_missing(db_path, monkeypatch):
+    """ref names a deleted/absent entry -> fall through to the legacy env key."""
+    from backend.config import resolve_llm_api_key, set_llm_api_keys
+    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY", "env-legacy")
+    set_llm_api_keys([{"name": "Gemini", "key": "gk"}])
+    set_setting("llm_api_key_ref", "Ghost")
+    assert resolve_llm_api_key() == "env-legacy"
 
 
-def test_resolve_llm_api_key_no_ref_uses_legacy(db_path):
+def test_resolve_no_ref_no_env_is_empty(db_path):
     from backend.config import resolve_llm_api_key
-    set_setting("llm_api_key", "legacy-key")
-    assert resolve_llm_api_key() == "legacy-key"
+    assert resolve_llm_api_key() == ""
+
+
+def test_resolve_ref_match_is_case_insensitive(db_path):
+    """Names are case-insensitive identifiers everywhere they're mutated; resolve
+    must match the same way so a casing drift doesn't silently drop the key."""
+    from backend.config import resolve_llm_api_key, set_llm_api_keys
+    set_llm_api_keys([{"name": "OpenAI", "key": "sk-openai"}])
+    set_setting("llm_api_key_ref", "openai")   # different casing than stored
+    assert resolve_llm_api_key() == "sk-openai"
+
+
+def test_resolve_no_ref_uses_legacy_env(db_path, monkeypatch):
+    from backend.config import resolve_llm_api_key
+    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY", "env-legacy")
+    assert resolve_llm_api_key() == "env-legacy"
+
+
+def test_migrate_imports_legacy_and_named_env_keys_once(db_path, monkeypatch):
+    from backend.config import migrate_llm_api_keys, list_llm_api_keys
+    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY", "gk")
+    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY_OPENAI", "sk-openai")
+    set_setting("llm_model", "gemini/gemini-3-flash-preview")
+    migrate_llm_api_keys()
+    names = {e["name"] for e in list_llm_api_keys()}
+    assert "OpenAI" in names or "OPENAI" in names
+    assert any(e["key"] == "gk" for e in list_llm_api_keys())
+    assert get_setting("llm_api_key_ref")  # a key was auto-selected
+
+
+def test_migrate_skips_ref_env_var(db_path, monkeypatch):
+    """RECEIPTORY_LLM_API_KEY_REF is the ref-selection override, not a key —
+    it must not be imported as a bogus 'REF' key."""
+    from backend.config import migrate_llm_api_keys, list_llm_api_keys
+    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY_REF", "OpenAI")
+    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY_OPENAI", "sk-openai")
+    migrate_llm_api_keys()
+    names = {e["name"] for e in list_llm_api_keys()}
+    assert "REF" not in names
+    assert "OPENAI" in names
+
+
+def test_get_raw_setting_tolerates_corrupt_json(db_path):
+    """A corrupt stored value degrades to the default instead of crashing."""
+    from backend.config import _get_raw_setting
+    from backend.database import get_connection
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES ('llm_api_keys', 'not-json', 'now')"
+        )
+    assert _get_raw_setting("llm_api_keys", []) == []
+
+
+def test_migrate_is_idempotent_after_keys_deleted(db_path, monkeypatch):
+    """The flag (not empty-list) guards re-seeding: deleting all keys then
+    restarting must NOT re-import from a still-present .env."""
+    from backend.config import migrate_llm_api_keys, list_llm_api_keys, set_llm_api_keys
+    monkeypatch.setenv("RECEIPTORY_LLM_API_KEY", "gk")
+    migrate_llm_api_keys()
+    assert len(list_llm_api_keys()) == 1
+    set_llm_api_keys([])            # user deletes the last key in the UI
+    migrate_llm_api_keys()          # simulate restart
+    assert list_llm_api_keys() == []

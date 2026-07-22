@@ -176,6 +176,17 @@ class SettingsUpdate(BaseModel):
     settings: dict[str, Any]
 
 
+class ApiKeyCreate(BaseModel):
+    """Add or replace a named LLM API key (issue #25). Same name replaces."""
+    name: str
+    key: str
+
+
+class SelectedKeyUpdate(BaseModel):
+    """Set the active LLM API key by name; empty string clears the selection."""
+    name: str
+
+
 # === Stats ===
 
 class DashboardStats(BaseModel):

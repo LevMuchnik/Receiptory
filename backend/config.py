@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import logging
 from typing import Any
 
@@ -15,7 +14,6 @@ DEFAULTS: dict[str, Any] = {
     "business_tax_ids": [],
     "reference_currency": "ILS",
     "llm_model": "gemini/gemini-3-flash-preview",
-    "llm_api_key": "",
     "llm_api_key_ref": "",
     "llm_temperature": 1.0,
     "llm_max_tokens": 8192,
@@ -81,46 +79,150 @@ DEFAULTS: dict[str, Any] = {
 }
 
 SENSITIVE_KEYS = {
-    "llm_api_key", "auth_password_hash", "telegram_bot_token", "gmail_app_password",
+    "auth_password_hash", "telegram_bot_token", "gmail_app_password",
     "gdrive_client_secret", "onedrive_client_secret",
     "cloud_auth_gdrive_token", "cloud_auth_onedrive_token", "cloud_auth_state",
 }
 
-
-# Named provider API keys: RECEIPTORY_LLM_API_KEY_<LABEL> (e.g. _GEMINI, _OPENAI,
-# _TOGETHERAI). The suffix labels which provider a key is for; the user picks one
-# (llm_api_key_ref) to match the selected model. Distinct from the legacy
-# single-key RECEIPTORY_LLM_API_KEY (no suffix), which stays the fallback.
-_NAMED_API_KEY_RE = re.compile(r"^RECEIPTORY_LLM_API_KEY_(.+)$")
+# The single legacy env fallback key, provider-agnostic. Read at startup to seed
+# the DB list (once), and read at resolve time only when no DB key is selected.
+# The RECEIPTORY_LLM_API_KEY_<LABEL> named scheme is retired (issue #25).
+_LEGACY_ENV_KEY = "RECEIPTORY_LLM_API_KEY"
 
 
-def list_named_api_keys() -> list[str]:
-    """Labels of non-empty RECEIPTORY_LLM_API_KEY_<LABEL> env vars (values never
-    exposed). Drives the API-key picker."""
-    out = []
-    for k, v in os.environ.items():
-        m = _NAMED_API_KEY_RE.match(k)
-        if m and v:
-            out.append(m.group(1))
-    return sorted(out)
+def _get_raw_setting(key: str, default: Any) -> Any:
+    """Read a DB-only setting that is NOT in DEFAULTS (e.g. `llm_api_keys`,
+    `llm_api_keys_migrated`). Unlike `get_setting`, this never consults env and
+    never applies the env>db>default precedence — those keys hold secret or
+    control state that must live in the DB alone. Returns `default` if absent."""
+    with get_connection() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        if row is not None:
+            try:
+                return json.loads(row["value"])
+            except (ValueError, TypeError):
+                # A corrupt/hand-edited value must not 500 the settings API or
+                # crash key resolution mid-processing — degrade to the default.
+                logger.warning("Corrupt JSON in settings[%r]; using default", key)
+                return default
+    return default
+
+
+def provider_of(model: str | None) -> str | None:
+    """litellm provider slug for a model id (e.g. 'gemini/gemini-3-flash' ->
+    'gemini'), or None if it can't be resolved. Used to name an imported legacy
+    key and to match a key to the selected model."""
+    if not model:
+        return None
+    try:
+        import litellm
+        return litellm.get_llm_provider(model=model)[1]
+    except Exception:
+        return None
+
+
+def list_llm_api_keys() -> list[dict]:
+    """The DB-stored named API keys: [{"name", "key"}]. Key material included —
+    callers that expose this to clients MUST mask it (see the API layer)."""
+    keys = _get_raw_setting("llm_api_keys", [])
+    return keys if isinstance(keys, list) else []
 
 
 def resolve_llm_api_key() -> str:
-    """The API key to send to litellm. If a named key is selected
-    (llm_api_key_ref) and present in the environment, use it; otherwise fall
-    back to the legacy single llm_api_key (env > db)."""
-    # The ref lookup is best-effort: if the DB isn't available (e.g. an early
-    # env-only code path), fall straight through to the legacy key rather than
-    # letting a RuntimeError escape — the legacy read preserves prior behavior.
+    """The API key to send to litellm.
+
+    Precedence is INVERTED from the app-wide env>db rule, on purpose: a key
+    selected in the UI (llm_api_key_ref -> a DB llm_api_keys entry) wins over the
+    legacy env key, so an `.env` value can never silently mask a UI edit. Only if
+    no valid DB selection exists do we fall back to the single legacy env key.
+    """
+    # Narrow guard: tolerate the DB being unavailable on an early env-only path,
+    # but do NOT swallow arbitrary errors — a transient failure must not silently
+    # send the wrong (legacy) provider's key.
     try:
         ref = get_setting("llm_api_key_ref")
-    except Exception:
-        ref = ""
+        entries = list_llm_api_keys()
+    except RuntimeError:
+        ref, entries = "", []
     if isinstance(ref, str) and ref:
-        v = os.environ.get(f"RECEIPTORY_LLM_API_KEY_{ref}")
-        if v:
-            return v
-    return get_setting("llm_api_key") or ""
+        # Names are case-insensitive identifiers everywhere they're mutated
+        # (add/delete/select), so match the ref the same way here — otherwise a
+        # casing drift between ref and the stored entry silently drops the
+        # selected key and falls back to the wrong (legacy) provider's key.
+        for e in entries:
+            if isinstance(e, dict) and e.get("name", "").lower() == ref.lower() and e.get("key"):
+                return e["key"]
+    return os.environ.get(_LEGACY_ENV_KEY) or ""
+
+
+def set_llm_api_keys(entries: list[dict]) -> None:
+    """Overwrite the DB named-key list. Prefer `mutate_llm_api_keys` for
+    read-then-write edits so the two halves can't interleave."""
+    set_setting("llm_api_keys", entries)
+
+
+def mutate_llm_api_keys(fn) -> list[dict]:
+    """Atomically read-modify-write the named-key list. `fn(entries)` receives the
+    current list and returns the new one.
+
+    The read and write run in one `BEGIN IMMEDIATE` transaction: IMMEDIATE takes
+    the write lock up front (a plain DEFERRED txn wouldn't lock at SELECT time),
+    so two concurrent callers — FastAPI runs sync endpoints in a threadpool, and
+    `get_connection` opens a fresh connection with no process-level lock — can't
+    read the same snapshot and lose an update. Returns the written list."""
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", ("llm_api_keys",)).fetchone()
+        try:
+            current = json.loads(row["value"]) if row is not None else []
+        except (ValueError, TypeError):
+            current = []
+        if not isinstance(current, list):
+            current = []
+        updated = fn(current)
+        conn.execute(
+            """INSERT INTO settings (key, value, updated_at)
+               VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+               ON CONFLICT(key) DO UPDATE SET
+                   value = excluded.value, updated_at = excluded.updated_at""",
+            ("llm_api_keys", json.dumps(updated)),
+        )
+        return updated
+
+
+def migrate_llm_api_keys() -> None:
+    """One-time import of env-based keys into the DB list, gated by a dedicated
+    `llm_api_keys_migrated` flag (NOT an empty-list check: after the user deletes
+    all keys in the UI the list is empty again, and a still-present `.env` value
+    would wrongly re-seed on restart). Imports the legacy single key (named after
+    the current model's provider) and any surviving RECEIPTORY_LLM_API_KEY_<LABEL>
+    vars, then sets the flag regardless of whether anything was imported."""
+    if _get_raw_setting("llm_api_keys_migrated", False):
+        return
+    imported: list[dict] = []
+    seen: set[str] = set()
+    legacy = os.environ.get(_LEGACY_ENV_KEY)
+    if legacy:
+        name = (provider_of(get_setting("llm_model")) or "default").title()
+        imported.append({"name": name, "key": legacy})
+        seen.add(name.lower())
+    for k, v in os.environ.items():
+        if k.startswith("RECEIPTORY_LLM_API_KEY_") and v:
+            label = k[len("RECEIPTORY_LLM_API_KEY_"):]
+            # RECEIPTORY_LLM_API_KEY_REF is the env override for the
+            # llm_api_key_ref SETTING (a selection name), not a key — skip it.
+            if label == "REF":
+                continue
+            if label.lower() not in seen:
+                imported.append({"name": label, "key": v})
+                seen.add(label.lower())
+    if imported:
+        set_llm_api_keys(imported)
+        if not get_setting("llm_api_key_ref"):
+            model_provider = (provider_of(get_setting("llm_model")) or "").lower()
+            best = next((e["name"] for e in imported if e["name"].lower() == model_provider), None)
+            set_setting("llm_api_key_ref", best or imported[0]["name"])
+    set_setting("llm_api_keys_migrated", True)
 
 
 def get_setting(key: str) -> Any:
