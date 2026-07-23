@@ -309,3 +309,192 @@ class TestPlaywrightFetchImportError:
                 "https://example.com", str(tmp_path), timeout=5
             )
         assert result is None
+
+
+def _make_playwright_mock(page):
+    """Build an async_playwright() mock whose page is `page`."""
+    browser = MagicMock()
+    browser.new_page = AsyncMock(return_value=page)
+    browser.close = AsyncMock()
+
+    pw = MagicMock()
+    pw.chromium = MagicMock()
+    pw.chromium.launch = AsyncMock(return_value=browser)
+
+    pw_cm = MagicMock()
+    pw_cm.__aenter__ = AsyncMock(return_value=pw)
+    pw_cm.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=pw_cm)
+
+
+def _fake_pdf_response(body: bytes = b"%PDF-1.4 doc", url: str = "https://cdn.example.com/doc.pdf"):
+    """A mock Playwright Response for a streamed application/pdf."""
+    resp = MagicMock()
+    resp.url = url
+    resp.headers = {"content-type": "application/pdf"}
+    resp.body = AsyncMock(return_value=body)
+    return resp
+
+
+def _streaming_page(fake_resp=None):
+    """A mock Playwright Page that fires `fake_resp` to its response listener
+    during goto (simulating a canvas viewer streaming its PDF)."""
+    handlers: dict = {}
+    page = MagicMock()
+    page.on = MagicMock(side_effect=lambda evt, cb: handlers.__setitem__(evt, cb))
+
+    async def fake_goto(url, **kwargs):
+        if fake_resp is not None and "response" in handlers:
+            handlers["response"](fake_resp)
+
+    page.goto = AsyncMock(side_effect=fake_goto)
+    page.wait_for_timeout = AsyncMock()
+    page.query_selector_all = AsyncMock(return_value=[])
+    page.content = AsyncMock(return_value="<html></html>")
+    page.pdf = AsyncMock(return_value=b"%PDF-1.4 page capture")
+    return page
+
+
+@pytest.mark.asyncio
+class TestPlaywrightNetworkPdfCapture:
+    """Regression: canvas-based viewers (Adobe Acrobat share links) stream the
+    real document as an application/pdf response and never expose it via an <a>
+    link or page.pdf(). The fetcher must intercept that response.
+
+    Also guards against the networkidle regression: Adobe's viewer keeps
+    connections open forever, so wait_until must not be "networkidle".
+    """
+
+    async def test_streamed_pdf_is_captured(self, tmp_path):
+        pdf_bytes = b"%PDF-1.4 real adobe document bytes"
+        page = _streaming_page(_fake_pdf_response(body=pdf_bytes))
+
+        with patch(
+            "playwright.async_api.async_playwright",
+            _make_playwright_mock(page),
+        ), patch("backend.ingestion.url_fetcher._is_safe_url", return_value=True):
+            result = await _playwright_fetch(
+                "https://acrobat.adobe.com/id/urn:aaid:sc:AP:test",
+                str(tmp_path),
+                timeout=5,
+            )
+
+        # The streamed PDF is saved, not the blank page.pdf() capture.
+        assert result is not None
+        assert result.content_type == "application/pdf"
+        assert result.method == "playwright_network"
+        assert Path(result.file_path).read_bytes() == pdf_bytes
+
+        # Guard the networkidle regression that caused the original failure.
+        assert page.goto.call_args.kwargs.get("wait_until") == "load"
+        # Browser render timeout must be floored well above the 5s http timeout.
+        assert page.goto.call_args.kwargs.get("timeout", 0) >= 30_000
+
+    async def test_streamed_pdf_body_error_returns_none(self, tmp_path):
+        # A canvas viewer streams a PDF response, but its body can't be read
+        # (stalled/evicted). We must NOT file a blank page.pdf() capture as if
+        # it were the real document — return None (fetch failure) instead.
+        resp = _fake_pdf_response()
+        resp.body = AsyncMock(side_effect=Exception("body not available"))
+        page = _streaming_page(resp)
+
+        with patch(
+            "playwright.async_api.async_playwright",
+            _make_playwright_mock(page),
+        ), patch("backend.ingestion.url_fetcher._is_safe_url", return_value=True):
+            result = await _playwright_fetch(
+                "https://acrobat.adobe.com/id/urn:aaid:sc:AP:test",
+                str(tmp_path),
+                timeout=5,
+            )
+
+        assert result is None
+        page.pdf.assert_not_awaited()
+        # A stalled/erroring body must be attempted once, not re-awaited every
+        # settle iteration (which would multiply the worst-case hang).
+        assert resp.body.await_count == 1
+
+    async def test_streamed_pdf_from_unsafe_host_is_skipped(self, tmp_path):
+        # A rendered page streaming application/pdf from an internal host must
+        # not be captured (SSRF); it falls through to the page.pdf() capture.
+        page = _streaming_page(_fake_pdf_response(body=b"internal secret pdf"))
+
+        with patch(
+            "playwright.async_api.async_playwright",
+            _make_playwright_mock(page),
+        ), patch("backend.ingestion.url_fetcher._is_safe_url", return_value=False):
+            result = await _playwright_fetch(
+                "https://example.com/viewer", str(tmp_path), timeout=5
+            )
+
+        assert result is not None
+        assert result.method == "playwright_capture"
+        assert Path(result.file_path).read_bytes() == b"%PDF-1.4 page capture"
+
+    async def test_oversized_streamed_pdf_discarded(self, tmp_path):
+        # A PDF body over the size cap is discarded (OOM guard); with no other
+        # readable body, the fetch fails rather than capturing a blank page.
+        from backend.ingestion import url_fetcher
+
+        big = b"x" * 32
+        page = _streaming_page(_fake_pdf_response(body=big))
+
+        with patch(
+            "playwright.async_api.async_playwright",
+            _make_playwright_mock(page),
+        ), patch("backend.ingestion.url_fetcher._is_safe_url", return_value=True), \
+                patch.object(url_fetcher, "_MAX_CAPTURE_BYTES", 16):
+            result = await _playwright_fetch(
+                "https://acrobat.adobe.com/id/urn:aaid:sc:AP:test",
+                str(tmp_path),
+                timeout=5,
+            )
+
+        assert result is None
+
+    async def test_falls_back_to_page_capture_when_no_pdf_streamed(self, tmp_path):
+        # No application/pdf response and no document links -> page.pdf() capture.
+        page = MagicMock()
+        page.on = MagicMock()
+        page.goto = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+        page.query_selector_all = AsyncMock(return_value=[])
+        page.content = AsyncMock(return_value="<html><body>no links</body></html>")
+        page.pdf = AsyncMock(return_value=b"%PDF-1.4 page capture")
+
+        with patch(
+            "playwright.async_api.async_playwright",
+            _make_playwright_mock(page),
+        ):
+            result = await _playwright_fetch(
+                "https://example.com/viewer", str(tmp_path), timeout=5
+            )
+
+        assert result is not None
+        assert result.method == "playwright_capture"
+        assert Path(result.file_path).read_bytes() == b"%PDF-1.4 page capture"
+
+    async def test_no_pdf_bails_early_without_full_settle(self, tmp_path):
+        # A page that never streams a PDF must not wait out the full settle
+        # window before falling through to the capture path.
+        from backend.ingestion import url_fetcher
+
+        page = MagicMock()
+        page.on = MagicMock()
+        page.goto = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+        page.query_selector_all = AsyncMock(return_value=[])
+        page.content = AsyncMock(return_value="<html><body>plain</body></html>")
+        page.pdf = AsyncMock(return_value=b"%PDF-1.4 page capture")
+
+        with patch(
+            "playwright.async_api.async_playwright",
+            _make_playwright_mock(page),
+        ):
+            await _playwright_fetch(
+                "https://example.com/viewer", str(tmp_path), timeout=5
+            )
+
+        # Bailed at the detect window, not the full settle window.
+        assert page.wait_for_timeout.await_count == url_fetcher._DOC_STREAM_DETECT
+        assert url_fetcher._DOC_STREAM_DETECT < url_fetcher._DOC_STREAM_SETTLE

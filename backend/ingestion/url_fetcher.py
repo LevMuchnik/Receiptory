@@ -7,6 +7,7 @@ Fetch pipeline (stops at first success):
 4. Playwright render with auth wall detection and page capture fallback
 """
 
+import asyncio
 import logging
 import re
 import socket
@@ -82,7 +83,7 @@ class FetchResult:
     content_type: str  # MIME type
     original_url: str  # Source URL
     auth_wall: bool = False  # True if login page detected
-    method: str = ""  # "direct", "link_follow", "playwright_download", "playwright_capture"
+    method: str = ""  # "direct", "link_follow", "playwright_download", "playwright_network", "playwright_capture"
 
 
 def _ext_for_content_type(content_type: str) -> str:
@@ -160,6 +161,66 @@ async def _follow_link(
     return None
 
 
+# Minimum seconds to allow for browser rendering. A full SPA (e.g. the
+# Adobe Acrobat viewer) needs far longer than a direct HTTP fetch, so the
+# short httpx timeout must not starve page.goto.
+_MIN_RENDER_TIMEOUT = 30
+
+# Seconds to wait after load for a canvas-based viewer to stream its document.
+_DOC_STREAM_SETTLE = 10
+
+# Seconds to wait for any PDF stream to *begin* before treating the page as an
+# ordinary (non-viewer) page and bailing out of the settle loop early.
+_DOC_STREAM_DETECT = 5
+
+# Hard cap on a captured PDF response body — a malicious page could stream an
+# arbitrarily large application/pdf and OOM the single-process NAS deployment.
+_MAX_CAPTURE_BYTES = 50 * 1024 * 1024
+
+
+async def _read_streamed_pdf(page, pdf_responses: list) -> bytes | None:
+    """Wait (bounded) for a canvas viewer to stream a PDF, return its bytes.
+
+    Polls the responses collected by the page's response listener. Canvas
+    viewers fire the document request right after "load", so we first wait a
+    short window for any application/pdf response to appear; if none does, this
+    is an ordinary page and we return fast rather than stalling the fallback
+    path. Once a response exists we keep polling (its body resolves quickly).
+
+    Each body read is timeout-bounded and attempted at most once per response:
+    the processing queue is single-process and sequential, so an unbounded (or
+    repeated) await on a stalled stream would hang all document processing, not
+    just this fetch. response.body() already waits for the body to complete, so
+    a response that times out or errors once will not succeed on a retry.
+    """
+    tried: set = set()
+    for i in range(_DOC_STREAM_SETTLE):
+        for resp in list(pdf_responses):
+            if id(resp) in tried:
+                continue
+            tried.add(id(resp))
+            try:
+                body = await asyncio.wait_for(
+                    resp.body(), timeout=_DOC_STREAM_SETTLE
+                )
+            except Exception:
+                continue
+            if body:
+                if len(body) > _MAX_CAPTURE_BYTES:
+                    logger.warning(
+                        "Captured PDF exceeds %d bytes (%d); discarding: %s",
+                        _MAX_CAPTURE_BYTES, len(body), getattr(resp, "url", "?"),
+                    )
+                    continue
+                return body
+        # No PDF has even started streaming within the detect window — this is
+        # a normal page, so don't wait out the full settle window.
+        if not pdf_responses and i >= _DOC_STREAM_DETECT:
+            return None
+        await page.wait_for_timeout(1000)
+    return None
+
+
 async def _playwright_fetch(
     url: str, download_dir: str, timeout: int, user_agent: str | None = None,
 ) -> FetchResult | None:
@@ -171,6 +232,36 @@ async def _playwright_fetch(
             "playwright is not installed; skipping browser-based fetch for %s", url
         )
         return None
+
+    # Browser rendering needs more time than a direct fetch; floor the timeout.
+    nav_timeout = max(int(timeout), _MIN_RENDER_TIMEOUT)
+
+    # Canvas-based PDF viewers (Adobe Acrobat share links, etc.) never expose
+    # the document as an <a> link and render nothing capturable via page.pdf();
+    # they stream the real bytes as an application/pdf network response. Collect
+    # those responses so we can save the actual document.
+    pdf_responses: list = []
+
+    def _on_response(resp) -> None:
+        try:
+            ct = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+            if ct != "application/pdf":
+                return
+            # The browser fetches sub-resources from any host during render;
+            # apply the same SSRF gate as the top-level URL so a rendered page
+            # can't cause us to persist an internal endpoint's bytes.
+            if not _is_safe_url(resp.url):
+                logger.warning("Skipping captured PDF from unsafe host: %s", resp.url)
+                return
+            # Cheap size guard when the server declares a length (the read in
+            # _read_streamed_pdf enforces the cap for chunked responses too).
+            clen = resp.headers.get("content-length", "")
+            if clen.isdigit() and int(clen) > _MAX_CAPTURE_BYTES:
+                logger.warning("Skipping oversized captured PDF (%s bytes): %s", clen, resp.url)
+                return
+            pdf_responses.append(resp)
+        except Exception:
+            pass
 
     try:
         async with async_playwright() as pw:
@@ -184,7 +275,37 @@ async def _playwright_fetch(
                     viewport=viewport,
                     is_mobile=is_mobile,
                 )
-                await page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
+                page.on("response", _on_response)
+                # "networkidle" never settles on SPAs that poll or stream
+                # (the Adobe viewer keeps connections open indefinitely), so
+                # goto would always time out. Wait for "load" instead.
+                await page.goto(url, timeout=nav_timeout * 1000, wait_until="load")
+
+                # Give a canvas-based viewer a bounded window to stream its
+                # document, then save the first readable PDF response.
+                streamed_pdf = await _read_streamed_pdf(page, pdf_responses)
+                page.remove_listener("response", _on_response)
+                if streamed_pdf:
+                    file_path = _save_response(
+                        streamed_pdf, "application/pdf", download_dir
+                    )
+                    return FetchResult(
+                        file_path=file_path,
+                        content_type="application/pdf",
+                        original_url=url,
+                        method="playwright_network",
+                    )
+
+                # A PDF stream was detected but its bytes were unreadable
+                # (stalled, evicted, or over the size cap). This is a canvas
+                # viewer whose document we couldn't capture — treat it as a
+                # fetch failure rather than filing a blank page.pdf() capture
+                # of the viewer shell as if it were the real document.
+                if pdf_responses:
+                    logger.warning(
+                        "PDF stream detected for %s but no readable body; not capturing blank page", url
+                    )
+                    return None
 
                 # Auth wall detection
                 password_fields = await page.query_selector_all(
