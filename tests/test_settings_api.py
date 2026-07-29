@@ -133,6 +133,20 @@ def test_env_overrides_requires_auth(app):
     assert resp.status_code == 401
 
 
+def test_remote_intake_token_override_is_reported_and_masked(
+    authed_client, monkeypatch
+):
+    monkeypatch.setenv(
+        "RECEIPTORY_REMOTE_INTAKE_TOKEN", "environment-worker-queue-secret"
+    )
+    overrides = authed_client.get("/api/settings/env-overrides")
+    assert "remote_intake_token" in overrides.json()["keys"]
+
+    settings = authed_client.get("/api/settings")
+    assert "environment-worker-queue-secret" not in settings.text
+    assert "***" in settings.json()["remote_intake_token"]
+
+
 def test_llm_api_keys_add_list_and_mask(authed_client):
     # DB-managed keys (#25): add returns name + last4 only, never the secret.
     resp = authed_client.post("/api/settings/llm-api-keys", json={"name": "OpenAI", "key": "sk-secret-123456"})

@@ -66,6 +66,35 @@ def test_init_settings_seeds_defaults(db_path):
         assert row is not None
 
 
+def test_remote_intake_defaults(db_path):
+    assert get_setting("remote_intake_enabled") is False
+    assert get_setting("remote_intake_base_url") == ""
+    assert get_setting("remote_intake_token") == ""
+    assert get_setting("remote_intake_poll_interval_seconds") == 10
+    assert get_setting("remote_intake_batch_size") == 10
+    assert get_setting("remote_intake_max_file_bytes") == 20 * 1024 * 1024
+
+
+def test_remote_intake_env_types(db_path, monkeypatch):
+    monkeypatch.setenv("RECEIPTORY_REMOTE_INTAKE_ENABLED", "true")
+    monkeypatch.setenv("RECEIPTORY_REMOTE_INTAKE_POLL_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("RECEIPTORY_REMOTE_INTAKE_BATCH_SIZE", "7")
+    monkeypatch.setenv("RECEIPTORY_REMOTE_INTAKE_MAX_FILE_BYTES", "4096")
+    assert get_setting("remote_intake_enabled") is True
+    assert get_setting("remote_intake_poll_interval_seconds") == 15
+    assert get_setting("remote_intake_batch_size") == 7
+    assert get_setting("remote_intake_max_file_bytes") == 4096
+
+
+def test_remote_intake_token_is_masked(db_path):
+    set_setting("remote_intake_token", "worker-queue-secret")
+    from backend.config import get_all_settings_masked
+
+    settings = get_all_settings_masked()
+    assert settings["remote_intake_token"] != "worker-queue-secret"
+    assert "***" in settings["remote_intake_token"]
+
+
 # --- DB-managed LLM API keys (#25) ---
 
 def test_resolve_selected_db_key_wins_over_env(db_path, monkeypatch):

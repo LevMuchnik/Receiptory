@@ -5,7 +5,7 @@ from fastapi import APIRouter, UploadFile, File, Depends, Request
 
 from backend.auth import require_auth
 from backend.database import get_connection
-from backend.storage import compute_file_hash, save_original
+from backend.ingestion.service import ingest_local_file
 
 logger = logging.getLogger(__name__)
 
@@ -31,36 +31,24 @@ async def upload_files(
             tmp_path = tmp.name
 
         try:
-            file_hash = compute_file_hash(tmp_path)
-            file_size = len(content)
-            ext = os.path.splitext(upload.filename or ".pdf")[1].lower()
-
-            # Check for duplicate
-            with get_connection() as conn:
-                existing = conn.execute(
-                    "SELECT id FROM documents WHERE file_hash = ?", (file_hash,)
-                ).fetchone()
-
-            if existing:
+            result = ingest_local_file(
+                tmp_path,
+                filename=upload.filename or "document.pdf",
+                data_dir=data_dir,
+                submission_channel="web_upload",
+            )
+            if result.status == "duplicate":
                 duplicates.append({
                     "filename": upload.filename,
-                    "file_hash": file_hash,
-                    "existing_id": existing["id"],
+                    "file_hash": result.file_hash,
+                    "existing_id": result.document_id,
                 })
                 continue
 
-            # Save original file
-            save_original(tmp_path, file_hash, ext, data_dir)
-
-            # Create document record
             with get_connection() as conn:
-                conn.execute(
-                    """INSERT INTO documents (original_filename, file_hash, file_size_bytes, status, submission_channel)
-                       VALUES (?, ?, ?, 'pending', 'web_upload')""",
-                    (upload.filename, file_hash, file_size),
-                )
-                doc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                doc = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+                doc = conn.execute(
+                    "SELECT * FROM documents WHERE id = ?", (result.document_id,)
+                ).fetchone()
 
             created.append({
                 "id": doc["id"],
@@ -68,17 +56,6 @@ async def upload_files(
                 "file_hash": doc["file_hash"],
                 "status": doc["status"],
             })
-            try:
-                from backend.notifications.notifier import notify
-                notify("ingested", {
-                    "id": doc["id"],
-                    "original_filename": doc["original_filename"],
-                    "file_hash": doc["file_hash"],
-                    "submission_channel": "web_upload",
-                    "sender_identifier": None,
-                })
-            except Exception:
-                pass
 
         finally:
             os.unlink(tmp_path)
