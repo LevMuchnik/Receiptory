@@ -15,6 +15,7 @@ from telegram.ext import (
 from backend.config import get_setting
 from backend.database import get_connection
 from backend.storage import compute_file_hash, save_original
+from backend.ingestion.service import ingest_local_file
 from backend.ingestion.url_triage import triage_telegram_urls
 from backend.ingestion.url_fetcher import fetch_url
 
@@ -180,6 +181,7 @@ async def _ingest_file(
     if user.username:
         sender = f"telegram:@{user.username}"
 
+    tmp_path = None
     try:
         tg_file = await context.bot.get_file(file_id)
 
@@ -188,53 +190,34 @@ async def _ingest_file(
             await tg_file.download_to_drive(tmp.name)
             tmp_path = tmp.name
 
-        file_hash = compute_file_hash(tmp_path)
-        file_size = os.path.getsize(tmp_path)
-
-        # Check duplicate
-        with get_connection() as conn:
-            existing = conn.execute(
-                "SELECT id FROM documents WHERE file_hash = ?", (file_hash,)
-            ).fetchone()
-
-        if existing:
+        result = ingest_local_file(
+            tmp_path,
+            filename=filename,
+            data_dir=data_dir,
+            submission_channel="telegram",
+            sender_identifier=sender,
+        )
+        if result.status == "duplicate":
             await update.message.reply_text(
-                f"Duplicate file — already exists as document #{existing['id']}."
+                f"Duplicate file — already exists as document #{result.document_id}."
             )
-            os.unlink(tmp_path)
             return
 
-        # Save original
-        save_original(tmp_path, file_hash, ext, data_dir)
-
-        # Create document record
-        with get_connection() as conn:
-            conn.execute(
-                """INSERT INTO documents
-                   (original_filename, file_hash, file_size_bytes, status, submission_channel, sender_identifier)
-                   VALUES (?, ?, ?, 'pending', 'telegram', ?)""",
-                (filename, file_hash, file_size, sender),
-            )
-            doc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-        os.unlink(tmp_path)
-        await update.message.reply_text(f"Received! Document #{doc_id} queued for processing.")
-        logger.info(f"Telegram: ingested {filename} as document #{doc_id} from {sender}")
-        try:
-            from backend.notifications.notifier import notify
-            notify("ingested", {
-                "id": doc_id,
-                "original_filename": filename,
-                "file_hash": file_hash,
-                "submission_channel": "telegram",
-                "sender_identifier": sender,
-            })
-        except Exception:
-            pass
+        await update.message.reply_text(
+            f"Received! Document #{result.document_id} queued for processing."
+        )
+        logger.info(
+            "Telegram: ingested %s as document #%s",
+            filename,
+            result.document_id,
+        )
 
     except Exception as e:
         logger.error(f"Telegram ingestion failed: {e}")
         await update.message.reply_text(f"Failed to process file: {e}")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 def _is_authorized(user_id: int) -> bool:

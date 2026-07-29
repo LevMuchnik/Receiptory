@@ -171,6 +171,12 @@ Most settings are configurable via the admin UI. Environment variables take prec
 | `RECEIPTORY_PORT` | `8484` | HTTP port |
 | `RECEIPTORY_DATA_DIR` | `./data` | Data directory (DB, files, logs) |
 | `RECEIPTORY_TELEGRAM_BOT_TOKEN` | — | Telegram bot token from @BotFather |
+| `RECEIPTORY_REMOTE_INTAKE_ENABLED` | `false` | Enable outbound polling of a hosted receipt queue |
+| `RECEIPTORY_REMOTE_INTAKE_BASE_URL` | — | Fixed HTTPS origin and optional path prefix for the queue |
+| `RECEIPTORY_REMOTE_INTAKE_TOKEN` | — | Dedicated queue bearer token |
+| `RECEIPTORY_REMOTE_INTAKE_POLL_INTERVAL_SECONDS` | `10` | Normal polling interval |
+| `RECEIPTORY_REMOTE_INTAKE_BATCH_SIZE` | `10` | Maximum items requested per cycle |
+| `RECEIPTORY_REMOTE_INTAKE_MAX_FILE_BYTES` | `20971520` | Maximum downloaded file size |
 | `RECEIPTORY_GMAIL_ADDRESS` | — | Gmail address to poll via IMAP |
 | `RECEIPTORY_GMAIL_APP_PASSWORD` | — | Gmail App Password (16 chars) |
 | `RECEIPTORY_BACKUP_SCHEDULE` | `0 2 * * *` | Backup cron schedule |
@@ -190,6 +196,62 @@ See `.env.example` for the full list with descriptions.
 3. Restart the container
 4. Optionally restrict access by adding your Telegram user ID (message [@userinfobot](https://t.me/userinfobot) to find it)
 5. Send or forward photos/documents to your bot
+
+### Remote Intake
+
+Remote intake lets another application submit receipts without exposing
+Receiptory or Umbrel to inbound internet traffic. Receiptory polls a fixed
+hosted queue over HTTPS, downloads bounded files, ingests them through the same
+content-hash deduplication path as browser and Telegram uploads, and then
+acknowledges the result. It is disabled by default and configurable in
+Administration > Remote Intake or with the environment variables above.
+
+Every queue request uses:
+
+```http
+Authorization: Bearer <dedicated-token>
+```
+
+The queue contract is:
+
+```http
+GET <base>/v1/receiptory/items?limit=<batch-size>
+GET <base>/v1/receiptory/items/<percent-encoded-id>/content
+POST <base>/v1/receiptory/items/<percent-encoded-id>/ack
+```
+
+The list response has this shape:
+
+```json
+{
+  "items": [
+    {
+      "id": "stable-opaque-id",
+      "filename": "receipt.jpg",
+      "content_type": "image/jpeg",
+      "sender_identifier": "optional-worker-reference"
+    }
+  ]
+}
+```
+
+The acknowledgement body is one of:
+
+```json
+{"status":"accepted","document_id":123}
+{"status":"duplicate","document_id":123}
+{"status":"rejected","detail":"unsupported media type"}
+```
+
+Items remain pending until a successful acknowledgement, so delivery is at
+least once. If an acknowledgement is lost, the next delivery is identified as
+a duplicate by SHA-256 and acknowledged with the existing document ID. The
+queue base URL must use HTTPS; loopback HTTP is accepted only for local tests.
+All protocol endpoints stay under the configured origin and path prefix, and
+item-provided download URLs are never followed.
+
+Use a dedicated random bearer token with access only to these queue endpoints.
+Do **not** give Receiptory a Supabase service-role key.
 
 ### Gmail
 

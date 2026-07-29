@@ -44,6 +44,12 @@ DEFAULTS: dict[str, Any] = {
     "gmail_authorized_senders": [],
     "watched_folder_path": "",
     "watched_folder_poll_interval": 10,
+    "remote_intake_enabled": False,
+    "remote_intake_base_url": "",
+    "remote_intake_token": "",
+    "remote_intake_poll_interval_seconds": 10,
+    "remote_intake_batch_size": 10,
+    "remote_intake_max_file_bytes": 20 * 1024 * 1024,
     "url_fetch_timeout": 5,
     "base_url": "",
     "gdrive_client_id": "",
@@ -82,6 +88,7 @@ SENSITIVE_KEYS = {
     "auth_password_hash", "telegram_bot_token", "gmail_app_password",
     "gdrive_client_secret", "onedrive_client_secret",
     "cloud_auth_gdrive_token", "cloud_auth_onedrive_token", "cloud_auth_state",
+    "remote_intake_token",
 }
 
 # The single legacy env fallback key, provider-agnostic. Read at startup to seed

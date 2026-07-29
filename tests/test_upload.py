@@ -30,6 +30,11 @@ def test_upload_pdf(authed_client, sample_pdf_path):
     data = resp.json()
     assert len(data["documents"]) == 1
     assert data["documents"][0]["status"] == "pending"
+    with get_connection() as conn:
+        document = conn.execute(
+            "SELECT * FROM documents WHERE id = ?", (data["documents"][0]["id"],)
+        ).fetchone()
+    assert document["submission_channel"] == "web_upload"
 
 
 def test_upload_duplicate_rejected(authed_client, sample_pdf_path):

@@ -11,12 +11,13 @@ import BackupPanel from "@/components/BackupPanel";
 import CloudBackupPanel from "@/components/CloudBackupPanel";
 import LogViewer from "@/components/LogViewer";
 
-type SettingsTab = "general" | "llm" | "telegram" | "email" | "categories" | "backup" | "notifications" | "logs";
+type SettingsTab = "general" | "llm" | "telegram" | "remote" | "email" | "categories" | "backup" | "notifications" | "logs";
 
 const TABS: { key: SettingsTab; label: string; icon: string }[] = [
   { key: "general",    label: "General",     icon: "tune" },
   { key: "llm",        label: "LLM Engine",  icon: "psychology" },
   { key: "telegram",   label: "Telegram",    icon: "send" },
+  { key: "remote",     label: "Remote Intake", icon: "cloud_download" },
   { key: "email",      label: "Email",       icon: "mail" },
   { key: "categories", label: "Taxonomies",  icon: "label" },
   { key: "backup",        label: "Resilience",     icon: "backup" },
@@ -587,6 +588,111 @@ export default function SettingsPage() {
                       )}
                     </span>
                   )}
+                </div>
+              </div>
+            </SectionCard>
+          </div>
+        </div>
+      )}
+
+      {/* Remote Intake */}
+      {activeTab === "remote" && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div className="lg:col-span-8">
+            <SectionCard
+              title="Remote Intake"
+              icon="cloud_download"
+              badge={settings.remote_intake_enabled ? "Enabled" : "Disabled"}
+            >
+              <div className="space-y-4">
+                <div>
+                  <div className="flex items-center gap-3">
+                    <Checkbox
+                      disabled={envLocked("remote_intake_enabled")}
+                      checked={settings.remote_intake_enabled === true}
+                      onCheckedChange={(checked) => save({ remote_intake_enabled: !!checked })}
+                    />
+                    <div>
+                      <Label className="text-sm font-medium">Poll a hosted receipt queue</Label>
+                      <p className="text-xs text-muted-foreground">
+                        Receiptory connects outbound over HTTPS. Umbrel needs no public port or tunnel.
+                      </p>
+                    </div>
+                  </div>
+                  {envLocked("remote_intake_enabled") && (
+                    <p className="text-[11px] text-muted-foreground leading-snug mt-1.5">
+                      {envHint("remote_intake_enabled")}
+                    </p>
+                  )}
+                </div>
+
+                <FieldGroup label="Queue Base URL" hint={envHint("remote_intake_base_url", "HTTPS is required except for localhost testing.")}>
+                  <Input
+                    className={inputCls}
+                    disabled={envLocked("remote_intake_base_url")}
+                    value={settings.remote_intake_base_url || ""}
+                    onBlur={(e) => save({ remote_intake_base_url: e.target.value.trim() })}
+                    onChange={(e) => setSettings({ ...settings, remote_intake_base_url: e.target.value })}
+                    placeholder="https://receipts.example.com"
+                  />
+                </FieldGroup>
+
+                <FieldGroup label="Dedicated Bearer Token" hint={envHint("remote_intake_token", "Use a queue-specific random token, never a Supabase service-role key.")}>
+                  <Input
+                    className={inputCls}
+                    type="password"
+                    disabled={envLocked("remote_intake_token")}
+                    value={settings.remote_intake_token || ""}
+                    onBlur={(e) => {
+                      if (e.target.value && !e.target.value.includes("***")) {
+                        save({ remote_intake_token: e.target.value });
+                      }
+                    }}
+                    onChange={(e) => setSettings({ ...settings, remote_intake_token: e.target.value })}
+                    placeholder="Dedicated queue bearer token"
+                  />
+                </FieldGroup>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <FieldGroup label="Poll Interval (seconds)" hint={envHint("remote_intake_poll_interval_seconds")}>
+                    <Input
+                      className={inputCls}
+                      type="number"
+                      min={1}
+                      disabled={envLocked("remote_intake_poll_interval_seconds")}
+                      value={settings.remote_intake_poll_interval_seconds ?? 10}
+                      onBlur={(e) => save({ remote_intake_poll_interval_seconds: parseInt(e.target.value) || 10 })}
+                      onChange={(e) => setSettings({ ...settings, remote_intake_poll_interval_seconds: e.target.value })}
+                    />
+                  </FieldGroup>
+                  <FieldGroup label="Batch Size" hint={envHint("remote_intake_batch_size")}>
+                    <Input
+                      className={inputCls}
+                      type="number"
+                      min={1}
+                      max={100}
+                      disabled={envLocked("remote_intake_batch_size")}
+                      value={settings.remote_intake_batch_size ?? 10}
+                      onBlur={(e) => save({ remote_intake_batch_size: parseInt(e.target.value) || 10 })}
+                      onChange={(e) => setSettings({ ...settings, remote_intake_batch_size: e.target.value })}
+                    />
+                  </FieldGroup>
+                  <FieldGroup label="Maximum File (MiB)" hint={envHint("remote_intake_max_file_bytes")}>
+                    <Input
+                      className={inputCls}
+                      type="number"
+                      min={1}
+                      disabled={envLocked("remote_intake_max_file_bytes")}
+                      value={Math.max(1, Math.round((settings.remote_intake_max_file_bytes ?? 20 * 1024 * 1024) / (1024 * 1024)))}
+                      onBlur={(e) => save({ remote_intake_max_file_bytes: (parseInt(e.target.value) || 20) * 1024 * 1024 })}
+                      onChange={(e) => setSettings({ ...settings, remote_intake_max_file_bytes: (parseInt(e.target.value) || 1) * 1024 * 1024 })}
+                    />
+                  </FieldGroup>
+                </div>
+
+                <div className="bg-muted rounded-lg p-3 text-xs text-muted-foreground space-y-1">
+                  <p>Accepted formats: PDF, JPEG, PNG, and WebP.</p>
+                  <p>Delivery is at least once; duplicate content is acknowledged by SHA-256 hash.</p>
                 </div>
               </div>
             </SectionCard>
