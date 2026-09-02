@@ -15,7 +15,7 @@ the same for Claude Code.
 
 ## What's here
 
-- **`Dockerfile.claude`** — a lightweight `node:20` image with the Claude Code CLI,
+- **`Dockerfile.claude`** — a lightweight `node:24` image with the Claude Code CLI,
   `git`, `ripgrep`, and the Docker *client* + Compose v2 plugin (client-only, no
   daemon; drives the host daemon via the mounted socket).
 - **`docker-compose.claude.yml`** — runs that image as a `claude-dev` container,
@@ -68,6 +68,62 @@ This reuses the app's real image build (backend + frontend), so the dev containe
 doesn't need Python/uv/npm. For tighter loops (running `pytest`, hot reload) you
 can instead install `uv` and the frontend deps into the dev container and run the
 dev servers per the root `CLAUDE.md`.
+
+## Updating Claude Code and Node
+
+Both the Claude Code CLI and Node live **inside the `claude-dev` image**, not on the
+host. Because the container's `/usr/local` is an image layer (not a mounted volume),
+anything you `npm install -g` or unpack there by hand survives container *restarts*
+but is **wiped whenever the sidecar is recreated from its image** (`--build`,
+`docker rm`, or an UNRAID container update). So the durable fix always lives in
+`Dockerfile.claude`, and applying it means rebuilding the sidecar.
+
+### Updating Claude Code
+
+The CLI is installed by this line in `Dockerfile.claude`:
+
+```dockerfile
+RUN npm install -g @anthropic-ai/claude-code bun
+```
+
+`npm install -g` already pulls the **latest** published version at build time, so the
+durable way to update Claude Code is simply to rebuild the sidecar (this re-runs the
+`npm install -g` layer against the current npm registry):
+
+```bash
+# from the repo dir on the NAS
+docker compose -f docker-compose.claude.yml build --no-cache claude-dev
+docker compose -f docker-compose.claude.yml up -d
+```
+
+`--no-cache` forces the `npm install -g` layer to re-run; without it Docker may reuse
+a cached layer and keep the old version. To pin a specific version instead of latest,
+change the line to `@anthropic-ai/claude-code@<version>` before rebuilding.
+
+For a **quick, non-durable** bump inside the running container (lost on next rebuild):
+
+```bash
+docker exec claude-dev npm install -g @anthropic-ai/claude-code@latest
+```
+
+### Updating Node
+
+Node's version is pinned by the **base image tag** on the `FROM` line of `Dockerfile.claude`:
+
+```dockerfile
+FROM node:24-bookworm
+```
+
+To move to a new major (e.g. Node 26 LTS when it lands), change the tag and rebuild
+the sidecar with the same two commands as above. Keep it at or above the minimum the
+Claude Code CLI requires (currently `node >=22`); `node:<major>-bookworm` always
+resolves to the latest patch of that line at build time.
+
+> **Heads-up: the rebuild recreates the container you're working in.** If you run the
+> rebuild *from inside* a `claude-dev` session, it will terminate that session when the
+> container is replaced. Run it from the UNRAID host (or the container's `>_` console),
+> then `docker exec -it claude-dev claude` back in. Verify afterward with
+> `docker exec claude-dev sh -c 'node --version && claude --version'`.
 
 ## Notes & cautions
 
