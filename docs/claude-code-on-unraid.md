@@ -108,7 +108,7 @@ docker exec claude-dev npm install -g @anthropic-ai/claude-code@latest
 
 ### Updating Node
 
-Node's version is pinned by the **base image tag** on line 1 of `Dockerfile.claude`:
+Node's version is pinned by the **base image tag** on the `FROM` line of `Dockerfile.claude`:
 
 ```dockerfile
 FROM node:24-bookworm
