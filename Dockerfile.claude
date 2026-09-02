@@ -7,7 +7,7 @@
 #
 # Build & run: see docs/claude-code-on-unraid.md or docker-compose.claude.yml.
 
-FROM node:20-bookworm
+FROM node:24-bookworm
 
 # Dev tools for the Claude Code CLI.
 # jq: required by gstack skills for JSONL task artifacts, review-log, and the
