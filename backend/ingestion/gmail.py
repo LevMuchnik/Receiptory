@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup as _BS
 
 from backend.config import get_setting
 from backend.database import get_connection
-from backend.ingestion.url_fetcher import fetch_url
+from backend.ingestion.url_fetcher import fetch_url, PAGE_CAPTURE_NOTE
 from backend.storage import compute_file_hash, save_original
 
 logger = logging.getLogger(__name__)
@@ -338,7 +338,7 @@ def _ingest_url(url: str, sender_email: str, data_dir: str, authorized: bool, fe
 
         category_id = None
         status = "pending" if authorized else "needs_review"
-        if fetch_result.auth_wall:
+        if fetch_result.auth_wall or fetch_result.page_capture:
             status = "needs_review"
         if not authorized:
             with get_connection() as conn:
@@ -351,6 +351,8 @@ def _ingest_url(url: str, sender_email: str, data_dir: str, authorized: bool, fe
         user_notes = None
         if fetch_result.auth_wall:
             user_notes = f"Auth-gated URL: {url}"
+        elif fetch_result.page_capture:
+            user_notes = PAGE_CAPTURE_NOTE.format(url=url)
 
         filename = os.path.basename(fetch_result.file_path)
         with get_connection() as conn:

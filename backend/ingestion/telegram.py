@@ -16,7 +16,7 @@ from backend.config import get_setting
 from backend.database import get_connection
 from backend.storage import compute_file_hash, save_original
 from backend.ingestion.url_triage import triage_telegram_urls
-from backend.ingestion.url_fetcher import fetch_url
+from backend.ingestion.url_fetcher import fetch_url, PAGE_CAPTURE_NOTE
 
 logger = logging.getLogger(__name__)
 
@@ -121,10 +121,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
             save_original(result.file_path, file_hash, ext, data_dir)
 
-            # Determine status based on auth wall
+            # Determine status. Auth walls AND viewer-shell page captures both
+            # route to needs_review — a page.pdf() render is not the real file
+            # (issue #32); filing it as pending would hide the capture failure.
             if result.auth_wall:
                 status = "needs_review"
                 user_notes = f"Auth-gated URL: {url} — login required, page capture saved."
+            elif result.page_capture:
+                status = "needs_review"
+                user_notes = PAGE_CAPTURE_NOTE.format(url=url)
             else:
                 status = "pending"
                 user_notes = None
