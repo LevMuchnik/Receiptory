@@ -275,7 +275,26 @@ export default function ScannerPage() {
 
         const pdfBlob = buildPDF(allPages);
         const file = new File([pdfBlob], `scan_${Date.now()}.pdf`, { type: "application/pdf" });
-        await api.upload([file]);
+        const result = (await api.upload([file])) as {
+          documents?: unknown[];
+          duplicates?: unknown[];
+        };
+
+        // A duplicate is NOT an upload error: backend/api/upload.py:44-50,86
+        // returns HTTP 200 with {"documents": [], "duplicates": [...]}. Without
+        // this check the scan silently vanishes -- we would navigate to
+        // /documents reporting success having filed nothing, which is exactly
+        // the "no scan is ever lost" criterion failing quietly.
+        const filed = Array.isArray(result?.documents) ? result.documents.length : 0;
+        const dupes = Array.isArray(result?.duplicates) ? result.duplicates.length : 0;
+        if (filed === 0 && dupes > 0) {
+          dispatch({ type: "captured", raw: review.raw, corners: review.corners });
+          if (review.extracted) {
+            dispatch({ type: "extracted", extracted: review.extracted, enhanced: review.enhanced });
+          }
+          toast.info("Already filed — this document is a duplicate of one you have.");
+          return;
+        }
 
         // Collect only once the document is actually filed. A frame the user
         // retook or discarded is never sent, and a failed upload does not
@@ -289,7 +308,7 @@ export default function ScannerPage() {
         // Do NOT drop the user's page. `submit-start` discarded the review
         // payload from the reducer, so restore it and put them back in review
         // with the error visible. Upload failure is a ROUTINE outcome here --
-        // the backend rejects SHA-256 duplicates -- and losing a scan to it is
+        // network blips, size limits -- and losing a scan to one is
         // not acceptable. `pages` is untouched, so queued pages survive too.
         dispatch({ type: "captured", raw: review.raw, corners: review.corners });
         if (review.extracted) {

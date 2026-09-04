@@ -16,6 +16,30 @@ function parseFilename(disposition: string | null): string {
   return ascii ? ascii[1] : fallback;
 }
 
+/**
+ * FastAPI's `detail` is a string for HTTPException but an ARRAY of
+ * `{loc, msg, type}` objects for 422 validation errors. Passing the array
+ * straight to `new Error()` yields the useless literal "[object Object]", so
+ * flatten it to the messages a human can act on.
+ */
+function detailToMessage(detail: unknown): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const msgs = detail
+      .map((d) => (d && typeof d === "object" && "msg" in d ? String((d as { msg: unknown }).msg) : String(d)))
+      .filter(Boolean);
+    if (msgs.length) return msgs.join("; ");
+  }
+  if (detail && typeof detail === "object") {
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      /* fall through */
+    }
+  }
+  return "";
+}
+
 async function request<T>(path: string, options: RequestInit & { skipAuthRedirect?: boolean } = {}): Promise<T> {
   const { skipAuthRedirect, ...fetchOptions } = options;
   const headers: Record<string, string> = { ...fetchOptions.headers as Record<string, string> };
@@ -37,7 +61,7 @@ async function request<T>(path: string, options: RequestInit & { skipAuthRedirec
 
   if (!res.ok) {
     const error = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(error.detail || "Request failed");
+    throw new Error(detailToMessage(error.detail) || "Request failed");
   }
 
   if (res.headers.get("content-type")?.includes("application/json")) {
@@ -65,10 +89,14 @@ export const api = {
     });
     if (!res.ok) {
       // Match request()'s error extraction. Uploads fail for reasons the user
-      // can act on — a SHA-256 duplicate rejection, an unsupported format —
-      // and a bare "Upload failed" throws that information away.
+      // can act on (unsupported format, size limits), and a bare "Upload
+      // failed" throws that information away.
+      //
+      // NOTE: a duplicate is NOT an error here — backend/api/upload.py returns
+      // HTTP 200 with {"documents": [], "duplicates": [...]}. Callers that care
+      // must inspect the success payload; see ScannerPage.handleSubmit.
       const error = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(error.detail || "Upload failed");
+      throw new Error(detailToMessage(error.detail) || "Upload failed");
     }
     return res.json();
   },
