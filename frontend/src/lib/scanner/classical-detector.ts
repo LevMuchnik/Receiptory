@@ -51,42 +51,14 @@ export class ClassicalDetector implements Detector {
     const preprocessed = preprocess(image, p);
     const canvas = imageDataToCanvas(preprocessed);
 
-    let rawCorners: any = null;
-    let error: string | undefined;
+    let classified: ScanClassification;
     try {
       await initScanner();
-      const r = await getScanner().scan(canvas, { mode: "detect" });
-      if (r.success && r.corners) {
-        rawCorners = r.corners;
-      } else if (!r.success) {
-        // scan() RESOLVED but reported failure. In detect mode Scanic has
-        // exactly ONE success:false path: detectDocumentContour found zero
-        // contours passing minArea, message "No document detected"
-        // (scanic.js:1059-1066, propagated at :1366-1376).
-        //
-        // That is an honest empty frame, NOT a detector failure. It fires
-        // constantly in normal use — every frame where the camera sees a bare
-        // table, every frame caught mid-motion. Setting `error` here would
-        // pin the error badge on permanently and destroy the only signal that
-        // is supposed to mean "the detector is broken", which is the entire
-        // reason the error channel exists.
-        //
-        // So: stay silent on Scanic's own default message. Surface only a
-        // message it does not normally emit, which would be genuinely
-        // unexpected and worth telling the user about.
-        if (r.message && r.message !== "No document detected") {
-          error = `Scanner: ${r.message}`;
-        }
-      } else {
-        // success:true with no corners is not a shape Scanic documents;
-        // treat it as a failure rather than a silent miss.
-        error = "Scanner returned no corners";
-      }
+      classified = classifyScanResult(await getScanner().scan(canvas, { mode: "detect" }));
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      rawCorners = null;
-      error = `Scanner error: ${message}`;
+      classified = { rawCorners: null, error: scanThrowMessage(e) };
     }
+    const { rawCorners, error } = classified;
 
     const quad = toQuad(rawCorners);
     if (!quad) {
@@ -212,7 +184,54 @@ function canvasBlur(image: ImageData, radius: number): ImageData {
   return octx.getImageData(0, 0, image.width, image.height);
 }
 
-function toQuad(raw: any): Quad | null {
+/** Scanic's default "nothing in this frame" message. Not a failure. */
+const SCANIC_EMPTY_MESSAGE = "No document detected";
+
+export interface ScanClassification {
+  rawCorners: any;
+  /** Set ONLY for genuine detector failure. Absent means "ran fine". */
+  error?: string;
+}
+
+/**
+ * Turn one scanic `scan(mode:"detect")` result into corners-or-error.
+ *
+ * Extracted from `detect()` so it is testable: `detect()` itself needs a canvas
+ * for preprocessing, but this decision is pure and it is the one that decides
+ * whether the viewfinder's error badge lights up.
+ *
+ * THE LOAD-BEARING CASE is `success: false` with scanic's own default message.
+ * In detect mode scanic has exactly ONE such path: detectDocumentContour found
+ * zero contours above minArea (scanic.js:1059-1066, propagated at :1366-1376).
+ * That is an honest empty frame, and it fires on EVERY frame of a bare table.
+ * Setting `error` there would pin the badge on permanently and destroy the only
+ * signal meaning "the detector is broken" — the entire reason the error channel
+ * exists. So stay silent on the default message; surface only a message scanic
+ * does not normally emit.
+ */
+export function classifyScanResult(r: {
+  success?: boolean;
+  corners?: unknown;
+  message?: string;
+} | null | undefined): ScanClassification {
+  if (!r) return { rawCorners: null, error: "Scanner returned no result" };
+  if (r.success && r.corners) return { rawCorners: r.corners };
+  if (!r.success) {
+    return r.message && r.message !== SCANIC_EMPTY_MESSAGE
+      ? { rawCorners: null, error: `Scanner: ${r.message}` }
+      : { rawCorners: null };
+  }
+  // success:true with no corners is not a shape scanic documents; treat it as
+  // a failure rather than a silent miss.
+  return { rawCorners: null, error: "Scanner returned no corners" };
+}
+
+/** Message for a scan() that threw rather than resolved. Always a failure. */
+export function scanThrowMessage(e: unknown): string {
+  return `Scanner error: ${e instanceof Error ? e.message : String(e)}`;
+}
+
+export function toQuad(raw: any): Quad | null {
   if (!raw) return null;
   const tl = raw.topLeft ?? raw[0];
   const tr = raw.topRight ?? raw[1];

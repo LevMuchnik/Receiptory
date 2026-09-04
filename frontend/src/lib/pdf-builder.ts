@@ -73,7 +73,7 @@ const MM_PER_INCH = 25.4;
  *
  * Derive the orientation from the dimensions and jsPDF's sort agrees with us.
  */
-function orientationFor(wMm: number, hMm: number): "portrait" | "landscape" {
+export function orientationFor(wMm: number, hMm: number): "portrait" | "landscape" {
   return wMm > hMm ? "landscape" : "portrait";
 }
 

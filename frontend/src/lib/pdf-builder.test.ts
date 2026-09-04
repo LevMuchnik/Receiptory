@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { jsPDF } from "jspdf";
-import { pageSizeMm } from "./pdf-builder";
+import { pageSizeMm, orientationFor } from "./pdf-builder";
 
 /**
  * Regression guard for the page-transposition bug.
@@ -17,9 +17,6 @@ import { pageSizeMm } from "./pdf-builder";
  * itself is not called because it needs canvas.toDataURL.
  */
 
-const orientationFor = (w: number, h: number): "portrait" | "landscape" =>
-  w > h ? "landscape" : "portrait";
-
 function pageOf(wMm: number, hMm: number) {
   const doc = new jsPDF({
     orientation: orientationFor(wMm, hMm),
@@ -31,6 +28,33 @@ function pageOf(wMm: number, hMm: number) {
     height: doc.internal.pageSize.getHeight(),
   };
 }
+
+describe("orientationFor (the SHIPPED function)", () => {
+  // These assert the real exported function, not a local copy. An earlier
+  // revision of this file declared its own `orientationFor`, which made the
+  // whole suite a DECOY: flipping the comparison in pdf-builder.ts would have
+  // re-introduced the landscape-clipping bug with 10 green tests.
+  it("returns landscape when the page is wider than tall", () => {
+    expect(orientationFor(300, 100)).toBe("landscape");
+    expect(orientationFor(243.8, 137.2)).toBe("landscape");
+  });
+
+  it("returns portrait when the page is taller than wide", () => {
+    expect(orientationFor(100, 300)).toBe("portrait");
+  });
+
+  it("returns portrait for a square page", () => {
+    expect(orientationFor(150, 150)).toBe("portrait");
+  });
+
+  it("feeds jsPDF an orientation that yields the requested page", () => {
+    for (const [w, h] of [[300, 100], [100, 300], [150, 150], [243.8, 137.2]]) {
+      const doc = new jsPDF({ orientation: orientationFor(w, h), unit: "mm", format: [w, h] });
+      expect(doc.internal.pageSize.getWidth()).toBeCloseTo(w, 1);
+      expect(doc.internal.pageSize.getHeight()).toBeCloseTo(h, 1);
+    }
+  });
+});
 
 describe("jsPDF format/orientation contract", () => {
   it("DOCUMENTS the hazard: a literal [w,h] with portrait is transposed when w > h", () => {
