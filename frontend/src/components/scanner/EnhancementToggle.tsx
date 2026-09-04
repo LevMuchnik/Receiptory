@@ -3,6 +3,14 @@ import { useEffect, useRef, useState } from "react";
 interface EnhancementToggleProps {
   originalCanvas: HTMLCanvasElement;
   enhancedCanvas: HTMLCanvasElement | null;
+  /**
+   * Controlled by CaptureReview, not owned here. The choice has to reach
+   * Submit: enhanceCanvas applies contrast(1.4) brightness(1.15), which can
+   * blow out pale thermal print, so "Original" must actually file the
+   * original rather than just preview it.
+   */
+  showEnhanced: boolean;
+  onToggle: () => void;
 }
 
 /**
@@ -55,8 +63,12 @@ function useCanvasObjectUrl(canvas: HTMLCanvasElement): string | null {
   return url;
 }
 
-export default function EnhancementToggle({ originalCanvas, enhancedCanvas }: EnhancementToggleProps) {
-  const [showEnhanced, setShowEnhanced] = useState(true);
+export default function EnhancementToggle({
+  originalCanvas,
+  enhancedCanvas,
+  showEnhanced,
+  onToggle,
+}: EnhancementToggleProps) {
   const displayCanvas = showEnhanced && enhancedCanvas ? enhancedCanvas : originalCanvas;
   const src = useCanvasObjectUrl(displayCanvas);
 
@@ -67,7 +79,7 @@ export default function EnhancementToggle({ originalCanvas, enhancedCanvas }: En
       )}
       {enhancedCanvas && (
         <button
-          onClick={() => setShowEnhanced(!showEnhanced)}
+          onClick={onToggle}
           className="absolute top-4 right-4 flex items-center gap-1.5 bg-black/60 text-white px-3 py-1.5 rounded-full text-xs font-bold backdrop-blur-sm"
         >
           <span className="material-symbols-outlined text-sm">

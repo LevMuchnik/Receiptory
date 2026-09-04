@@ -26,10 +26,21 @@ interface PanelState {
 }
 
 interface EvalReport {
+  /** Frames that actually produced a comparable detection. */
   count: number;
   hitRate: number;
   medianIoU: number;
   medianTimingMs: number;
+  /**
+   * Frames where the detector FAILED (DetectionResult.error) rather than
+   * honestly finding nothing. These are excluded from the IoU distribution
+   * entirely. Folding them in as 0-IoU misses is how a wrong model URL or a
+   * dead Scanic init reads as "median IoU 0.00 -- the detector is bad", which
+   * is the exact misreading this eval exists to prevent.
+   */
+  errors: number;
+  /** Frames skipped because their stored ground truth would not parse. */
+  unparsed: number;
 }
 
 const PALETTE_A = "#006d37";
@@ -167,15 +178,25 @@ export default function ScannerLabPage() {
     const ious: number[] = [];
     const timings: number[] = [];
     let hits = 0;
+    let errors = 0;
+    let unparsed = 0;
     for (const f of annotated) {
       let gt: Quad;
       try {
         gt = JSON.parse(f.ground_truth_json!) as Quad;
       } catch {
+        unparsed++;
         continue;
       }
       const imageData = await fetchImageData(api.scannerTestFrameImageUrl(f.id));
       const result = await det.detect(imageData, params);
+      if (result.error) {
+        // The detector broke; it did not look at this frame and miss. Scoring
+        // it 0 would corrupt the median with a number that says nothing about
+        // accuracy. Count it separately and surface it.
+        errors++;
+        continue;
+      }
       timings.push(result.timingMs);
       const iou = result.corners
         ? quadIoU(
@@ -187,10 +208,15 @@ export default function ScannerLabPage() {
       if (iou >= 0.85) hits++;
     }
     const report: EvalReport = {
-      count: annotated.length,
-      hitRate: hits / annotated.length,
+      // Denominator is frames actually scored, not frames attempted. Dividing
+      // by annotated.length while skipping frames silently under-reported the
+      // hit rate.
+      count: ious.length,
+      hitRate: ious.length > 0 ? hits / ious.length : 0,
       medianIoU: median(ious),
       medianTimingMs: median(timings),
+      errors,
+      unparsed,
     };
     set({ ...panel, evalReport: report });
   }, [frames, detectorFor]);
@@ -442,8 +468,25 @@ function DetectorPanel({
         <Stat label="score" value={panel.result ? panel.result.score.toFixed(3) : "—"} />
         <Stat label="time" value={panel.result ? `${panel.result.timingMs.toFixed(0)} ms` : "—"} />
         <Stat label="candidates" value={String(panel.result?.candidates?.length ?? 0)} />
-        <Stat label="status" value={panel.result?.corners ? "accepted" : panel.result ? "rejected" : "—"} />
+        <Stat
+          label="status"
+          value={
+            panel.result?.error
+              ? "error"
+              : panel.result?.corners
+                ? "accepted"
+                : panel.result
+                  ? "rejected"
+                  : "—"
+          }
+        />
       </div>
+
+      {panel.result?.error && (
+        <div className="text-xs bg-[#ba1a1a]/10 text-[#ba1a1a] p-2 rounded-md font-medium">
+          {panel.result.error}
+        </div>
+      )}
 
       {panel.evalReport && (
         <div className="text-xs grid grid-cols-2 gap-2 bg-muted/50 p-3 rounded-md">
@@ -451,6 +494,14 @@ function DetectorPanel({
           <span>Hit rate: <strong>{(panel.evalReport.hitRate * 100).toFixed(0)}%</strong></span>
           <span>Median IoU: <strong>{panel.evalReport.medianIoU.toFixed(3)}</strong></span>
           <span>Median time: <strong>{panel.evalReport.medianTimingMs.toFixed(0)} ms</strong></span>
+          {panel.evalReport.errors > 0 && (
+            <span className="text-[#ba1a1a] font-bold">
+              {panel.evalReport.errors} detector error{panel.evalReport.errors === 1 ? "" : "s"} (excluded -- this number is not a clean baseline)
+            </span>
+          )}
+          {panel.evalReport.unparsed > 0 && (
+            <span className="text-[#ba1a1a]">{panel.evalReport.unparsed} unparsable ground truth</span>
+          )}
         </div>
       )}
 

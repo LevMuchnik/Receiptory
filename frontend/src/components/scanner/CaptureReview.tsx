@@ -34,8 +34,9 @@ interface CaptureReviewProps {
   /** Escape hatch: use the whole frame uncropped. */
   onUseFullFrame: () => void;
   onRetake: () => void;
-  onAddPage: (rotation: number) => void;
-  onSubmit: (rotation: number) => void;
+  /** `useEnhanced` carries the review screen's Enhanced/Original choice. */
+  onAddPage: (rotation: number, useEnhanced: boolean) => void;
+  onSubmit: (rotation: number, useEnhanced: boolean) => void;
   onGiveUp: () => void;
 }
 
@@ -76,6 +77,7 @@ export default function CaptureReview({
   const [rotation, setRotation] = useState(0);
   const [tab, setTab] = useState<"crop" | "result">("crop");
   const [dragging, setDragging] = useState(false);
+  const [showEnhanced, setShowEnhanced] = useState(true);
 
   const rawCanvasRef = useRef<HTMLCanvasElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -92,7 +94,14 @@ export default function CaptureReview({
   const cornersRef = useRef<Corners4>(insetCorners(raw.width, raw.height));
   /** Screen px per raw-frame px under the current `meet` fit. */
   const scaleRef = useRef(1);
-  const dragRef = useRef<{ index: number; offset: Pt; start: Pt; lifted: boolean } | null>(null);
+  const dragRef = useRef<{
+    index: number;
+    offset: Pt;
+    start: Pt;
+    lifted: boolean;
+    /** Where the grabbed corner sat at pointerdown, so a pure tap can no-op. */
+    origin: Pt;
+  } | null>(null);
 
   // ---- painting ----------------------------------------------------------
 
@@ -183,6 +192,7 @@ export default function CaptureReview({
         offset: { x: cornersRef.current[best].x - u.x, y: cornersRef.current[best].y - u.y },
         start: u,
         lifted: false,
+        origin: { ...cornersRef.current[best] },
       };
       // Keep tracking even when the finger leaves the SVG (or the viewport).
       try {
@@ -239,6 +249,13 @@ export default function CaptureReview({
       } catch {
         /* capture may already be gone */
       }
+
+      // A tap that moved nothing must stay a no-op. Without this, touching a
+      // handle fires a full-resolution re-warp for no reason, and orderQuadByAngle
+      // could relabel corners the user never moved -- which, on a receipt shot at
+      // an angle, visibly rotates the crop in response to a stray tap.
+      const cur = cornersRef.current[d.index];
+      if (cur.x === d.origin.x && cur.y === d.origin.y) return;
 
       // Repair, do not block: sorting by angle around the centroid and
       // relabelling TL/TR/BR/BL makes a self-intersecting quad impossible to
@@ -336,7 +353,12 @@ export default function CaptureReview({
             re-encode the JPEG. */}
         {rotatedOriginal && (
           <div className={tab === "result" ? "absolute inset-0" : "hidden"}>
-            <EnhancementToggle originalCanvas={rotatedOriginal} enhancedCanvas={rotatedEnhanced} />
+            <EnhancementToggle
+              originalCanvas={rotatedOriginal}
+              enhancedCanvas={rotatedEnhanced}
+              showEnhanced={showEnhanced}
+              onToggle={() => setShowEnhanced((v) => !v)}
+            />
           </div>
         )}
         {tab === "result" && !rotatedOriginal && (
@@ -390,7 +412,7 @@ export default function CaptureReview({
             Retake
           </button>
           <button
-            onClick={() => onAddPage(rotation)}
+            onClick={() => onAddPage(rotation, showEnhanced)}
             disabled={busy}
             className="py-3 rounded-xl bg-white/10 text-white font-bold text-sm flex items-center justify-center gap-1.5 disabled:opacity-40"
           >
@@ -408,7 +430,7 @@ export default function CaptureReview({
             Discard All
           </button>
           <button
-            onClick={() => onSubmit(rotation)}
+            onClick={() => onSubmit(rotation, showEnhanced)}
             disabled={busy}
             className="py-3 rounded-xl bg-[#006d37] text-white font-bold text-sm flex items-center justify-center gap-1.5 disabled:opacity-40"
           >

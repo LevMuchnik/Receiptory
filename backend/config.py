@@ -26,6 +26,10 @@ DEFAULTS: dict[str, Any] = {
     "auth_password_hash": "",
     "theme": "light",
     "log_level": "INFO",
+    # Rasterization DPI for feeding page images to the LLM. Paired with
+    # TARGET_DPI in frontend/src/lib/pdf-builder.ts, which sizes scanned PDF
+    # pages in mm from their pixel dimensions at that same DPI. Keep the two
+    # equal or the scan round trip stops being 1:1 and resolution is lost here.
     "page_render_dpi": 200,
     "backup_destination": "",
     "backup_schedule": "0 2 * * *",

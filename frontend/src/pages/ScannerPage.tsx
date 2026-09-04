@@ -212,15 +212,23 @@ export default function ScannerPage() {
     dispatch({ type: "extracted", extracted: imageDataToCanvas(raw), enhanced: null });
   }, [state, dispatch]);
 
-  /** The canvas that actually becomes a PDF page. Never null — worst case, the raw frame. */
-  const finalCanvas = useCallback((review: Extract<ScannerState, { phase: "reviewing" }>) => {
-    return review.enhanced ?? review.extracted ?? imageDataToCanvas(review.raw);
-  }, []);
+  /**
+   * The canvas that actually becomes a PDF page. Never null — worst case, the
+   * raw frame. `useEnhanced` is the review screen's toggle: picking "Original"
+   * has to file the original, not merely preview it.
+   */
+  const finalCanvas = useCallback(
+    (review: Extract<ScannerState, { phase: "reviewing" }>, useEnhanced: boolean) => {
+      const preferred = useEnhanced ? review.enhanced : null;
+      return preferred ?? review.extracted ?? imageDataToCanvas(review.raw);
+    },
+    [],
+  );
 
   const handleSubmit = useCallback(
-    async (currentRotation: number) => {
+    async (currentRotation: number, useEnhanced: boolean) => {
       if (state.phase !== "reviewing") return;
-      const canvas = finalCanvas(state);
+      const canvas = finalCanvas(state, useEnhanced);
       jobRef.current += 1;
       dispatch({ type: "submit-start" });
       try {
@@ -241,9 +249,9 @@ export default function ScannerPage() {
   );
 
   const handleAddPage = useCallback(
-    (rotation: number) => {
+    (rotation: number, useEnhanced: boolean) => {
       if (state.phase !== "reviewing") return;
-      const canvas = finalCanvas(state);
+      const canvas = finalCanvas(state, useEnhanced);
       jobRef.current += 1;
       addPage(canvas, rotation);
     },
