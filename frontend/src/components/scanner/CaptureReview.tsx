@@ -41,6 +41,23 @@ interface CaptureReviewProps {
   onGiveUp: () => void;
 }
 
+/**
+ * Pixel-dimension badge.
+ *
+ * Both panes carry one. "The result looks low-res" is a feeling; a number is
+ * comparable across a camera change, which is exactly what the design's
+ * Increment 0 measurement asks for. The two numbers answer different questions:
+ * CAPTURE is what the camera actually granted (did the 4K ladder land, or did it
+ * fall back to 1080p?), FILED is what ends up in front of the LLM after the crop.
+ */
+function ResolutionBadge({ label, w, h }: { label: string; w: number; h: number }) {
+  return (
+    <div className="pointer-events-none absolute top-3 left-3 z-20 rounded-full bg-black/65 px-3 py-1.5 text-[11px] font-bold text-white backdrop-blur-sm">
+      {w} x {h} {label}
+    </div>
+  );
+}
+
 type Corners4 = [Pt, Pt, Pt, Pt];
 
 function quadToArray(q: Quad): Corners4 {
@@ -311,6 +328,7 @@ export default function CaptureReview({
         {/* Crop pane: the un-warped still with live handles. */}
         <div className={tab === "crop" ? "absolute inset-0" : "hidden"}>
           <canvas ref={rawCanvasRef} className="absolute inset-0 w-full h-full object-contain" />
+          <ResolutionBadge label="capture" w={raw.width} h={raw.height} />
           <svg
             ref={svgRef}
             viewBox={`0 0 ${raw.width} ${raw.height}`}
@@ -365,15 +383,7 @@ export default function CaptureReview({
             re-encode the JPEG. */}
         {rotatedOriginal && (
           <div className={tab === "result" ? "absolute inset-0" : "hidden"}>
-            {/*
-              The pixel dimensions of the image that is ACTUALLY filed. This is
-              the number the design's Increment 0 measurement needs: "the result
-              looks low-res" is a feeling, "812 x 1440" is a measurement you can
-              compare across a camera change.
-            */}
-            <div className="absolute top-4 left-4 z-10 rounded-full bg-black/60 px-3 py-1.5 text-[11px] font-bold text-white backdrop-blur-sm">
-              {rotatedOriginal.width} x {rotatedOriginal.height} px
-            </div>
+            <ResolutionBadge label="filed" w={rotatedOriginal.width} h={rotatedOriginal.height} />
             <EnhancementToggle
               originalCanvas={rotatedOriginal}
               enhancedCanvas={rotatedEnhanced}
