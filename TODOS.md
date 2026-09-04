@@ -46,6 +46,31 @@ Deferred items captured during planning and review. Organized by component, sort
 **Priority:** P2
 **Depends on:** Issue #10 shipped (json_object mode live and stable)
 
+### Update extraction model to gemini-3.8-flash
+
+**What:** Move `llm_model` from `gemini/gemini-3.5-flash` to `gemini/gemini-3.8-flash`.
+
+**Why:** Newer model generation; extraction quality and cost per document are the two things it moves. Requested by the owner 2026-09-04.
+
+**Context:**
+- Current value is `gemini/gemini-3.5-flash`, set 2026-07-21, stored in the `settings` table (`llm_model`).
+- **No code change needed.** There is no `RECEIPTORY_LLM_MODEL` pin in `.env`, so the DB value wins and this is a Settings UI edit via the searchable model combobox (`frontend/src/components/ModelCombobox.tsx`, backed by the litellm registry). If a pin is ever added to `.env`, env beats DB and the UI edit will silently do nothing.
+- Verify the id exists in the litellm registry first (`litellm>=1.93.0` in pyproject.toml); if the combobox does not list it, the registry may need a litellm bump before the model is selectable.
+- After switching, re-check `llm_temperature` (currently 1.0) and `llm_reasoning_effort` — per-model defaults differ between generations.
+- Worth an A/B before making it permanent: `scripts/compare_json_mode.py` is an existing drift-comparison harness and can be pointed at two models instead of two JSON modes.
+
+**Pros:**
+- Likely better extraction accuracy on messy receipts, which is the pipeline's core job
+- Zero code, zero deploy — a settings edit
+
+**Cons:**
+- Cost per document may differ; check the registry's pricing before leaving it on
+- Prompt behaviour can shift between model generations, so field-level extraction should be spot-checked on a few real receipts
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
 ## Ingestion
 
 ### Harden url_triage JSON parsing (mirror extraction #10)
@@ -118,6 +143,74 @@ Deferred items captured during planning and review. Organized by component, sort
 
 **Effort:** S
 **Priority:** P3
+
+> **SUPERSEDED 2026-09-04.** The design that motivated this (`root-master-design-20260703-134251.md`) was superseded by `docs/designs/mobile-scanner-detection-and-capture.md`, which runs no ML in the live loop at all. This TODO is moot unless Approach B or C revives an ML live detector. Left in place rather than deleted; delete when Approach B lands or is abandoned.
+
+### Camera focus, exposure, and torch control
+
+**What:** Tap-to-focus (`pointsOfInterest` / `focusMode`), a torch toggle, and a sharpness gate on capture (variance of Laplacian over the crop → "too blurry, retake").
+
+**Why:** The hard scenes are dark leather, harsh shadow, and curled thermal paper at ~20cm. At that distance autofocus lock is the difference between legible and illegible characters, and a blurry 4K frame is worse for the LLM than a sharp 1080p one. The whole capture budget in the current design is spent on pixel count and none on whether those pixels are in focus. A sharpness gate also moves failure detection from extraction time (hours later) to capture time.
+
+**Pros:**
+- Directly serves the stated hard buckets, which more resolution does not
+- Torch is reliably exposed on Chrome Android via `applyConstraints`
+- The sharpness gate is cheap and independent of everything else
+
+**Cons:**
+- `focusMode` support varies by device; needs a `track.getCapabilities()` gate rather than a blind `applyConstraints`
+- Two new viewfinder controls in the increment whose job is a clean on-device verdict on the overlay and smoother fixes
+- May be moot: if Increment 0 shows extraction is no longer image-quality-limited, this buys nothing
+
+**Context:**
+- Source: eng review 2026-09-04, outside-voice finding 21; owner chose TODO over building it in Increment 1
+- Start: `frontend/src/lib/useCamera.ts` — gate on `track.getCapabilities()`, then `applyConstraints({advanced:[{focusMode:"continuous"},{torch:true}]})`
+- Design: `docs/designs/mobile-scanner-detection-and-capture.md`
+
+**Effort:** M
+**Priority:** P1
+**Depends on:** Increment 0's end-to-end measurement — it may make this unnecessary
+
+### requestVideoFrameCallback fallback guard
+
+**What:** One-line capability check before the detection loop switches to `requestVideoFrameCallback`; fall back to `requestAnimationFrame` when absent.
+
+**Why:** Increment 1 step 1.3 replaces rAF with rVFC, which is a strictly narrower API. Without a guard, an unsupported browser gets no detection at all — the box simply never appears, with no error. Low real risk (Baseline since Chrome 83 / Safari 15.4 / Firefox 132, Oct 2024) but a one-line guard against a total silent failure.
+
+**Pros:**
+- One line, no maintenance
+- Turns a silent total failure into graceful degradation
+
+**Cons:**
+- Almost certainly never fires on the reference device
+
+**Context:**
+- Source: eng review 2026-09-04, test-review diagram; downgraded from CRITICAL to P3 on browser-support evidence
+- Start: `frontend/src/components/scanner/CameraViewfinder.tsx` detection loop
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** Increment 1 step 1.3
+
+### scanner_test_frames stores original dims, not stored-JPEG dims
+
+**What:** `test-frame-upload.ts:17-18` sends `width`/`height` from the source `ImageData` while `encodeJpeg` downscales the stored image to 1280 long edge, so the DB columns describe an image that was never stored.
+
+**Why:** Harmless today — `runEval` denormalizes against the loaded image's actual dims, not the stored metadata — but it is misleading data that will eventually be trusted by something. Also `runEval:189` divides hits by `annotated.length` while `continue`-ing past JSON parse failures, so the hit rate silently under-reports.
+
+**Pros:**
+- Makes the corpus metadata trustworthy before Approach B trains on it
+
+**Cons:**
+- Existing 40 rows keep the wrong dims unless backfilled
+
+**Context:**
+- Source: prior design task T10 (2026-07-06), re-confirmed by eng review 2026-09-04
+- Start: `frontend/src/lib/scanner/test-frame-upload.ts:28-42`, `frontend/src/pages/ScannerLabPage.tsx:189`
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
 **Depends on:** ML detection is shipped and live (Phase 1 of the ML detector plan). Only worth building if a non-WebGPU device enters the picture, or the S26 WASM fallback benchmark is bad
 
 ### Web Worker for live detection
