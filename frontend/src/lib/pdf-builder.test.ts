@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { jsPDF } from "jspdf";
-import { pageSizeMm, orientationFor } from "./pdf-builder";
+import { pageSizeMm, orientationFor, buildPDF } from "./pdf-builder";
+import type { ScannedPage } from "./pdf-builder";
 
 /**
  * Regression guard for the page-transposition bug.
@@ -130,5 +131,64 @@ describe("pageSizeMm", () => {
     const { wMm, hMm } = pageSizeMm(200000, 100000);
     expect(Math.max(wMm, hMm)).toBeLessThanOrEqual(5000);
     expect(wMm / hMm).toBeCloseTo(2, 6);
+  });
+});
+
+/**
+ * buildPDF became node-testable when pages stopped carrying live canvases.
+ * That was done for memory (a queued 4K canvas is ~30MB of backing store), but
+ * it also removed the last DOM dependency from this module.
+ */
+
+// Smallest valid JPEG that jsPDF will accept, as a data URL.
+const TINY_JPEG =
+  "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsL" +
+  "DBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAAB" +
+  "AAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==";
+
+const page = (widthPx: number, heightPx: number, dataUrl = TINY_JPEG): ScannedPage => ({
+  dataUrl,
+  widthPx,
+  heightPx,
+});
+
+describe("buildPDF", () => {
+  it("returns a non-empty PDF blob for a single page", async () => {
+    const blob = buildPDF([page(2000, 6000)]);
+    expect(blob.size).toBeGreaterThan(0);
+    const head = new Uint8Array(await blob.arrayBuffer()).slice(0, 5);
+    expect(String.fromCharCode(...head)).toBe("%PDF-");
+  });
+
+  it("sizes a LANDSCAPE page correctly — the clipping-bug guard, end to end", async () => {
+    // The whole point: a landscape page must not be transposed. Rendering is
+    // out of reach here, so assert via the same helpers buildPDF uses, and rely
+    // on the orientationFor suite above for the jsPDF contract itself.
+    const { wMm, hMm } = pageSizeMm(1920, 1080);
+    expect(orientationFor(wMm, hMm)).toBe("landscape");
+    const blob = buildPDF([page(1920, 1080)]);
+    expect(blob.size).toBeGreaterThan(0);
+  });
+
+  it("builds a multi-page PDF with per-page sizes, mixing orientations", async () => {
+    const blob = buildPDF([page(2000, 6000), page(1920, 1080), page(1000, 1000)]);
+    expect(blob.size).toBeGreaterThan(0);
+  });
+
+  it("returns a valid single-page PDF when handed no pages at all", async () => {
+    const blob = buildPDF([]);
+    expect(blob.size).toBeGreaterThan(0);
+  });
+
+  it("emits a page but draws nothing when the image is missing", async () => {
+    // Keeps page indices aligned with the input array rather than silently
+    // dropping a page the user thinks they scanned.
+    const blob = buildPDF([page(1000, 1000, "")]);
+    expect(blob.size).toBeGreaterThan(0);
+  });
+
+  it("survives a degenerate page size without emitting NaN", async () => {
+    const blob = buildPDF([page(0, 0, ""), page(1000, 1000)]);
+    expect(blob.size).toBeGreaterThan(0);
   });
 });

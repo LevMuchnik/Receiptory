@@ -59,3 +59,40 @@ export function downscaleImageData(
 
   return { data: ctx.getImageData(0, 0, w, h), scale };
 }
+
+/**
+ * Rotate a canvas by a multiple of 90 degrees. Returns the SAME canvas for 0,
+ * so the common case allocates nothing.
+ *
+ * Hoisted here because two copies existed: pdf-builder's `applyRotation` and
+ * CaptureReview's `rotateCanvas`.
+ */
+export function rotateCanvas(canvas: HTMLCanvasElement, degrees: number): HTMLCanvasElement {
+  const deg = ((degrees % 360) + 360) % 360;
+  if (deg === 0) return canvas;
+
+  const out = document.createElement("canvas");
+  const ctx = out.getContext("2d")!;
+  if (deg === 90 || deg === 270) {
+    out.width = canvas.height;
+    out.height = canvas.width;
+  } else {
+    out.width = canvas.width;
+    out.height = canvas.height;
+  }
+  ctx.translate(out.width / 2, out.height / 2);
+  ctx.rotate((deg * Math.PI) / 180);
+  ctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
+  return out;
+}
+
+/**
+ * Encode a canvas to a JPEG blob.
+ *
+ * Preferred over `toDataURL` wherever the result is uploaded or held: a blob is
+ * binary, while a data URL is a base64 string roughly 4/3 the size that lives on
+ * the JS heap until it is dropped.
+ */
+export function canvasToJpegBlob(canvas: HTMLCanvasElement, quality = 0.92): Promise<Blob | null> {
+  return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+}

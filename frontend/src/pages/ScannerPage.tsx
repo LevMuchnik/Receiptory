@@ -11,7 +11,12 @@ import type { ScannedPage } from "@/lib/pdf-builder";
 import { ClassicalDetector } from "@/lib/scanner/classical-detector";
 import { MLDetector } from "@/lib/scanner/ml-detector";
 import type { Detector, Quad } from "@/lib/scanner/detector";
-import { downscaleImageData, imageDataToCanvas } from "@/lib/scanner/canvas-utils";
+import {
+  canvasToJpegBlob,
+  downscaleImageData,
+  imageDataToCanvas,
+  rotateCanvas,
+} from "@/lib/scanner/canvas-utils";
 import { scaleQuad, clampQuad } from "@/lib/scanner/geometry";
 import { uploadTestFrame } from "@/lib/scanner/test-frame-upload";
 import ScannerNav from "@/components/scanner/ScannerNav";
@@ -261,20 +266,46 @@ export default function ScannerPage() {
     async (currentRotation: number, useEnhanced: boolean) => {
       if (state.phase !== "reviewing") return;
       const review = state;
-      const canvas = finalCanvas(review, useEnhanced);
+      const canvas = rotateCanvas(finalCanvas(review, useEnhanced), currentRotation);
       jobRef.current += 1;
       dispatch({ type: "submit-start" });
       try {
-        const allPages: ScannedPage[] = [...pages, { canvas, rotation: currentRotation }];
-
         // Yield a frame so the "Creating PDF and uploading..." state actually
-        // paints. buildPDF is synchronous and does a full-resolution rotate plus
-        // a JPEG encode PER PAGE; without this the UI is frozen for seconds with
-        // nothing on screen, which reads as a crash.
+        // paints before the synchronous encode work starts; without it the UI
+        // freezes with nothing on screen, which reads as a crash.
         await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
 
-        const pdfBlob = buildPDF(allPages);
-        const file = new File([pdfBlob], `scan_${Date.now()}.pdf`, { type: "application/pdf" });
+        let file: File;
+        if (pages.length === 0) {
+          // SINGLE PAGE: upload the JPEG directly and skip jsPDF entirely.
+          //
+          // There is nothing to gain from building a PDF here. The backend
+          // normalizes every upload to PDF anyway (normalize.py `_image_to_pdf`),
+          // and it does so at `page_render_dpi` — the same DPI the renderer then
+          // rasters it back at — so the round trip is already 1:1 for images.
+          // Going through jsPDF only added a second sizing calculation that had
+          // to track the backend by hand, and jsPDF's format-array sorting is
+          // what silently clipped every landscape page. Fewer moving parts, same
+          // pixels at the model.
+          const blob = await canvasToJpegBlob(canvas);
+          if (!blob) throw new Error("Could not encode the scan");
+          file = new File([blob], `scan_${Date.now()}.jpg`, { type: "image/jpeg" });
+        } else {
+          // MULTI-PAGE: still a PDF, because that is what keeps N pages as ONE
+          // document. Uploading images individually would file a 3-page invoice
+          // as three unrelated documents.
+          const allPages: ScannedPage[] = [
+            ...pages,
+            {
+              dataUrl: canvas.toDataURL("image/jpeg", 0.92),
+              widthPx: canvas.width,
+              heightPx: canvas.height,
+            },
+          ];
+          const pdfBlob = buildPDF(allPages);
+          file = new File([pdfBlob], `scan_${Date.now()}.pdf`, { type: "application/pdf" });
+        }
+
         const result = (await api.upload([file])) as {
           documents?: unknown[];
           duplicates?: unknown[];
@@ -323,10 +354,18 @@ export default function ScannerPage() {
   const handleAddPage = useCallback(
     (rotation: number, useEnhanced: boolean) => {
       if (state.phase !== "reviewing") return;
-      const canvas = finalCanvas(state, useEnhanced);
+      // Rotate and encode NOW, then queue the bytes rather than a live canvas.
+      // A queued full-resolution canvas cost ~30MB of backing store at 4K and
+      // five of them killed the tab; the JPEG is ~1.5MB and loses nothing,
+      // because buildPDF encoded it to exactly this anyway.
+      const canvas = rotateCanvas(finalCanvas(state, useEnhanced), rotation);
       jobRef.current += 1;
       collectTestFrame(state.raw, state.corners);
-      addPage(canvas, rotation);
+      addPage({
+        dataUrl: canvas.toDataURL("image/jpeg", 0.92),
+        widthPx: canvas.width,
+        heightPx: canvas.height,
+      });
     },
     [state, addPage, finalCanvas, collectTestFrame],
   );

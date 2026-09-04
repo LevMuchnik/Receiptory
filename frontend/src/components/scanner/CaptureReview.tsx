@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import EnhancementToggle from "./EnhancementToggle";
 import type { Pt, Quad } from "@/lib/scanner/detector";
 import { clampPtToFrame, orderQuadByAngle, quadAreaFraction } from "@/lib/scanner/geometry";
+import { rotateCanvas } from "@/lib/scanner/canvas-utils";
 
 /** Visible handle radius, in SCREEN pixels (converted to user units per paint). */
 const HANDLE_R_PX = 15;
@@ -364,6 +365,15 @@ export default function CaptureReview({
             re-encode the JPEG. */}
         {rotatedOriginal && (
           <div className={tab === "result" ? "absolute inset-0" : "hidden"}>
+            {/*
+              The pixel dimensions of the image that is ACTUALLY filed. This is
+              the number the design's Increment 0 measurement needs: "the result
+              looks low-res" is a feeling, "812 x 1440" is a measurement you can
+              compare across a camera change.
+            */}
+            <div className="absolute top-4 left-4 z-10 rounded-full bg-black/60 px-3 py-1.5 text-[11px] font-bold text-white backdrop-blur-sm">
+              {rotatedOriginal.width} x {rotatedOriginal.height} px
+            </div>
             <EnhancementToggle
               originalCanvas={rotatedOriginal}
               enhancedCanvas={rotatedEnhanced}
@@ -454,19 +464,3 @@ export default function CaptureReview({
   );
 }
 
-function rotateCanvas(canvas: HTMLCanvasElement, degrees: number): HTMLCanvasElement {
-  if (degrees === 0) return canvas;
-  const out = document.createElement("canvas");
-  const ctx = out.getContext("2d")!;
-  if (degrees === 90 || degrees === 270) {
-    out.width = canvas.height;
-    out.height = canvas.width;
-  } else {
-    out.width = canvas.width;
-    out.height = canvas.height;
-  }
-  ctx.translate(out.width / 2, out.height / 2);
-  ctx.rotate((degrees * Math.PI) / 180);
-  ctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
-  return out;
-}

@@ -48,15 +48,25 @@ async function encodeJpeg(image: ImageData): Promise<Blob | null> {
   const w = Math.round(image.width * scale);
   const h = Math.round(image.height * scale);
 
-  const src = document.createElement("canvas");
-  src.width = image.width;
-  src.height = image.height;
-  src.getContext("2d")!.putImageData(image, 0, 0);
-
+  // createImageBitmap takes ImageData directly, so the full-resolution canvas
+  // that used to exist purely to downscale FROM is gone. At 4K that allocation
+  // was ~33MB on the capture path, for a frame we immediately shrink to 1280.
   const out = document.createElement("canvas");
   out.width = w;
   out.height = h;
-  out.getContext("2d")!.drawImage(src, 0, 0, w, h);
+  const ctx = out.getContext("2d")!;
+  if (typeof createImageBitmap === "function") {
+    const bitmap = await createImageBitmap(image);
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    bitmap.close();
+  } else {
+    // Fallback for anything without createImageBitmap: the old two-canvas path.
+    const src = document.createElement("canvas");
+    src.width = image.width;
+    src.height = image.height;
+    src.getContext("2d")!.putImageData(image, 0, 0);
+    ctx.drawImage(src, 0, 0, w, h);
+  }
 
   return new Promise((resolve) => {
     out.toBlob((b) => resolve(b), "image/jpeg", JPEG_QUALITY);

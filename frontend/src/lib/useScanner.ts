@@ -93,7 +93,7 @@ export interface UseScannerResult {
   state: ScannerState;
   pages: ScannedPage[];
   dispatch: React.Dispatch<ScannerAction>;
-  addPage: (canvas: HTMLCanvasElement, rotation: number) => void;
+  addPage: (page: ScannedPage) => void;
   clearPages: () => void;
 }
 
@@ -101,9 +101,11 @@ export function useScanner(): UseScannerResult {
   const [state, dispatch] = useReducer(reducer, { phase: "loading" });
   const [pages, setPages] = useState<ScannedPage[]>([]);
 
-  const addPage = useCallback((canvas: HTMLCanvasElement, rotation: number) => {
-    setPages((prev) => [...prev, { canvas, rotation }]);
-    dispatch({ type: "add-page", rotation });
+  const addPage = useCallback((page: ScannedPage) => {
+    // `page` is already rotated and JPEG-encoded — see ScannedPage. Queuing a
+    // live canvas held ~30MB per page at 4K; five of those killed the tab.
+    setPages((prev) => [...prev, page]);
+    dispatch({ type: "add-page", rotation: 0 });
   }, []);
 
   const clearPages = useCallback(() => {

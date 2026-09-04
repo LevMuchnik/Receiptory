@@ -1,17 +1,25 @@
 import { jsPDF } from "jspdf";
 
 export interface ScannedPage {
-  canvas: HTMLCanvasElement;
-  rotation: number;
+  /** JPEG data URL, already rotated. Encoded once when the page is queued. */
+  dataUrl: string;
+  /** Pixel dimensions of the encoded image, used to size the PDF page. */
+  widthPx: number;
+  heightPx: number;
 }
 
 /**
  * Target DPI used to convert image pixels into PDF page millimetres.
  *
  * MUST track `page_render_dpi` in backend/config.py (default 200), which is what
- * backend/processing/pipeline.py uses to raster the PDF back into pixels for the
- * LLM. If the backend value changes, change this one too, or the round trip
- * below stops being 1:1.
+ * backend/storage.py rasters the PDF back at for the LLM. This is a build-time
+ * constant and does NOT read the setting, so if the backend value changes this
+ * one has to change too or the round trip stops being 1:1.
+ *
+ * SCOPE: this only affects MULTI-PAGE scans, the one path that still builds a
+ * PDF in the browser. A single-page scan now uploads its JPEG directly and the
+ * backend's `_image_to_pdf` sizes the page from the live setting, so it cannot
+ * drift. If multi-page ever moves server-side too, delete this constant.
  */
 const TARGET_DPI = 200;
 
@@ -44,6 +52,12 @@ const MM_PER_INCH = 25.4;
  *
  *   Identity, as long as TARGET_DPI == page_render_dpi. Zero margins, so the
  *   image fills the page exactly and the render comes back pixel-for-pixel.
+ *
+ *   Pages arrive ALREADY rotated and ALREADY encoded to a JPEG data URL. That
+ *   is deliberate: holding a live full-resolution canvas per queued page cost
+ *   ~30MB of backing store each at 4K, and five of them killed the tab. A data
+ *   URL is ~1.5MB and loses nothing, because this function encoded the canvas
+ *   to exactly that JPEG anyway.
  *
  *   THE OLD BEHAVIOUR (the bug this replaces)
  *
@@ -78,12 +92,10 @@ export function orientationFor(wMm: number, hMm: number): "portrait" | "landscap
 }
 
 export function buildPDF(pages: ScannedPage[]): Blob {
-  // Rotate first, then measure: applyRotation swaps w/h for 90/270, and the
-  // page must be sized from the dimensions the image actually ends up with.
-  const rendered = pages.map((page) => {
-    const canvas = applyRotation(page.canvas, page.rotation);
-    return { canvas, ...pageSizeMm(canvas.width, canvas.height) };
-  });
+  const rendered = pages.map((page) => ({
+    dataUrl: page.dataUrl,
+    ...pageSizeMm(page.widthPx, page.heightPx),
+  }));
 
   const first = rendered[0];
   const doc = new jsPDF(
@@ -97,26 +109,15 @@ export function buildPDF(pages: ScannedPage[]): Blob {
         { orientation: "portrait", unit: "mm", format: "a4" },
   );
 
-  rendered.forEach(({ canvas, wMm, hMm }, i) => {
+  rendered.forEach(({ dataUrl, wMm, hMm }, i) => {
     if (i > 0) doc.addPage([wMm, hMm], orientationFor(wMm, hMm));
-
-    // A degenerate canvas has no drawable pixels; it still gets a (tiny, blank)
-    // page so page indices stay aligned with `pages`.
-    if (canvas.width > 0 && canvas.height > 0) {
-      const imgData = canvas.toDataURL("image/jpeg", 0.92);
-      doc.addImage(imgData, "JPEG", 0, 0, wMm, hMm);
-    }
+    // A degenerate page still gets a (tiny, blank) page so indices stay aligned.
+    if (dataUrl) doc.addImage(dataUrl, "JPEG", 0, 0, wMm, hMm);
   });
 
   return doc.output("blob");
 }
 
-/**
- * Pixels -> millimetres at TARGET_DPI, clamped to what the PDF format allows.
- *
- * Both dimensions are scaled by the SAME factor when clamping, so the aspect
- * ratio survives and the image still fills the page exactly.
- */
 export function pageSizeMm(widthPx: number, heightPx: number): { wMm: number; hMm: number } {
   if (!(widthPx > 0) || !(heightPx > 0)) {
     // Zero-size or NaN canvas: a [0, 0] or [NaN, NaN] format would produce an
@@ -136,22 +137,3 @@ export function pageSizeMm(widthPx: number, heightPx: number): { wMm: number; hM
   return { wMm, hMm };
 }
 
-function applyRotation(canvas: HTMLCanvasElement, degrees: number): HTMLCanvasElement {
-  if (degrees === 0) return canvas;
-
-  const out = document.createElement("canvas");
-  const ctx = out.getContext("2d")!;
-
-  if (degrees === 90 || degrees === 270) {
-    out.width = canvas.height;
-    out.height = canvas.width;
-  } else {
-    out.width = canvas.width;
-    out.height = canvas.height;
-  }
-
-  ctx.translate(out.width / 2, out.height / 2);
-  ctx.rotate((degrees * Math.PI) / 180);
-  ctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
-  return out;
-}
