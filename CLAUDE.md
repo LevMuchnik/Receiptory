@@ -7,7 +7,7 @@ Receiptory is a self-hosted receipt, invoice, and document management system for
 ## Tech Stack
 
 - **Backend:** Python 3.12+, FastAPI, SQLite (WAL + FTS5), litellm, PyMuPDF, Pillow, weasyprint
-- **Frontend:** React 18, TypeScript, Vite, shadcn/ui (base-ui variant), Tailwind CSS v4
+- **Frontend:** React 19, TypeScript, Vite, shadcn/ui (base-ui variant), Tailwind CSS v4, vitest
 - **Package management:** uv (Python), npm (frontend)
 - **Deployment:** Docker Compose, single container
 
@@ -26,9 +26,15 @@ backend/                 # FastAPI application
   backup/               # Scheduler, runner, rclone wrapper
 frontend/src/           # React SPA
   lib/api.ts            # Fetch wrapper with auth handling
+  lib/pdf-builder.ts    # Scanned pages -> PDF (page size from pixels, see Gotchas)
+  lib/scanner/          # Detection + geometry: canvas-utils, geometry, coords,
+                        # smoother, classical-detector, ml-detector
+  lib/**/*.test.ts      # vitest suite (pure logic, node env)
   contexts/             # AuthContext
   pages/                # Page components
   components/           # Reusable UI components
+  components/scanner/   # Mobile scanner UI (viewfinder, review, nav)
+frontend/vitest.config.ts  # Frontend test config
 migrations/             # Numbered SQL files (001_initial_schema.sql, ...)
 scripts/                # Dev utilities (compare_json_mode.py A/B harness)
 tests/                  # pytest test suite
@@ -47,6 +53,8 @@ cd frontend && npm install && npm run dev
 # Tests
 uv run pytest tests/ -v
 uv run pytest tests/test_e2e.py -v      # E2E only
+cd frontend && npm test                 # vitest, single run
+cd frontend && npm run test:watch       # vitest, watch mode
 
 # Build frontend for production
 cd frontend && npm run build
@@ -77,13 +85,19 @@ cd .claude/skills/gstack && ./setup
 - `test_normalize.py::test_html_to_pdf` is skipped on Windows (weasyprint requires GTK/Pango native libs). Passes in Docker/Linux.
 - Backend API tests use `create_app(data_dir, run_background=False)` with `TestClient`.
 
+**Frontend (vitest):** `cd frontend && npm test` (9 files, 115 tests).
+
+- Config is `frontend/vitest.config.ts`: `environment: "node"`, **no jsdom**, `include: ["src/**/*.test.ts"]`. Tests live next to the module they cover (`src/lib/scanner/geometry.test.ts`, ...).
+- Pure logic only, on purpose. `ImageData`, `HTMLCanvasElement`, and `drawImage` do not exist in Node, so anything touching a canvas (`src/lib/scanner/canvas-utils.ts`) is deliberately untested — covering it means jsdom plus the native `canvas` package, which drags cairo/pango build deps into the Docker image.
+- If a test needs `document`, it is testing the wrong thing. Test the maths (smoother release branches, coordinate conversions, quad geometry, PDF page sizing) and keep the DOM out.
+
 ## Key Design Decisions
 
 - **Config precedence:** environment variable > database setting > default value
 - **Categories:** soft-delete (`is_deleted` flag). System categories (`pending`, `uncategorized`, `failed`) cannot be deleted. Category `description` field is fed into the LLM prompt to guide classification.
 - **Document type detection:** LLM classifies, but code overrides to `issued_invoice` if `vendor_tax_id` matches any of the user's `business_tax_ids`.
 - **LLM JSON handling:** extraction requests JSON mode (`llm_json_mode` setting, env `RECEIPTORY_LLM_JSON_MODE`, default true; litellm `drop_params` skips it on models without `response_format` support). Salvaged parses get a confidence penalty; missing or below-threshold `extraction_confidence` routes the document to `needs_review`. A/B harness: `scripts/compare_json_mode.py`.
-- **Deduplication:** SHA-256 file hash. Exact duplicates rejected at upload.
+- **Deduplication:** SHA-256 file hash. Exact duplicates are skipped at upload, but that is **not an error**: `POST /api/upload` returns HTTP 200 with `{"documents": [...], "duplicates": [...]}`, so an all-duplicate upload is a 200 with an empty `documents` array. Callers must inspect the success payload (see `ScannerPage.handleSubmit`); a client that only checks `res.ok` reports a silent success.
 - **Filing:** Stored as `yyyy-mm-dd-vendor_receipt_id-hash.pdf`. Three copies: `originals/` (by hash), `converted/` (if format conversion), `filed/` (human-readable name).
 - **FTS5:** Virtual table indexes `raw_extracted_text`, `vendor_name`, `description`, `document_title`. Sync triggers on insert/update/delete.
 
@@ -92,12 +106,15 @@ cd .claude/skills/gstack && ./setup
 - Design spec: `docs/specs/2026-03-28-receiptory-v1-design.md`
 - Implementation plan: `docs/plans/2026-03-28-receiptory-v1.md`
 - Original requirements: `docs/initial_specifications.md`
+- Design records (per-feature, written before the work): `docs/designs/` — e.g. `docs/designs/mobile-scanner-detection-and-capture.md`
 
 ## Gotchas
 
 - litellm loads `.env` on import, setting `RECEIPTORY_*` env vars globally. This affects config precedence — env vars override DB values. In tests, the autouse fixture clears these.
 - The `frontend/dist/` directory persists after builds. If present, the static files mount activates. Always set `RECEIPTORY_DEV=1` when running backend + Vite dev server together.
 - SQLite `executescript()` auto-commits and can interfere with transaction isolation. The migration runner uses a dedicated connection that's closed after migrations.
+- **Scanner DPI is coupled across the stack.** `TARGET_DPI` in `frontend/src/lib/pdf-builder.ts` (200) sizes each scanned PDF page in millimetres from its own pixel dimensions; `page_render_dpi` in `backend/config.py` (200) rasters that PDF back to pixels for the LLM. The round trip is 1:1 only while the two are equal — change one without the other and capture resolution is silently thrown away before the model ever sees it. Both files carry reciprocal comments.
+- jsPDF **sorts** a `format: [w, h]` array and then uses `orientation` to decide which value is the page width, so `{orientation: "portrait", format: [300, 100]}` yields a 100x300 page and the image is silently clipped. Derive orientation from the dimensions instead: `w > h ? "landscape" : "portrait"`.
 
 ## gstack
 
