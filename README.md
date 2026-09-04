@@ -205,10 +205,12 @@ Unread emails with PDF/image attachments are ingested automatically. HTML-only e
 ### Mobile Scanner
 
 On Android devices, the app opens directly to a camera-based document scanner with:
-- Live document boundary detection and perspective correction
+- Live document boundary detection and perspective correction, with draggable corners to fix a bad crop
 - Image enhancement (contrast, brightness optimization)
-- Multi-page scanning with PDF assembly
+- Multi-page scanning with PDF assembly — each page is sized from its own pixels at 200 DPI, so a high-resolution capture reaches the LLM at full resolution
 - Requires HTTPS or a Chrome flag for camera access on LAN
+
+**Camera app fallback.** Where the in-app scanner cannot run — inside a WebView (Telegram, Slack) or over plain HTTP — a "Camera app" button hands the shot to your phone's own camera and uploads the photo straight to Receiptory. It needs no camera permission of its own, and it is also available from the scanner toolbar when the stock camera's autofocus or sensor resolution beats the in-app path.
 
 ### Watched Folder
 
@@ -278,7 +280,11 @@ The Vite dev server runs on port 5173 with API proxy to localhost:8484. Set `REC
 ### Tests
 
 ```bash
+# Backend (pytest)
 uv run pytest tests/ -v
+
+# Frontend (vitest — pure-logic suite, node environment, no jsdom)
+cd frontend && npm test
 ```
 
 ### Claude Code Dev Container
@@ -342,7 +348,8 @@ receiptory/
 │   ├── components/            # Reusable UI components
 │   ├── components/scanner/    # Mobile document scanner
 │   ├── contexts/              # Auth + Theme providers
-│   └── lib/                   # API client, hooks, utilities
+│   ├── lib/                   # API client, hooks, utilities, PDF builder
+│   └── lib/scanner/           # Boundary detection, geometry, canvas helpers
 ├── migrations/                # Numbered SQL migration files
 ├── scripts/                   # Dev utilities (JSON-mode A/B harness)
 ├── tests/                     # pytest test suite
@@ -357,7 +364,7 @@ receiptory/
 | Layer | Technology |
 |-------|-----------|
 | Backend | Python 3.12, FastAPI, SQLite (WAL + FTS5), litellm |
-| Frontend | React 18, TypeScript, Vite, Tailwind CSS v4, shadcn/ui |
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS v4, shadcn/ui |
 | Document processing | PyMuPDF, Pillow, WeasyPrint |
 | Mobile scanner | Scanic (WASM), jsPDF |
 | Cloud backup | rclone (Google Drive, OneDrive, S3, etc.) |
