@@ -26,10 +26,16 @@ DEFAULTS: dict[str, Any] = {
     "auth_password_hash": "",
     "theme": "light",
     "log_level": "INFO",
-    # Rasterization DPI for feeding page images to the LLM. Paired with
-    # TARGET_DPI in frontend/src/lib/pdf-builder.ts, which sizes scanned PDF
-    # pages in mm from their pixel dimensions at that same DPI. Keep the two
-    # equal or the scan round trip stops being 1:1 and resolution is lost here.
+    # Rasterization DPI for feeding page images to the LLM. Read in two places
+    # that must agree, or the scan round trip stops being 1:1:
+    #   - backend/storage.py render_all_pages_to_memory (via pipeline.py) --
+    #     rasters the PDF back to pixels at this DPI.
+    #   - backend/processing/normalize.py _image_to_pdf -- sizes the PDF page
+    #     from the image's pixels at this DPI. Reads the setting, so it tracks.
+    # A THIRD copy lives in frontend/src/lib/pdf-builder.ts (TARGET_DPI) and does
+    # NOT track: it is a build-time constant. It now only matters for MULTI-PAGE
+    # scans, which are the one path that still builds a PDF client-side; a
+    # single-page scan uploads a JPEG and is sized by _image_to_pdf above.
     "page_render_dpi": 200,
     "backup_destination": "",
     "backup_schedule": "0 2 * * *",
