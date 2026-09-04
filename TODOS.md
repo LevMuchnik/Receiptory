@@ -146,6 +146,88 @@ Deferred items captured during planning and review. Organized by component, sort
 
 > **SUPERSEDED 2026-09-04.** The design that motivated this (`root-master-design-20260703-134251.md`) was superseded by `docs/designs/mobile-scanner-detection-and-capture.md`, which runs no ML in the live loop at all. This TODO is moot unless Approach B or C revives an ML live detector. Left in place rather than deleted; delete when Approach B lands or is abandoned.
 
+### Cap or downscale accumulated multi-page scans
+
+**What:** Downscale each page at `addPage` time rather than at PDF build, and/or cap `pages.length` with a user-facing message.
+
+**Why:** `useScanner.addPage` retains one full-resolution canvas per page (~8MB backing store at 1080p, ~33MB at 4K), and `buildPDF` holds every page's base64 JPEG data URL live simultaneously before `doc.output("blob")`. Five 4K pages is roughly 165MB of canvas plus ~15MB of base64. Chrome Android kills the tab, and the entire scan is lost with no warning and no recovery. The design predicts this in step 2.3 and assigns it to Increment 2, but the risk moved forward: per-page PDF sizing is what makes long multi-page scans worth building, so users have a new reason to make them.
+
+**Pros:**
+- A hard page cap with a message is small and non-controversial, and turns a silent tab death into a legible limit
+
+**Cons:**
+- Downscaling at `addPage` throws away resolution the PDF-sizing work just recovered; the cap has to be chosen against the DPI round trip
+
+**Context:**
+- Source: adversarial review 2026-09-04, finding 10
+- Start: `frontend/src/lib/useScanner.ts` `addPage`, `frontend/src/lib/pdf-builder.ts` `buildPDF`
+- Related: design doc step 2.3
+
+**Effort:** M
+**Priority:** P1
+**Depends on:** Increment 0's measurement (it sets how much resolution a page actually needs)
+
+### Scanic WASM instance leaks on every scanner close
+
+**What:** `terminateScanner()` sets `scanner = null; initPromise = null` with no disposal call on the scanic instance.
+
+**Why:** `ScannerPage.handleClose` calls it on every scanner exit, so each open/close cycle instantiates a fresh `Scanner` and orphans the previous WASM heap. Monotonic memory growth across a phone session, on top of the multi-page pressure above.
+
+**Pros:**
+- Likely a one-line fix or a one-line deletion
+
+**Cons:**
+- Needs an API check first: if `scanic@1.0.6` exposes no dispose/terminate, the correct fix is to STOP nulling the instance and drop the `terminateScanner()` call from `handleClose` entirely, which changes teardown semantics
+
+**Context:**
+- Source: adversarial review 2026-09-04, finding 13
+- Start: `frontend/src/lib/opencv-loader.ts` `terminateScanner`, and `frontend/node_modules/scanic/src/scanic.d.ts` for the disposal API
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+### Harden the detector-to-viewfinder coordinate handoff across orientation changes
+
+**What:** Capture `{detW, detH, detectionScale}` as one immutable object alongside the corners inside the detect `.then()`, and run `orderQuadByAngle` on detector output at the boundary.
+
+**Why:** Two remaining seams. (1) `detW`/`detH`/`detectionScaleRef` are written BEFORE `detector.detect()` is awaited while `cornersRef` is written AFTER, so a resolution change mid-detect leaves the overlay viewBox and the corners in different spaces, and `handleCapture` divides old-space corners by the new scale — a wrong-but-plausible crop with no error. The smoother reset added on 2026-09-04 covers the blend-across-spaces half of this, not the in-flight half. (2) No detector output is passed through `orderQuadByAngle`, and `blendQuads` assumes label stability, so a detector that relabels a near-square quad produces a bow-tie EMA that reaches `scanic.extract` and yields a mirrored warp. It self-heals after 2 drift rejects; the intervening frames are garbage.
+
+**Pros:**
+- Closes the last coordinate-space seam in a subsystem that exists because of a coordinate-space bug
+- `orderQuadByAngle` already exists and is property-tested
+
+**Cons:**
+- Touches the hot detection path, so it wants an on-device check rather than just a green test run
+
+**Context:**
+- Source: adversarial review 2026-09-04, finding 16
+- Start: `frontend/src/components/scanner/CameraViewfinder.tsx` detect block
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+### Review screen resets rotation and Enhanced/Original on every Add Page
+
+**What:** `rotation` and `showEnhanced` are `useState` inside `CaptureReview`, which remounts per page, so both snap back to `0` / `true` for each page of a multi-page scan.
+
+**Why:** A user filing a stack of pale thermal receipts has to re-select "Original" on every single page, and re-apply the same rotation. Small, repetitive, and exactly the kind of friction that stops a tool being used.
+
+**Pros:**
+- Lifting both into `ScannerPage` (or `useScanner`) is a few lines
+
+**Cons:**
+- Sticky rotation is arguably wrong if the next page really is oriented differently; sticky enhancement is not
+
+**Context:**
+- Source: adversarial review 2026-09-04, finding 18
+- Start: `frontend/src/components/scanner/CaptureReview.tsx`
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
 ### Camera focus, exposure, and torch control
 
 **What:** Tap-to-focus (`pointsOfInterest` / `focusMode`), a torch toggle, and a sharpness gate on capture (variance of Laplacian over the crop → "too blurry, retake").
@@ -191,6 +273,11 @@ Deferred items captured during planning and review. Organized by component, sort
 **Effort:** S
 **Priority:** P3
 **Depends on:** Increment 1 step 1.3
+
+> **DONE 2026-09-04.** Landed with Increment 1: `CameraViewfinder.tsx` checks
+> `typeof video.requestVideoFrameCallback === "function"` and falls back to
+> `requestAnimationFrame`, cancelling with the matching canceller. Stale on
+> arrival; kept for the record.
 
 ### scanner_test_frames stores original dims, not stored-JPEG dims
 

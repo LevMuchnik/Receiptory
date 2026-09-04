@@ -88,7 +88,7 @@ export class ClassicalDetector implements Detector {
       error = `Scanner error: ${message}`;
     }
 
-    const quad = normalizeQuad(rawCorners);
+    const quad = toQuad(rawCorners);
     if (!quad) {
       return {
         corners: null,
@@ -212,14 +212,20 @@ function canvasBlur(image: ImageData, radius: number): ImageData {
   return octx.getImageData(0, 0, image.width, image.height);
 }
 
-function normalizeQuad(raw: any): Quad | null {
+function toQuad(raw: any): Quad | null {
   if (!raw) return null;
   const tl = raw.topLeft ?? raw[0];
   const tr = raw.topRight ?? raw[1];
   const br = raw.bottomRight ?? raw[2];
   const bl = raw.bottomLeft ?? raw[3];
   if (!tl || !tr || !br || !bl) return null;
-  if ([tl, tr, br, bl].some((p) => typeof p.x !== "number" || typeof p.y !== "number")) return null;
+  // Number.isFinite, not typeof === "number": NaN and Infinity ARE numbers, and
+  // they defeat every downstream guard silently. Every hard-reject comparison is
+  // `x < t` / `x > t`, and all NaN comparisons are false, so a NaN quad passes
+  // them all; the smoother's drift gate never fires; clampQuad returns NaN; the
+  // viewfinder draws nothing while the badge says "Document detected"; and in
+  // review the handles become un-grabbable with no escape offered.
+  if ([tl, tr, br, bl].some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return null;
   return { topLeft: tl, topRight: tr, bottomRight: br, bottomLeft: bl };
 }
 

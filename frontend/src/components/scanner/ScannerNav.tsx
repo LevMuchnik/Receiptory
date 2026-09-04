@@ -9,6 +9,13 @@ interface ScannerNavProps {
 }
 
 interface NativeCameraButtonProps {
+  /**
+   * Pages already queued in the in-progress scan. The camera-app path uploads a
+   * single photo and navigates away, which throws every queued page out; with
+   * pages in flight we confirm first. The button sits inches from the counter
+   * showing exactly what is about to be lost.
+   */
+  queuedPages?: number;
   /** Classes for the visible trigger. Callers style it to match their surface. */
   className?: string;
   /** Idle label. Swapped for a progress label while an upload is in flight. */
@@ -35,6 +42,7 @@ interface NativeCameraButtonProps {
  * submits its generated PDF to.
  */
 export function NativeCameraButton({
+  queuedPages = 0,
   className,
   label = "Use camera app",
   icon = "photo_camera",
@@ -81,7 +89,19 @@ export function NativeCameraButton({
       <button
         type="button"
         disabled={uploading}
-        onClick={() => inputRef.current?.click()}
+        onClick={() => {
+          // Confirm before throwing away an in-progress multi-page scan.
+          if (
+            queuedPages > 0 &&
+            !window.confirm(
+              `You have ${queuedPages} scanned page${queuedPages === 1 ? "" : "s"} waiting. ` +
+                "Using the camera app uploads a single photo and discards them. Continue?",
+            )
+          ) {
+            return;
+          }
+          inputRef.current?.click();
+        }}
         className={className}
       >
         {icon && <span className="material-symbols-outlined text-base">{icon}</span>}
@@ -101,6 +121,7 @@ export default function ScannerNav({ pageCount, onClose }: ScannerNavProps) {
       <h1 className="font-headline font-bold text-sm">Document Scanner</h1>
       <div className="flex items-center gap-2">
         <NativeCameraButton
+          queuedPages={pageCount}
           label="Camera app"
           className="flex items-center gap-1.5 bg-white/10 px-3 py-1 rounded-full text-xs font-bold hover:bg-white/20 transition-colors disabled:opacity-50"
         />

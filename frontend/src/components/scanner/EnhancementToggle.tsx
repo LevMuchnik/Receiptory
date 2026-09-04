@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 interface EnhancementToggleProps {
   originalCanvas: HTMLCanvasElement;
@@ -27,9 +27,14 @@ interface EnhancementToggleProps {
  * a revoked URL it has not yet loaded (an already-loaded image keeps its
  * decoded bitmap after revocation).
  */
-function useCanvasObjectUrl(canvas: HTMLCanvasElement): string | null {
+function useCanvasObjectUrl(canvas: HTMLCanvasElement): {
+  url: string | null;
+  onSettled: () => void;
+} {
   const [url, setUrl] = useState<string | null>(null);
   const urlRef = useRef<string | null>(null);
+  /** Superseded URL awaiting the new <img> to finish decoding before release. */
+  const pendingRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -39,8 +44,16 @@ function useCanvasObjectUrl(canvas: HTMLCanvasElement): string | null {
         const next = URL.createObjectURL(blob);
         const prev = urlRef.current;
         urlRef.current = next;
+        // Hand the stale URL to the <img>'s load handler instead of revoking it
+        // here. Revoking synchronously assumed the previous image had FINISHED
+        // loading; on rapid toggling of a multi-megapixel canvas the decode is
+        // still in flight, and revoking mid-load errors it into a blank pane.
+        // Revoke the previous URL only once the NEW image has settled.
+        if (pendingRef.current && pendingRef.current !== prev) {
+          URL.revokeObjectURL(pendingRef.current);
+        }
+        pendingRef.current = prev;
         setUrl(next);
-        if (prev) URL.revokeObjectURL(prev);
       },
       "image/jpeg",
       0.92,
@@ -57,10 +70,23 @@ function useCanvasObjectUrl(canvas: HTMLCanvasElement): string | null {
         URL.revokeObjectURL(urlRef.current);
         urlRef.current = null;
       }
+      if (pendingRef.current) {
+        URL.revokeObjectURL(pendingRef.current);
+        pendingRef.current = null;
+      }
     };
   }, []);
 
-  return url;
+  // Called from the <img>'s onLoad/onError: the new bitmap is decoded (or has
+  // definitively failed), so the previous URL is now safe to release.
+  const onSettled = useCallback(() => {
+    if (pendingRef.current) {
+      URL.revokeObjectURL(pendingRef.current);
+      pendingRef.current = null;
+    }
+  }, []);
+
+  return { url, onSettled };
 }
 
 export default function EnhancementToggle({
@@ -70,12 +96,18 @@ export default function EnhancementToggle({
   onToggle,
 }: EnhancementToggleProps) {
   const displayCanvas = showEnhanced && enhancedCanvas ? enhancedCanvas : originalCanvas;
-  const src = useCanvasObjectUrl(displayCanvas);
+  const { url: src, onSettled } = useCanvasObjectUrl(displayCanvas);
 
   return (
     <div className="relative w-full h-full flex items-center justify-center bg-black overflow-hidden">
       {src && (
-        <img src={src} alt="Scanned document" className="max-w-full max-h-full object-contain" />
+        <img
+          src={src}
+          alt="Scanned document"
+          className="max-w-full max-h-full object-contain"
+          onLoad={onSettled}
+          onError={onSettled}
+        />
       )}
       {enhancedCanvas && (
         <button

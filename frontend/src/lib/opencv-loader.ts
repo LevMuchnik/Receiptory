@@ -83,11 +83,25 @@ export async function extractAndEnhance(
 
     try {
       const result = await s.extract(fullCanvas, scaledCorners, { output: "canvas" });
-      if (result.success && result.output && (result.output as HTMLCanvasElement).width > 0) {
-        outputCanvas = result.output as HTMLCanvasElement;
+      const out = result.output as HTMLCanvasElement | undefined;
+      // BOTH dimensions. A near-degenerate quad yields an N x 0 canvas, which
+      // passed a width-only check, flowed on as a valid crop, enabled Submit,
+      // and became a blank page in the PDF.
+      if (result.success && out && out.width > 0 && out.height > 0) {
+        outputCanvas = out;
       }
     } catch (e) {
       console.warn("Extract with corners failed:", e);
+    }
+
+    // Deliberately NOT falling through to the full-frame detect-and-crop below.
+    // That rung runs a FRESH detection and crops to whatever scanic picks,
+    // ignoring the corners the user just dragged -- so a failed warp would file
+    // a crop they never chose while the review screen kept showing their quad.
+    // If their corners could not be honoured, hand back the whole frame instead.
+    if (!outputCanvas) {
+      const enhanced = enhanceCanvas(fullCanvas);
+      return { original: fullCanvas, enhanced };
     }
   }
 

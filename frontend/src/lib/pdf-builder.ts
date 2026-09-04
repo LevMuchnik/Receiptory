@@ -18,6 +18,10 @@ const TARGET_DPI = 200;
 /**
  * PDF hard limit: a page dimension may not exceed 14400 pt = 200 in = 5080 mm.
  * We clamp a little under that so rounding can never push a page over.
+ *
+ * Unreachable in practice (5000mm at 200 DPI is a 39,370px edge) and kept only
+ * so a future DPI change or a synthetic canvas cannot emit an invalid page.
+ * Note it DOES break the 1:1 round trip if it ever fires.
  */
 const MAX_PAGE_MM = 5000;
 
@@ -52,6 +56,27 @@ const MM_PER_INCH = 25.4;
  *     was upscaled to it; a 4K crop would have been downsampled to it. That is
  *     what stopped the LLM from ever seeing a high-resolution receipt.
  */
+/**
+ * jsPDF SORTS a `format: [a, b]` array and then applies `orientation` to decide
+ * which value is the width. Passing a literal [w, h] with orientation
+ * "portrait" therefore produces a TRANSPOSED page whenever w > h.
+ *
+ * Verified against the pinned jspdf 4.2.1:
+ *     new jsPDF({orientation:"portrait", format:[300,100]})  ->  page 100 x 300
+ *     new jsPDF({orientation:"landscape", format:[300,100]}) ->  page 300 x 100
+ *
+ * An earlier revision of this file asserted the opposite in a comment and
+ * hardcoded "portrait". Every landscape page was then created 100mm wide and
+ * drawn at 300mm, silently clipping two thirds of the receipt off the right
+ * edge before the backend ever rastered it for the LLM. Android hands back
+ * landscape-oriented tracks under a portrait UI, so this was not a rare path.
+ *
+ * Derive the orientation from the dimensions and jsPDF's sort agrees with us.
+ */
+function orientationFor(wMm: number, hMm: number): "portrait" | "landscape" {
+  return wMm > hMm ? "landscape" : "portrait";
+}
+
 export function buildPDF(pages: ScannedPage[]): Blob {
   // Rotate first, then measure: applyRotation swaps w/h for 90/270, and the
   // page must be sized from the dimensions the image actually ends up with.
@@ -61,17 +86,19 @@ export function buildPDF(pages: ScannedPage[]): Blob {
   });
 
   const first = rendered[0];
-  // Always "portrait" so jsPDF takes the format array literally as
-  // [width, height] instead of reordering it to match an orientation.
   const doc = new jsPDF(
     first
-      ? { orientation: "portrait", unit: "mm", format: [first.wMm, first.hMm] }
+      ? {
+          orientation: orientationFor(first.wMm, first.hMm),
+          unit: "mm",
+          format: [first.wMm, first.hMm],
+        }
       : // No pages at all: hand back a valid, empty single-page PDF.
         { orientation: "portrait", unit: "mm", format: "a4" },
   );
 
   rendered.forEach(({ canvas, wMm, hMm }, i) => {
-    if (i > 0) doc.addPage([wMm, hMm], "portrait");
+    if (i > 0) doc.addPage([wMm, hMm], orientationFor(wMm, hMm));
 
     // A degenerate canvas has no drawable pixels; it still gets a (tiny, blank)
     // page so page indices stay aligned with `pages`.
@@ -90,7 +117,7 @@ export function buildPDF(pages: ScannedPage[]): Blob {
  * Both dimensions are scaled by the SAME factor when clamping, so the aspect
  * ratio survives and the image still fills the page exactly.
  */
-function pageSizeMm(widthPx: number, heightPx: number): { wMm: number; hMm: number } {
+export function pageSizeMm(widthPx: number, heightPx: number): { wMm: number; hMm: number } {
   if (!(widthPx > 0) || !(heightPx > 0)) {
     // Zero-size or NaN canvas: a [0, 0] or [NaN, NaN] format would produce an
     // unopenable PDF, so fall back to a small blank page.

@@ -95,6 +95,8 @@ export default function CaptureReview({
   /** Screen px per raw-frame px under the current `meet` fit. */
   const scaleRef = useRef(1);
   const dragRef = useRef<{
+    /** The pointer that owns this drag. A second finger must not steer it. */
+    pointerId: number;
     index: number;
     offset: Pt;
     start: Pt;
@@ -186,6 +188,7 @@ export default function CaptureReview({
       if (best < 0 || bestD * scaleRef.current > HANDLE_HIT_R_PX) return;
 
       dragRef.current = {
+        pointerId: e.pointerId,
         index: best,
         // Grab offset: the corner keeps its distance from the fingertip instead
         // of teleporting under it. A pure tap therefore moves nothing.
@@ -210,7 +213,10 @@ export default function CaptureReview({
   const handlePointerMove = useCallback(
     (e: React.PointerEvent<SVGSVGElement>) => {
       const d = dragRef.current;
-      if (!d) return;
+      // Ignore every pointer except the one that started the drag. `touch-none`
+      // stops browser gestures but not a second finger's events, and without
+      // this an instinctive pinch drives the first finger's corner.
+      if (!d || e.pointerId !== d.pointerId) return;
       const u = toFrame(e.clientX, e.clientY);
       if (!u) return;
 
@@ -241,7 +247,7 @@ export default function CaptureReview({
   const handlePointerUp = useCallback(
     (e: React.PointerEvent<SVGSVGElement>) => {
       const d = dragRef.current;
-      if (!d) return;
+      if (!d || e.pointerId !== d.pointerId) return;
       dragRef.current = null;
       setDragging(false);
       try {
@@ -250,12 +256,17 @@ export default function CaptureReview({
         /* capture may already be gone */
       }
 
-      // A tap that moved nothing must stay a no-op. Without this, touching a
-      // handle fires a full-resolution re-warp for no reason, and orderQuadByAngle
-      // could relabel corners the user never moved -- which, on a receipt shot at
-      // an angle, visibly rotates the crop in response to a stray tap.
+      // A tap that moved nothing is normally a no-op: committing would burn a
+      // full-resolution re-warp, and orderQuadByAngle could relabel corners the
+      // user never moved, visibly rotating the crop of an angled receipt.
+      //
+      // EXCEPT when no warp has landed yet. ScannerPage skips the review-entry
+      // extract once a handle is touched, on the assumption that pointerup will
+      // run one instead. If we also skip, `extracted` stays null forever and
+      // Submit is disabled for good -- a dead review screen from a stray tap.
+      // So: no-op only when there is already a result to keep.
       const cur = cornersRef.current[d.index];
-      if (cur.x === d.origin.x && cur.y === d.origin.y) return;
+      if (cur.x === d.origin.x && cur.y === d.origin.y && extracted !== null) return;
 
       // Repair, do not block: sorting by angle around the centroid and
       // relabelling TL/TR/BR/BL makes a self-intersecting quad impossible to
@@ -266,7 +277,7 @@ export default function CaptureReview({
       // The warp runs here and ONLY here — never during the drag.
       onCornersCommit(quad);
     },
-    [paint, onCornersCommit],
+    [paint, onCornersCommit, extracted],
   );
 
   // ---- derived -----------------------------------------------------------

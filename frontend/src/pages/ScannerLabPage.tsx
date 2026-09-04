@@ -5,7 +5,7 @@ import { initScanner } from "@/lib/opencv-loader";
 import { ClassicalDetector, CLASSICAL_DEFAULTS, type ClassicalParams } from "@/lib/scanner/classical-detector";
 import { MLDetector, ML_DEFAULTS, type MLParams } from "@/lib/scanner/ml-detector";
 import type { Detector, DetectionResult, Quad } from "@/lib/scanner/detector";
-import { quadIoU, normalizeQuad } from "@/lib/scanner/geometry";
+import { quadIoU, normalizeQuad, orderQuadByAngle } from "@/lib/scanner/geometry";
 
 interface LoadedFrame {
   frameId: number | null;
@@ -198,10 +198,18 @@ export default function ScannerLabPage() {
         continue;
       }
       timings.push(result.timingMs);
+      // Order BOTH quads before measuring. quadIoU's polygonClip defines
+      // "inside" as isLeft >= 0, so a quad wound the other way yields an empty
+      // intersection and IoU 0 -- which reads as "the detector missed", the
+      // exact misreading that killed the 2026-07-03 design. Ground truth is
+      // hand-annotated and never re-wound, and detector output carries no
+      // winding guarantee either.
       const iou = result.corners
         ? quadIoU(
-            denormalizeQuadIfNormalized(gt, imageData.width, imageData.height),
-            result.corners,
+            orderQuadByAngle(
+              quadPoints(denormalizeQuadIfNormalized(gt, imageData.width, imageData.height)),
+            ),
+            orderQuadByAngle(quadPoints(result.corners)),
           )
         : 0;
       ious.push(iou);
@@ -790,6 +798,10 @@ function denormalizeQuadIfNormalized(quad: Quad, w: number, h: number): Quad {
 // quadIoU / polygonClip moved to lib/scanner/geometry.ts so the accuracy metric
 // that produces every "median IoU" number in the design docs is unit-testable.
 // Its winding sensitivity is documented and regression-tested there.
+
+function quadPoints(q: Quad) {
+  return [q.topLeft, q.topRight, q.bottomRight, q.bottomLeft];
+}
 
 function median(xs: number[]): number {
   if (xs.length === 0) return 0;

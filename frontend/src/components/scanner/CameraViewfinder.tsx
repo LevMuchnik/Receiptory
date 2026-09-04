@@ -147,6 +147,14 @@ export default function CameraViewfinder({
         if (offscreen.width !== w || offscreen.height !== h) {
           offscreen.width = w;
           offscreen.height = h;
+          // The detection space just changed (device rotation, or Android
+          // handing back a differently-oriented track). Everything the smoother
+          // holds is expressed in the OLD space, and blendQuads would average
+          // across two coordinate systems into a quad that belongs to neither.
+          // Drop the lock and re-acquire in the new space.
+          smoother.reset();
+          cornersRef.current = null;
+          setDocumentDetected(false);
         }
         detW = w;
         detH = h;
@@ -191,7 +199,10 @@ export default function CameraViewfinder({
 
   const handleCapture = useCallback(() => {
     const video = videoRef.current;
-    if (!video || !ready) return;
+    // videoWidth can still be 0 in the window between `ready` and the first
+    // decoded frame; getImageData(0,0,0,0) throws IndexSizeError out of the
+    // onClick and the shutter appears to do nothing.
+    if (!video || !ready || !(video.videoWidth > 0) || !(video.videoHeight > 0)) return;
     const canvas = document.createElement("canvas");
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { isWebView, isSecureContext } from "@/lib/platform";
 import { initScanner, extractAndEnhance, terminateScanner } from "@/lib/opencv-loader";
@@ -159,10 +160,6 @@ export default function ScannerPage() {
 
       if (jobRef.current !== job) return;
 
-      // Store the automatic corners alongside the frame, normalized 0-1 inside
-      // uploadTestFrame so they share a space with ground truth.
-      uploadTestFrame(imageData, detector.name, corners);
-
       // If a handle is already under a finger, do not warp yet: the pointerup
       // commit runs its own extract with the corners the user actually wants,
       // and warping the stale quad first would only burn a full-res pass.
@@ -173,8 +170,42 @@ export default function ScannerPage() {
     [dispatch, detector, detectorParams, runExtract],
   );
 
+  /**
+   * Add the frame to the scanner test corpus.
+   *
+   * Called when the user COMMITS a page (Add Page, or a successful Submit) --
+   * never at the shutter. It used to fire on every capture, before the review
+   * screen was even visible, which made "Retake" and "Discard All" untrue: a
+   * receipt shot by mistake was already stored server-side. These are the
+   * user's financial records; discard has to mean discard.
+   *
+   * Known gap, accepted deliberately: a page committed via Add Page is
+   * collected at that moment, so a later "Discard All" does not unsend it.
+   * Retaining raw ImageData for every queued page until submit would make the
+   * multi-page memory problem materially worse (~8MB per page at 1080p, ~33MB
+   * at 4K) and that is already a flagged risk. Add Page is an explicit decision
+   * to keep the page, so collecting there is faithful enough.
+   */
+  const collectTestFrame = useCallback(
+    (raw: ImageData, corners: Quad | null) => {
+      // Corners are normalized 0-1 inside uploadTestFrame so they share a
+      // space with ground truth.
+      uploadTestFrame(raw, detector.name, corners);
+    },
+    [detector],
+  );
+
   const handleDragStart = useCallback(() => {
     handleTouchedRef.current = true;
+  }, []);
+
+  /**
+   * Release the drag guard once a commit has landed. It only gates the single
+   * review-entry detect, but leaving it latched for the rest of the session is
+   * a trap for anyone who later adds a second async detect.
+   */
+  const releaseDragGuard = useCallback(() => {
+    handleTouchedRef.current = false;
   }, []);
 
   const handleCornersCommit = useCallback(
@@ -182,11 +213,12 @@ export default function ScannerPage() {
       if (state.phase !== "reviewing") return;
       const raw = state.raw;
       const job = ++jobRef.current;
+      releaseDragGuard();
       dispatch({ type: "corners", corners });
       dispatch({ type: "extracted", extracted: null, enhanced: null });
       void runExtract(raw, corners, job);
     },
-    [state, dispatch, runExtract],
+    [state, dispatch, runExtract, releaseDragGuard],
   );
 
   /**
@@ -228,24 +260,45 @@ export default function ScannerPage() {
   const handleSubmit = useCallback(
     async (currentRotation: number, useEnhanced: boolean) => {
       if (state.phase !== "reviewing") return;
-      const canvas = finalCanvas(state, useEnhanced);
+      const review = state;
+      const canvas = finalCanvas(review, useEnhanced);
       jobRef.current += 1;
       dispatch({ type: "submit-start" });
       try {
         const allPages: ScannedPage[] = [...pages, { canvas, rotation: currentRotation }];
 
+        // Yield a frame so the "Creating PDF and uploading..." state actually
+        // paints. buildPDF is synchronous and does a full-resolution rotate plus
+        // a JPEG encode PER PAGE; without this the UI is frozen for seconds with
+        // nothing on screen, which reads as a crash.
+        await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+
         const pdfBlob = buildPDF(allPages);
         const file = new File([pdfBlob], `scan_${Date.now()}.pdf`, { type: "application/pdf" });
         await api.upload([file]);
+
+        // Collect only once the document is actually filed. A frame the user
+        // retook or discarded is never sent, and a failed upload does not
+        // collect either, so a retry cannot double-store.
+        collectTestFrame(review.raw, review.corners);
 
         clearPages();
         dispatch({ type: "submit-done" });
         navigate("/documents");
       } catch (err: any) {
-        dispatch({ type: "error", message: `Upload failed: ${err.message}` });
+        // Do NOT drop the user's page. `submit-start` discarded the review
+        // payload from the reducer, so restore it and put them back in review
+        // with the error visible. Upload failure is a ROUTINE outcome here --
+        // the backend rejects SHA-256 duplicates -- and losing a scan to it is
+        // not acceptable. `pages` is untouched, so queued pages survive too.
+        dispatch({ type: "captured", raw: review.raw, corners: review.corners });
+        if (review.extracted) {
+          dispatch({ type: "extracted", extracted: review.extracted, enhanced: review.enhanced });
+        }
+        toast.error(`Upload failed: ${err.message}`);
       }
     },
-    [state, pages, clearPages, dispatch, navigate, finalCanvas],
+    [state, pages, clearPages, dispatch, navigate, finalCanvas, collectTestFrame],
   );
 
   const handleAddPage = useCallback(
@@ -253,9 +306,10 @@ export default function ScannerPage() {
       if (state.phase !== "reviewing") return;
       const canvas = finalCanvas(state, useEnhanced);
       jobRef.current += 1;
+      collectTestFrame(state.raw, state.corners);
       addPage(canvas, rotation);
     },
-    [state, addPage, finalCanvas],
+    [state, addPage, finalCanvas, collectTestFrame],
   );
 
   const handleRetake = useCallback(() => {
@@ -323,7 +377,16 @@ export default function ScannerPage() {
           <button
             onClick={() => {
               terminateScanner();
-              initScanner().then(() => dispatch({ type: "loaded" }));
+              initScanner()
+                .then(() => dispatch({ type: "loaded" }))
+                // Without a catch, a second init failure is an unhandled
+                // rejection and the button looks inert.
+                .catch((e) =>
+                  dispatch({
+                    type: "error",
+                    message: `Scanner engine failed to start: ${e instanceof Error ? e.message : String(e)}`,
+                  }),
+                );
             }}
             className="px-6 py-3 bg-white/10 rounded-xl font-bold text-sm"
           >
