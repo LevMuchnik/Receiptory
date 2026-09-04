@@ -63,7 +63,13 @@ export const api = {
       credentials: "include",
       body: form,
     });
-    if (!res.ok) throw new Error("Upload failed");
+    if (!res.ok) {
+      // Match request()'s error extraction. Uploads fail for reasons the user
+      // can act on — a SHA-256 duplicate rejection, an unsupported format —
+      // and a bare "Upload failed" throws that information away.
+      const error = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(error.detail || "Upload failed");
+    }
     return res.json();
   },
   exportDocs: async (body: unknown): Promise<{ blob: Blob; filename: string }> => {
