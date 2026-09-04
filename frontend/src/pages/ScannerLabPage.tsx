@@ -6,6 +6,32 @@ import { ClassicalDetector, CLASSICAL_DEFAULTS, type ClassicalParams } from "@/l
 import { MLDetector, ML_DEFAULTS, type MLParams } from "@/lib/scanner/ml-detector";
 import type { Detector, DetectionResult, Quad } from "@/lib/scanner/detector";
 import { quadIoU, normalizeQuad, orderQuadByAngle } from "@/lib/scanner/geometry";
+import { downscaleImageData, imageDataToCanvas } from "@/lib/scanner/canvas-utils";
+
+/**
+ * The Lab preview deliberately does NOT take the scanner's 4K raise.
+ *
+ * Every frame the Lab captures is re-encoded to a 1280px long edge on upload
+ * (see `imageDataToJpegBlob`), and every frame it evaluates is downscaled again
+ * by the detector. A 4K stream here would buy nothing but a 33MB ImageData held
+ * in `loaded` state on a phone that the design doc already flags for memory
+ * pressure. The scanner, which keeps full resolution for the final extract,
+ * gets the raise; the Lab does not.
+ *
+ * The negotiated resolution is still surfaced under the viewfinder, so the
+ * device's actual capability can be read off on-device without a debugger.
+ */
+const LAB_PREVIEW_WIDTH = 1920;
+const LAB_PREVIEW_HEIGHT = 1080;
+
+/**
+ * Match `test-frame-upload.ts` — the corpus stores 1280px-long-edge JPEGs at
+ * q0.85. Lab captures used to upload at full resolution and q0.9, which is both
+ * a multi-megabyte upload (worse at 4K) and a corpus that mixes resolutions the
+ * eval then can't compare across.
+ */
+const UPLOAD_LONG_EDGE = 1280;
+const UPLOAD_JPEG_QUALITY = 0.85;
 
 interface LoadedFrame {
   frameId: number | null;
@@ -62,6 +88,8 @@ export default function ScannerLabPage() {
   const [loaded, setLoaded] = useState<LoadedFrame | null>(null);
   const [groundTruth, setGroundTruth] = useState<Quad | null>(null);
   const [activeBanner, setActiveBanner] = useState<string | null>(null);
+  /** Bumped to remount LabCamera and retry camera acquisition from rung 1. */
+  const [cameraAttempt, setCameraAttempt] = useState(0);
 
   const classical = useMemo(() => new ClassicalDetector(), []);
   const ml = useMemo(() => new MLDetector(), []);
@@ -245,7 +273,13 @@ export default function ScannerLabPage() {
       <section className="bg-card rounded-xl p-5 shadow-[0_8px_32px_rgba(25,28,30,0.06)]">
         <h2 className="text-lg font-headline font-bold text-primary mb-4">1. Pick or capture a frame</h2>
         <div className="grid lg:grid-cols-2 gap-5">
-          <LabCamera onCapture={adoptCapturedFrame} />
+          {/* `key` is the retry mechanism: bumping it remounts LabCamera, which
+              tears down any half-acquired stream and walks the ladder afresh. */}
+          <LabCamera
+            key={cameraAttempt}
+            onCapture={adoptCapturedFrame}
+            onRetry={() => setCameraAttempt((n) => n + 1)}
+          />
           <FramePicker frames={frames} selectedId={loaded?.frameId ?? null} onPick={loadFrame} onDelete={removeFrame} />
         </div>
       </section>
@@ -296,8 +330,17 @@ export default function ScannerLabPage() {
   );
 }
 
-function LabCamera({ onCapture }: { onCapture: (image: ImageData) => void }) {
-  const { videoRef, error, ready } = useCamera();
+function LabCamera({
+  onCapture,
+  onRetry,
+}: {
+  onCapture: (image: ImageData) => void;
+  onRetry: () => void;
+}) {
+  const { videoRef, error, ready, settings } = useCamera({
+    width: LAB_PREVIEW_WIDTH,
+    height: LAB_PREVIEW_HEIGHT,
+  });
 
   const capture = useCallback(() => {
     const video = videoRef.current;
@@ -315,7 +358,16 @@ function LabCamera({ onCapture }: { onCapture: (image: ImageData) => void }) {
       <div className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Live camera</div>
       <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
         {error ? (
-          <div className="absolute inset-0 flex items-center justify-center text-white text-sm p-4 text-center">{error}</div>
+          // The stuck/failure messages end in "Tap to retry", so make that true:
+          // remounting LabCamera re-runs the whole constraint ladder from rung 1.
+          <button
+            type="button"
+            onClick={onRetry}
+            className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-white text-sm p-4 text-center"
+          >
+            <span className="material-symbols-outlined">videocam_off</span>
+            {error}
+          </button>
         ) : (
           <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
         )}
@@ -324,6 +376,15 @@ function LabCamera({ onCapture }: { onCapture: (image: ImageData) => void }) {
             <span className="material-symbols-outlined text-white animate-spin">progress_activity</span>
           </div>
         )}
+      </div>
+      {/* Negotiated resolution, not the requested one — measurement 8a wants the
+          detection resolution recorded, and this is where it can be read. */}
+      <div className="text-[11px] text-muted-foreground font-mono">
+        {settings
+          ? `granted ${settings.width ?? "?"}x${settings.height ?? "?"}` +
+            (settings.frameRate ? ` @ ${Math.round(settings.frameRate)}fps` : "") +
+            (settings.facingMode ? ` (${settings.facingMode})` : "")
+          : `requested ${LAB_PREVIEW_WIDTH}x${LAB_PREVIEW_HEIGHT}…`}
       </div>
       <button
         onClick={capture}
@@ -736,12 +797,22 @@ function loadImage(url: string): Promise<HTMLImageElement> {
   });
 }
 
+/**
+ * Encode a captured frame for upload, capped at `UPLOAD_LONG_EDGE`.
+ *
+ * The cap is the point: this used to encode at full resolution, so a 4K capture
+ * became a multi-megabyte POST of pixels the corpus immediately throws away.
+ * `downscaleImageData` returns the input untouched when it already fits, so a
+ * 1080p capture costs nothing extra.
+ *
+ * The upload's `width`/`height` metadata still describes the ORIGINAL capture,
+ * not this blob — same convention as `test-frame-upload.ts`, and the reason
+ * stored corner data is normalized to 0-1.
+ */
 async function imageDataToJpegBlob(image: ImageData): Promise<Blob | null> {
-  const c = document.createElement("canvas");
-  c.width = image.width;
-  c.height = image.height;
-  c.getContext("2d")!.putImageData(image, 0, 0);
-  return new Promise((resolve) => c.toBlob((b) => resolve(b), "image/jpeg", 0.9));
+  const { data } = downscaleImageData(image, UPLOAD_LONG_EDGE);
+  const c = imageDataToCanvas(data);
+  return new Promise((resolve) => c.toBlob((b) => resolve(b), "image/jpeg", UPLOAD_JPEG_QUALITY));
 }
 
 function drawQuad(

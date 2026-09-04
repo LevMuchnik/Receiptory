@@ -34,7 +34,7 @@ export default function CameraViewfinder({
   detectorParams,
   onCapture,
 }: CameraViewfinderProps) {
-  const { videoRef, error, ready } = useCamera();
+  const { videoRef, error, ready, retry } = useCamera();
   const svgRef = useRef<SVGSVGElement>(null);
   const overlayGroupRef = useRef<SVGGElement>(null);
   const polygonRef = useRef<SVGPolygonElement>(null);
@@ -215,9 +215,20 @@ export default function CameraViewfinder({
   if (error) {
     return (
       <div className="flex-1 flex items-center justify-center bg-black p-6">
-        <div className="text-center text-white space-y-3">
+        <div className="text-center text-white space-y-4">
           <span className="material-symbols-outlined text-4xl text-[#ffdad6]">videocam_off</span>
           <p className="text-sm">{error}</p>
+          {/*
+            The error strings say "Tap to retry" — so this has to exist, or the
+            message is a lie and the user is stranded on a black screen. retry()
+            walks the constraint ladder again from rung 1.
+          */}
+          <button
+            onClick={retry}
+            className="px-6 py-3 rounded-xl bg-white/10 font-bold text-sm active:bg-white/20"
+          >
+            Try again
+          </button>
         </div>
       </div>
     );
