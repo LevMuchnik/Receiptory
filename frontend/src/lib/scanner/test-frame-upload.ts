@@ -1,14 +1,31 @@
 import { api } from "@/lib/api";
 import type { Quad } from "./detector";
+import { normalizeQuad } from "./geometry";
 
 const LONG_EDGE = 1280;
 const JPEG_QUALITY = 0.85;
 
+/**
+ * Fire-and-forget upload of a capture frame to the scanner test corpus.
+ *
+ * `corners` MUST be in the pixel space of `imageData` (raw-frame pixels). They
+ * are normalized to 0-1 before storage, because the frame itself is re-encoded
+ * down to a 1280px long edge on the way out: pixel corners would describe
+ * neither the source frame nor the stored JPEG and are useless for evaluation.
+ * Normalized 0-1 is also the space `ground_truth_json` uses
+ * (both now share `geometry.normalizeQuad`), so capture corners and ground truth
+ * finally share one space and `runEval` can compare them directly.
+ */
 export function uploadTestFrame(
   imageData: ImageData,
   detectorName: string | null,
   corners: Quad | null,
 ): void {
+  const normalized =
+    corners && imageData.width > 0 && imageData.height > 0
+      ? normalizeQuad(corners, imageData.width, imageData.height)
+      : null;
+
   // Fire-and-forget. Don't block the scanner flow on upload latency or auth errors.
   encodeJpeg(imageData)
     .then((blob) => {
@@ -17,7 +34,7 @@ export function uploadTestFrame(
         width: imageData.width,
         height: imageData.height,
         detector_name: detectorName ?? undefined,
-        corners_at_capture_json: corners ? JSON.stringify(corners) : undefined,
+        corners_at_capture_json: normalized ? JSON.stringify(normalized) : undefined,
       });
     })
     .catch((err) => {

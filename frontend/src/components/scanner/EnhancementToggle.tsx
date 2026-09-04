@@ -1,21 +1,70 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface EnhancementToggleProps {
   originalCanvas: HTMLCanvasElement;
   enhancedCanvas: HTMLCanvasElement | null;
 }
 
+/**
+ * Encode a canvas once per canvas identity and hand back a blob URL.
+ *
+ * This replaces a `canvas.toDataURL("image/jpeg", 0.92)` that ran INSIDE
+ * render: a full JPEG encode plus a multi-megabyte base64 string on every
+ * single render pass. With a drag living in this component tree that is a real
+ * hazard even at 1080p.
+ *
+ * Lifecycle: the URL created for a given canvas is revoked when that canvas is
+ * replaced and again on unmount, so nothing leaks. The previous URL is revoked
+ * only after the new one has been handed to React, so the <img> never points at
+ * a revoked URL it has not yet loaded (an already-loaded image keeps its
+ * decoded bitmap after revocation).
+ */
+function useCanvasObjectUrl(canvas: HTMLCanvasElement): string | null {
+  const [url, setUrl] = useState<string | null>(null);
+  const urlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    canvas.toBlob(
+      (blob) => {
+        if (cancelled || !blob) return;
+        const next = URL.createObjectURL(blob);
+        const prev = urlRef.current;
+        urlRef.current = next;
+        setUrl(next);
+        if (prev) URL.revokeObjectURL(prev);
+      },
+      "image/jpeg",
+      0.92,
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [canvas]);
+
+  // Unmount: release whatever URL is currently outstanding.
+  useEffect(() => {
+    return () => {
+      if (urlRef.current) {
+        URL.revokeObjectURL(urlRef.current);
+        urlRef.current = null;
+      }
+    };
+  }, []);
+
+  return url;
+}
+
 export default function EnhancementToggle({ originalCanvas, enhancedCanvas }: EnhancementToggleProps) {
   const [showEnhanced, setShowEnhanced] = useState(true);
   const displayCanvas = showEnhanced && enhancedCanvas ? enhancedCanvas : originalCanvas;
+  const src = useCanvasObjectUrl(displayCanvas);
 
   return (
     <div className="relative w-full h-full flex items-center justify-center bg-black overflow-hidden">
-      <img
-        src={displayCanvas.toDataURL("image/jpeg", 0.92)}
-        alt="Scanned document"
-        className="max-w-full max-h-full object-contain"
-      />
+      {src && (
+        <img src={src} alt="Scanned document" className="max-w-full max-h-full object-contain" />
+      )}
       {enhancedCanvas && (
         <button
           onClick={() => setShowEnhanced(!showEnhanced)}

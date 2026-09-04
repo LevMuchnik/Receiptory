@@ -33,18 +33,42 @@ export class MLDetector implements Detector {
   async detect(image: ImageData, params: Partial<MLParams> = {}): Promise<DetectionResult> {
     const p: MLParams = { ...ML_DEFAULTS, ...params };
     if (!p.modelUrl) {
-      return { corners: null, score: 0, candidates: [], timingMs: 0 };
+      // Failure, not an empty table: the detector was asked to run with nothing
+      // to run. Silently returning "no document" hides a misconfiguration.
+      return {
+        corners: null,
+        score: 0,
+        candidates: [],
+        timingMs: 0,
+        error: "No ML model configured",
+      };
     }
     const start = performance.now();
 
     try {
       await this.ensureSession(p.modelUrl);
     } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
       console.warn("ML model load failed:", e);
-      return { corners: null, score: 0, candidates: [], timingMs: performance.now() - start };
+      return {
+        corners: null,
+        score: 0,
+        candidates: [],
+        timingMs: performance.now() - start,
+        error: `ML model load failed: ${message}`,
+      };
     }
     if (!this.session) {
-      return { corners: null, score: 0, candidates: [], timingMs: performance.now() - start };
+      // ensureSession() resolved without throwing yet left no session — a
+      // concurrent load for a different URL cleared it, or the runtime handed
+      // back nothing. Either way inference cannot run: a failure, not a miss.
+      return {
+        corners: null,
+        score: 0,
+        candidates: [],
+        timingMs: performance.now() - start,
+        error: "ML model load failed: session unavailable",
+      };
     }
 
     const lb = letterbox(image, p.inputSize);
@@ -55,13 +79,32 @@ export class MLDetector implements Detector {
     try {
       result = await this.session.run(feeds);
     } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
       console.warn("ML inference failed:", e);
-      return { corners: null, score: 0, candidates: [], timingMs: performance.now() - start };
+      return {
+        corners: null,
+        score: 0,
+        candidates: [],
+        timingMs: performance.now() - start,
+        error: `ML inference failed: ${message}`,
+      };
     }
 
     const parsed = parseOutput(result, this.session.outputNames, p);
     if (!parsed) {
-      return { corners: null, score: 0, candidates: [], timingMs: performance.now() - start };
+      // parseOutput only returns null when the tensor does not match the shape
+      // this adapter expects (missing output, <8 regression values, <4 heatmap
+      // channels). That is an adapter/model mismatch — a failure — never the
+      // model's way of saying "no document here"; a model that found nothing
+      // still returns a well-shaped tensor with low peaks, which lands below
+      // scoreThreshold below and yields corners: null with no error.
+      return {
+        corners: null,
+        score: 0,
+        candidates: [],
+        timingMs: performance.now() - start,
+        error: "ML output did not match the expected tensor shape",
+      };
     }
     const { quad: quadInInput, score } = parsed;
     const corners = unletterbox(quadInInput, lb, image.width, image.height);

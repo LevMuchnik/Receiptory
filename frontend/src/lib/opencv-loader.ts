@@ -2,32 +2,47 @@
 
 import { Scanner } from "scanic";
 
+import { imageDataToCanvas } from "./scanner/canvas-utils";
+
 let scanner: Scanner | null = null;
 let initPromise: Promise<void> | null = null;
 
+/**
+ * Initialize the Scanic engine. Safe to call repeatedly; concurrent callers
+ * share one in-flight promise.
+ *
+ * The module-level `scanner` is published only AFTER `initialize()` resolves,
+ * and `initPromise` is cleared on rejection. An earlier version assigned
+ * `scanner` before awaiting `initialize()`, so a single init failure left a
+ * half-built instance behind: `if (scanner) return` short-circuited every later
+ * call and the failure latched permanently with no way to retry.
+ *
+ * Rejections propagate to the caller — classical-detector's catch depends on
+ * that to populate DetectionResult.error.
+ */
 export async function initScanner(): Promise<void> {
   if (scanner) return;
   if (initPromise) return initPromise;
 
-  initPromise = (async () => {
-    scanner = new Scanner({ maxProcessingDimension: 800, output: "canvas" });
-    await scanner.initialize();
+  const p = (async () => {
+    const s = new Scanner({ maxProcessingDimension: 800, output: "canvas" });
+    await s.initialize();
+    scanner = s;
   })();
 
-  return initPromise;
+  initPromise = p;
+  try {
+    await p;
+  } catch (e) {
+    // Allow a retry: drop the failed promise so the next call starts over.
+    if (initPromise === p) initPromise = null;
+    throw e;
+  }
 }
 
 export function getScanner(): Scanner {
   if (!scanner) throw new Error("Scanner not initialized — call initScanner() first");
   return scanner;
-}
-
-function imageDataToCanvas(imageData: ImageData): HTMLCanvasElement {
-  const c = document.createElement("canvas");
-  c.width = imageData.width;
-  c.height = imageData.height;
-  c.getContext("2d")!.putImageData(imageData, 0, 0);
-  return c;
 }
 
 /** Detect document corners from a (downscaled) video frame. */

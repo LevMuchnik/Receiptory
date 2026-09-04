@@ -1,5 +1,7 @@
 import { getScanner, initScanner } from "@/lib/opencv-loader";
-import type { Detector, DetectionResult, Quad, Pt } from "./detector";
+import { imageDataToCanvas } from "./canvas-utils";
+import { convexHullArea, dist, interiorAngles, lerp, polygonArea } from "./geometry";
+import type { Detector, DetectionResult, Quad } from "./detector";
 
 export interface ClassicalParams {
   shadowNorm: boolean;
@@ -50,17 +52,54 @@ export class ClassicalDetector implements Detector {
     const canvas = imageDataToCanvas(preprocessed);
 
     let rawCorners: any = null;
+    let error: string | undefined;
     try {
       await initScanner();
       const r = await getScanner().scan(canvas, { mode: "detect" });
-      if (r.success && r.corners) rawCorners = r.corners;
-    } catch {
+      if (r.success && r.corners) {
+        rawCorners = r.corners;
+      } else if (!r.success) {
+        // scan() RESOLVED but reported failure. In detect mode Scanic has
+        // exactly ONE success:false path: detectDocumentContour found zero
+        // contours passing minArea, message "No document detected"
+        // (scanic.js:1059-1066, propagated at :1366-1376).
+        //
+        // That is an honest empty frame, NOT a detector failure. It fires
+        // constantly in normal use — every frame where the camera sees a bare
+        // table, every frame caught mid-motion. Setting `error` here would
+        // pin the error badge on permanently and destroy the only signal that
+        // is supposed to mean "the detector is broken", which is the entire
+        // reason the error channel exists.
+        //
+        // So: stay silent on Scanic's own default message. Surface only a
+        // message it does not normally emit, which would be genuinely
+        // unexpected and worth telling the user about.
+        if (r.message && r.message !== "No document detected") {
+          error = `Scanner: ${r.message}`;
+        }
+      } else {
+        // success:true with no corners is not a shape Scanic documents;
+        // treat it as a failure rather than a silent miss.
+        error = "Scanner returned no corners";
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
       rawCorners = null;
+      error = `Scanner error: ${message}`;
     }
 
     const quad = normalizeQuad(rawCorners);
     if (!quad) {
-      return { corners: null, score: 0, candidates: [], timingMs: performance.now() - start };
+      return {
+        corners: null,
+        score: 0,
+        candidates: [],
+        timingMs: performance.now() - start,
+        // Corners present but malformed is a failure too; a plain miss above
+        // has already set `error`, and a genuine "nothing found" cannot reach
+        // here without one.
+        error: error ?? (rawCorners ? "Scanner returned malformed corners" : undefined),
+      };
     }
 
     const metrics = computeMetrics(quad, image);
@@ -81,14 +120,6 @@ export class ClassicalDetector implements Detector {
       timingMs: performance.now() - start,
     };
   }
-}
-
-function imageDataToCanvas(image: ImageData): HTMLCanvasElement {
-  const c = document.createElement("canvas");
-  c.width = image.width;
-  c.height = image.height;
-  c.getContext("2d")!.putImageData(image, 0, 0);
-  return c;
 }
 
 function preprocess(image: ImageData, p: ClassicalParams): ImageData {
@@ -257,56 +288,6 @@ function passesHardRejects(m: Metrics, p: ClassicalParams): boolean {
   return true;
 }
 
-function polygonArea(pts: Pt[]): number {
-  let a = 0;
-  for (let i = 0; i < pts.length; i++) {
-    const j = (i + 1) % pts.length;
-    a += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
-  }
-  return Math.abs(a) / 2;
-}
-
-function convexHullArea(pts: Pt[]): number {
-  const sorted = [...pts].sort((a, b) => a.x - b.x || a.y - b.y);
-  const cross = (o: Pt, a: Pt, b: Pt) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-  const lower: Pt[] = [];
-  for (const p of sorted) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-    lower.push(p);
-  }
-  const upper: Pt[] = [];
-  for (let i = sorted.length - 1; i >= 0; i--) {
-    const p = sorted[i];
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-    upper.push(p);
-  }
-  return polygonArea([...lower.slice(0, -1), ...upper.slice(0, -1)]);
-}
-
-function dist(a: Pt, b: Pt): number {
-  return Math.hypot(a.x - b.x, a.y - b.y);
-}
-
-function interiorAngles(pts: Pt[]): number[] {
-  const out: number[] = [];
-  for (let i = 0; i < pts.length; i++) {
-    const prev = pts[(i + pts.length - 1) % pts.length];
-    const cur = pts[i];
-    const next = pts[(i + 1) % pts.length];
-    const v1 = { x: prev.x - cur.x, y: prev.y - cur.y };
-    const v2 = { x: next.x - cur.x, y: next.y - cur.y };
-    const dot = v1.x * v2.x + v1.y * v2.y;
-    const mag = Math.hypot(v1.x, v1.y) * Math.hypot(v2.x, v2.y);
-    if (mag === 0) {
-      out.push(0);
-      continue;
-    }
-    const cos = Math.max(-1, Math.min(1, dot / mag));
-    out.push((Math.acos(cos) * 180) / Math.PI);
-  }
-  return out;
-}
-
 function sampleInterior(quad: Quad, image: ImageData): { uniformity: number; textDensity: number } {
   const samples = sampleQuadGray(quad, image, 32, 32);
   if (samples.length === 0) return { uniformity: 0, textDensity: 0 };
@@ -347,8 +328,4 @@ function sampleQuadGray(quad: Quad, image: ImageData, gridU: number, gridV: numb
     }
   }
   return out;
-}
-
-function lerp(a: Pt, b: Pt, t: number): Pt {
-  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
 }

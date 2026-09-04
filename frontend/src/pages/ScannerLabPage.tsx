@@ -5,6 +5,7 @@ import { initScanner } from "@/lib/opencv-loader";
 import { ClassicalDetector, CLASSICAL_DEFAULTS, type ClassicalParams } from "@/lib/scanner/classical-detector";
 import { MLDetector, ML_DEFAULTS, type MLParams } from "@/lib/scanner/ml-detector";
 import type { Detector, DetectionResult, Quad } from "@/lib/scanner/detector";
+import { quadIoU, normalizeQuad } from "@/lib/scanner/geometry";
 
 interface LoadedFrame {
   frameId: number | null;
@@ -137,7 +138,7 @@ export default function ScannerLabPage() {
 
   const saveGroundTruth = useCallback(async () => {
     if (!loaded?.frameId || !groundTruth) return;
-    const normalized = normalizeQuadCoords(groundTruth, loaded.width, loaded.height);
+    const normalized = normalizeQuad(groundTruth, loaded.width, loaded.height);
     await api.patchScannerTestFrame(loaded.frameId, {
       ground_truth_json: JSON.stringify(normalized),
     });
@@ -719,15 +720,6 @@ function colorWithAlpha(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-function normalizeQuadCoords(quad: Quad, w: number, h: number): Quad {
-  return {
-    topLeft: { x: quad.topLeft.x / w, y: quad.topLeft.y / h },
-    topRight: { x: quad.topRight.x / w, y: quad.topRight.y / h },
-    bottomRight: { x: quad.bottomRight.x / w, y: quad.bottomRight.y / h },
-    bottomLeft: { x: quad.bottomLeft.x / w, y: quad.bottomLeft.y / h },
-  };
-}
-
 function denormalizeQuadIfNormalized(quad: Quad, w: number, h: number): Quad {
   const maxV = Math.max(
     quad.topLeft.x, quad.topLeft.y,
@@ -744,65 +736,9 @@ function denormalizeQuadIfNormalized(quad: Quad, w: number, h: number): Quad {
   };
 }
 
-function quadIoU(a: Quad, b: Quad): number {
-  const polyA = [a.topLeft, a.topRight, a.bottomRight, a.bottomLeft];
-  const polyB = [b.topLeft, b.topRight, b.bottomRight, b.bottomLeft];
-  const inter = polygonClip(polyA, polyB);
-  const interArea = polygonArea(inter);
-  const areaA = polygonArea(polyA);
-  const areaB = polygonArea(polyB);
-  const union = areaA + areaB - interArea;
-  return union > 0 ? interArea / union : 0;
-}
-
-interface Pt2 { x: number; y: number; }
-
-function polygonClip(subject: Pt2[], clip: Pt2[]): Pt2[] {
-  let output = subject.slice();
-  for (let i = 0; i < clip.length; i++) {
-    if (output.length === 0) break;
-    const input = output;
-    output = [];
-    const A = clip[i];
-    const B = clip[(i + 1) % clip.length];
-    for (let j = 0; j < input.length; j++) {
-      const P = input[j];
-      const Q = input[(j + 1) % input.length];
-      const Pin = isLeft(A, B, P) >= 0;
-      const Qin = isLeft(A, B, Q) >= 0;
-      if (Pin) {
-        output.push(P);
-        if (!Qin) output.push(intersect(P, Q, A, B));
-      } else if (Qin) {
-        output.push(intersect(P, Q, A, B));
-      }
-    }
-  }
-  return output;
-}
-
-function isLeft(A: Pt2, B: Pt2, P: Pt2): number {
-  return (B.x - A.x) * (P.y - A.y) - (B.y - A.y) * (P.x - A.x);
-}
-
-function intersect(P: Pt2, Q: Pt2, A: Pt2, B: Pt2): Pt2 {
-  const r = { x: Q.x - P.x, y: Q.y - P.y };
-  const s = { x: B.x - A.x, y: B.y - A.y };
-  const denom = r.x * s.y - r.y * s.x;
-  if (Math.abs(denom) < 1e-9) return P;
-  const t = ((A.x - P.x) * s.y - (A.y - P.y) * s.x) / denom;
-  return { x: P.x + t * r.x, y: P.y + t * r.y };
-}
-
-function polygonArea(pts: Pt2[]): number {
-  if (pts.length < 3) return 0;
-  let a = 0;
-  for (let i = 0; i < pts.length; i++) {
-    const j = (i + 1) % pts.length;
-    a += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
-  }
-  return Math.abs(a) / 2;
-}
+// quadIoU / polygonClip moved to lib/scanner/geometry.ts so the accuracy metric
+// that produces every "median IoU" number in the design docs is unit-testable.
+// Its winding sensitivity is documented and regression-tested there.
 
 function median(xs: number[]): number {
   if (xs.length === 0) return 0;

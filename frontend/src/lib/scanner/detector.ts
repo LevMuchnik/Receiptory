@@ -1,11 +1,55 @@
+/**
+ * Detector interface and the `Quad` type every coordinate space is expressed in.
+ *
+ * COORDINATE SPACES — four of them are in play, and confusing two is the bug
+ * this module's documentation exists to prevent. Mirrors the "Coordinate
+ * spaces" section of docs/designs/mobile-scanner-detection-and-capture.md.
+ *
+ *   DETECTION SPACE                    ~800px longest edge (was 432x768)
+ *     Detector.detect() operates here
+ *     ClassicalParams are tuned here
+ *     blur radius = width * 0.125, so cost scales with this
+ *         |
+ *         |  x (videoW / detW)          <- converted at the detector boundary
+ *         v
+ *   VIDEO SPACE                        1080x1920 (or 1920x1080)
+ *     onCapture(imageData, corners)    <- corners cross HERE, in video pixels
+ *     scanic.extract() consumes this
+ *     CaptureReview { raw, corners }
+ *         |
+ *         |  <svg preserveAspectRatio="xMidYMid slice">   viewfinder
+ *         |  <svg preserveAspectRatio="xMidYMid meet">    review
+ *         v
+ *   SCREEN SPACE                       CSS px
+ *     THE BROWSER OWNS THIS.
+ *     Never compute cover-scale by hand again. That was defect 1.
+ *
+ *   STORED SPACE                       1280px longest edge, JPEG q0.85
+ *     test-frame-upload.ts downscales on upload
+ *     ground_truth_json is normalized 0-1
+ *     corners_at_capture_json MUST be normalized 0-1 too
+ *     runEval() denormalizes against the LOADED image dims, not stored metadata
+ */
+
 export type Pt = { x: number; y: number };
 export type Quad = { topLeft: Pt; topRight: Pt; bottomRight: Pt; bottomLeft: Pt };
 
 export interface DetectionResult {
+  /** Detected quad in the same space as the ImageData passed to detect(), or null. */
   corners: Quad | null;
   score: number;
   candidates?: { quad: Quad; score: number }[];
   timingMs: number;
+  /**
+   * Set when the detector FAILED: it could not init, could not load, threw, or
+   * reported that it could not run to a conclusion.
+   *
+   * `corners: null` WITHOUT `error` means the detector ran fine and found no
+   * document ("nothing on the table"). These are different states and the
+   * viewfinder renders them differently — "Detector error: {msg}" versus
+   * "Position document". Never collapse one into the other.
+   */
+  error?: string;
 }
 
 export interface Detector {
