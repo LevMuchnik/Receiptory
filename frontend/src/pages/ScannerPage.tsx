@@ -10,6 +10,7 @@ import type { ScannerState } from "@/lib/useScanner";
 import type { ScannedPage } from "@/lib/pdf-builder";
 import { ClassicalDetector } from "@/lib/scanner/classical-detector";
 import { MLDetector } from "@/lib/scanner/ml-detector";
+import { DETECTION_MAX_EDGE } from "@/lib/scanner/detection-size";
 import type { Detector, Quad } from "@/lib/scanner/detector";
 import {
   canvasToJpegBlob,
@@ -37,9 +38,10 @@ interface ActiveConfig {
  * a 240px canvas blur over 2Mpx plus ~8Mpx of per-pixel JS loops, synchronously,
  * on the shutter tap. That is exactly the shutter-latency regression that killed
  * PR #8 (success criterion 6). At ~800px the fresh detect costs about the same
- * as one live-loop detection.
+ * as one live-loop detection — which is why this is not an independent number
+ * but an alias for the shared one. See `detection-size.ts`.
  */
-const REVIEW_DETECT_MAX_EDGE = 800;
+const REVIEW_DETECT_MAX_EDGE = DETECTION_MAX_EDGE;
 
 export default function ScannerPage() {
   const navigate = useNavigate();

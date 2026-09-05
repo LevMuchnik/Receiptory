@@ -4,19 +4,28 @@ import { useCamera } from "@/lib/useCamera";
 import { initScanner } from "@/lib/opencv-loader";
 import { ClassicalDetector, CLASSICAL_DEFAULTS, type ClassicalParams } from "@/lib/scanner/classical-detector";
 import { MLDetector, ML_DEFAULTS, type MLParams } from "@/lib/scanner/ml-detector";
-import type { Detector, DetectionResult, Quad } from "@/lib/scanner/detector";
-import { quadIoU, normalizeQuad, orderQuadByAngle } from "@/lib/scanner/geometry";
+import type { Detector, DetectionOutcome, DetectionResult, Quad } from "@/lib/scanner/detector";
+import { REJECT_OUTCOMES } from "@/lib/scanner/detector";
+import { quadIoU, normalizeQuad, orderQuadByAngle, scaleQuad } from "@/lib/scanner/geometry";
 import { downscaleImageData, imageDataToCanvas } from "@/lib/scanner/canvas-utils";
+import { DETECTION_MAX_EDGE } from "@/lib/scanner/detection-size";
 
 /**
  * The Lab preview deliberately does NOT take the scanner's 4K raise.
  *
  * Every frame the Lab captures is re-encoded to a 1280px long edge on upload
- * (see `imageDataToJpegBlob`), and every frame it evaluates is downscaled again
- * by the detector. A 4K stream here would buy nothing but a 33MB ImageData held
- * in `loaded` state on a phone that the design doc already flags for memory
- * pressure. The scanner, which keeps full resolution for the final extract,
- * gets the raise; the Lab does not.
+ * (see `imageDataToJpegBlob`). A 4K stream here would buy nothing but a 33MB
+ * ImageData held in `loaded` state on a phone that the design doc already flags
+ * for memory pressure. The scanner, which keeps full resolution for the final
+ * extract, gets the raise; the Lab does not.
+ *
+ * CORRECTION (2026-09-05): this comment used to also claim "every frame it
+ * evaluates is downscaled again by the detector". Nothing downscaled anything —
+ * `fetchImageData` sizes its canvas from `img.naturalWidth` and hands the
+ * detector the stored 1280px frame whole. So the Lab was measuring a resolution
+ * production never runs at, and any threshold tuned here did not transfer to the
+ * phone. `runDetect` and `runEval` now downscale to `DETECTION_MAX_EDGE`
+ * explicitly, and the eval report states the edge it used.
  *
  * The negotiated resolution is still surfaced under the viewfinder, so the
  * device's actual capability can be read off on-device without a debugger.
@@ -67,6 +76,23 @@ interface EvalReport {
   errors: number;
   /** Frames skipped because their stored ground truth would not parse. */
   unparsed: number;
+  /**
+   * The longest edge every frame was downscaled to before detection. Stamped on
+   * the report because the corpus stores 1280px frames while the detector is
+   * tuned for ~800: without this number an eval result cannot be compared
+   * against another one taken at a different edge, which is exactly how the
+   * pre-2026-09-05 numbers became uninterpretable.
+   */
+  detectionEdge: number;
+  /**
+   * The `corners: null` breakdown — the measurement this whole Lab pass exists
+   * for. `misses` is "the scanner looked and found nothing"; `rejects` is "the
+   * scanner found a quad and our own geometry gates threw it away", keyed by
+   * which gate fired. They call for opposite fixes and used to be
+   * indistinguishable.
+   */
+  misses: number;
+  rejects: Partial<Record<DetectionOutcome, number>>;
 }
 
 const PALETTE_A = "#006d37";
@@ -171,8 +197,7 @@ export default function ScannerLabPage() {
     if (!loaded || !scannerReady) return;
     const det = detectorFor(panel.kind);
     const params = panel.kind === "ml" ? panel.ml : panel.classical;
-    const result = await det.detect(loaded.imageData, params);
-    set({ ...panel, result });
+    set({ ...panel, result: await detectAtRuntimeSize(det, loaded.imageData, params) });
   }, [loaded, scannerReady, detectorFor]);
 
   const saveGroundTruth = useCallback(async () => {
@@ -208,6 +233,8 @@ export default function ScannerLabPage() {
     let hits = 0;
     let errors = 0;
     let unparsed = 0;
+    let misses = 0;
+    const rejects: Partial<Record<DetectionOutcome, number>> = {};
     for (const f of annotated) {
       let gt: Quad;
       try {
@@ -217,7 +244,7 @@ export default function ScannerLabPage() {
         continue;
       }
       const imageData = await fetchImageData(api.scannerTestFrameImageUrl(f.id));
-      const result = await det.detect(imageData, params);
+      const result = await detectAtRuntimeSize(det, imageData, params);
       if (result.error) {
         // The detector broke; it did not look at this frame and miss. Scoring
         // it 0 would corrupt the median with a number that says nothing about
@@ -226,6 +253,16 @@ export default function ScannerLabPage() {
         continue;
       }
       timings.push(result.timingMs);
+      // Tally WHY a frame produced nothing, before it is scored 0 below. A
+      // rejected quad and an empty frame both score 0 IoU, so the median alone
+      // can never tell a too-tight threshold from a blind scanner.
+      if (!result.corners) {
+        if (result.outcome && REJECT_OUTCOMES.includes(result.outcome)) {
+          rejects[result.outcome] = (rejects[result.outcome] ?? 0) + 1;
+        } else {
+          misses++;
+        }
+      }
       // Order BOTH quads before measuring. quadIoU's polygonClip defines
       // "inside" as isLeft >= 0, so a quad wound the other way yields an empty
       // intersection and IoU 0 -- which reads as "the detector missed", the
@@ -253,6 +290,9 @@ export default function ScannerLabPage() {
       medianTimingMs: median(timings),
       errors,
       unparsed,
+      detectionEdge: DETECTION_MAX_EDGE,
+      misses,
+      rejects,
     };
     set({ ...panel, evalReport: report });
   }, [frames, detectorFor]);
@@ -563,6 +603,33 @@ function DetectorPanel({
           <span>Hit rate: <strong>{(panel.evalReport.hitRate * 100).toFixed(0)}%</strong></span>
           <span>Median IoU: <strong>{panel.evalReport.medianIoU.toFixed(3)}</strong></span>
           <span>Median time: <strong>{panel.evalReport.medianTimingMs.toFixed(0)} ms</strong></span>
+          <span className="col-span-2 text-muted-foreground">
+            Detected at <strong>{panel.evalReport.detectionEdge}px</strong> long edge — only
+            comparable against other runs at the same edge.
+          </span>
+          {/*
+            The measurement this panel exists for: of the frames that produced
+            no corners, how many did the scanner never see a document in, versus
+            how many did it see one and our own gates discard. Tuning thresholds
+            can only ever fix the second.
+          */}
+          <span className="col-span-2">
+            No corners: <strong>{panel.evalReport.misses}</strong> scanner miss
+            {panel.evalReport.misses === 1 ? "" : "es"}
+            {", "}
+            <strong>{sumValues(panel.evalReport.rejects)}</strong> hard reject
+            {sumValues(panel.evalReport.rejects) === 1 ? "" : "s"}
+            {sumValues(panel.evalReport.rejects) > 0 && (
+              <span className="text-muted-foreground">
+                {" ("}
+                {Object.entries(panel.evalReport.rejects)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([k, v]) => `${k.replace("rejected-", "")} ${v}`)
+                  .join(", ")}
+                {")"}
+              </span>
+            )}
+          </span>
           {panel.evalReport.errors > 0 && (
             <span className="text-[#ba1a1a] font-bold">
               {panel.evalReport.errors} detector error{panel.evalReport.errors === 1 ? "" : "s"} (excluded -- this number is not a clean baseline)
@@ -601,6 +668,10 @@ function DetectorPanel({
       )}
     </div>
   );
+}
+
+function sumValues(counts: Partial<Record<string, number>>): number {
+  return Object.values(counts).reduce((a: number, b) => a + (b ?? 0), 0);
 }
 
 function Stat({ label, value }: { label: string; value: string }) {
@@ -775,6 +846,53 @@ function GroundTruthAnnotator({ frame, quad, onChange, onSave, canSave }: Annota
       </button>
     </div>
   );
+}
+
+/**
+ * Detect at the resolution the SCANNER runs at, not the one the corpus happens
+ * to be stored at.
+ *
+ * Corpus frames are stored at a 1280px long edge (`UPLOAD_LONG_EDGE`, matching
+ * `test-frame-upload.ts`). The detector is tuned for ~800. Until 2026-09-05 the
+ * Lab handed the stored frame over whole, so every IoU, every timing, and every
+ * threshold tuned against them belonged to a resolution production never runs at
+ * — and nothing said so.
+ *
+ * Corners come back in downscaled space and are scaled back to the source
+ * frame's space here, so every caller keeps working in one space: the loaded
+ * image's. `downscaleImageData` returns the ratio it actually applied and it is
+ * the only ratio used — recomputing it is how coordinate bugs are born.
+ *
+ * Note `scale` is 1 for any frame already within the target, in which case this
+ * is a pass-through with no copy.
+ */
+async function detectAtRuntimeSize(
+  det: Detector,
+  image: ImageData,
+  params: unknown,
+): Promise<DetectionResult> {
+  const { data, scale } = downscaleImageData(image, DETECTION_MAX_EDGE);
+  const result = await det.detect(data, params);
+  if (scale === 1) return result;
+  const k = 1 / scale;
+  const corners = result.corners ? scaleQuad(result.corners, k) : null;
+  return {
+    ...result,
+    corners,
+    // `candidates` carries the REJECTED quad, which is the whole point of the
+    // reject breakdown. Leaving it in downscaled space would put a landmine
+    // under the first caller that draws it.
+    //
+    // The identity reuse is load-bearing, not a micro-optimisation: the Lab
+    // overlay skips the candidate that IS the accepted quad by reference
+    // (`c.quad === result.corners`), so scaling them into two separate objects
+    // would draw the accepted quad twice, once faint and once solid. A rejected
+    // quad has `corners: null`, so it correctly stays a lone faint outline —
+    // which is how a near-miss is meant to look.
+    candidates: result.candidates?.map((c) =>
+      c.quad === result.corners && corners ? { ...c, quad: corners } : { ...c, quad: scaleQuad(c.quad, k) },
+    ),
+  };
 }
 
 async function fetchImageData(url: string): Promise<ImageData> {

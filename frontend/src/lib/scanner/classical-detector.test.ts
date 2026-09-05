@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { classifyScanResult, scanThrowMessage, toQuad } from "./classical-detector";
+import {
+  CLASSICAL_DEFAULTS,
+  classifyScanResult,
+  firstHardReject,
+  scanThrowMessage,
+  toQuad,
+  type Metrics,
+} from "./classical-detector";
 
 /**
  * The silent-failure suite.
@@ -111,5 +118,72 @@ describe("toQuad — the NaN guard", () => {
   it("returns null for null/undefined input", () => {
     expect(toQuad(null)).toBeNull();
     expect(toQuad(undefined)).toBeNull();
+  });
+});
+
+/**
+ * The hard rejects — the gates that turn "scanic found a quad" into
+ * `corners: null` with no error, which the viewfinder renders identically to an
+ * empty table. Zero coverage existed before 2026-09-05, on the branch that
+ * changed them.
+ *
+ * `firstHardReject` takes `Metrics`, not `ImageData`, so it is pure and needs no
+ * DOM — the whole reason it was extracted.
+ */
+describe("firstHardReject — which gate threw the quad away", () => {
+  /** A quad that passes everything, so each test can spoil exactly one field. */
+  const passing: Metrics = {
+    area: 100_000,
+    areaFraction: 0.4,
+    convexity: 1,
+    aspect: 2,
+    minAngle: 85,
+    maxAngle: 95,
+    uniformity: 0.9,
+    textDensity: 0.1,
+    score: () => 0.8,
+  };
+  const p = CLASSICAL_DEFAULTS;
+
+  it("accepts a well-formed quad", () => {
+    expect(firstHardReject(passing, p)).toBeNull();
+  });
+
+  it("rejects a quad that is too small, and too large", () => {
+    expect(firstHardReject({ ...passing, areaFraction: 0.05 }, p)).toBe("rejected-area");
+    expect(firstHardReject({ ...passing, areaFraction: 0.99 }, p)).toBe("rejected-area");
+  });
+
+  it("rejects a quad longer than maxAspect", () => {
+    expect(firstHardReject({ ...passing, aspect: 20 }, p)).toBe("rejected-aspect");
+  });
+
+  // The reason minAspect is NOT dead code. computeMetrics falls back to
+  // `aspect = 0` when either mean side length is zero, and 0 < minAspect (0.4)
+  // fires. A 2026-09-05 review called this bound unreachable and was wrong;
+  // this test is what stops the next reader deleting it.
+  it("rejects a DEGENERATE quad, whose aspect is 0 rather than >= 1", () => {
+    expect(firstHardReject({ ...passing, aspect: 0 }, p)).toBe("rejected-aspect");
+  });
+
+  it("rejects corners outside the angle band, at both ends", () => {
+    expect(firstHardReject({ ...passing, minAngle: 30 }, p)).toBe("rejected-angle");
+    expect(firstHardReject({ ...passing, maxAngle: 150 }, p)).toBe("rejected-angle");
+  });
+
+  it("rejects a non-convex quad — the curled-receipt shape", () => {
+    expect(firstHardReject({ ...passing, convexity: 0.5 }, p)).toBe("rejected-convexity");
+  });
+
+  it("reports the FIRST failure, not all of them", () => {
+    const doomed = { ...passing, areaFraction: 0.01, aspect: 99, convexity: 0 };
+    expect(firstHardReject(doomed, p)).toBe("rejected-area");
+  });
+
+  it("treats each bound as inclusive at the threshold itself", () => {
+    expect(firstHardReject({ ...passing, areaFraction: p.minAreaFraction }, p)).toBeNull();
+    expect(firstHardReject({ ...passing, aspect: p.maxAspect }, p)).toBeNull();
+    expect(firstHardReject({ ...passing, minAngle: p.minAngleDeg }, p)).toBeNull();
+    expect(firstHardReject({ ...passing, maxAngle: p.maxAngleDeg }, p)).toBeNull();
   });
 });

@@ -115,6 +115,10 @@ export class MLDetector implements Detector {
       score,
       candidates: [{ quad: corners, score }],
       timingMs: performance.now() - start,
+      // A below-threshold score is this detector's only "found something, threw
+      // it away" path — the ML analogue of a classical hard reject, and the
+      // reason the Lab's breakdown can compare the two detectors at all.
+      outcome: accepted ? "accepted" : "rejected-score",
     };
   }
 

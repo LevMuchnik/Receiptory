@@ -7,7 +7,12 @@
  *
  * Not unit-tested on purpose: `ImageData` and `drawImage` do not exist in Node,
  * and these are thin, branchless wrappers around the browser's own scaling.
+ * Anything here with real arithmetic in it belongs in a DOM-free module that
+ * CAN be tested — `downscaleImageData` delegates its sizing to
+ * `detection-size.ts` for exactly that reason.
  */
+
+import { detectionSizeFor } from "./detection-size";
 
 /** Wrap an ImageData in a canvas of the same dimensions. */
 export function imageDataToCanvas(image: ImageData): HTMLCanvasElement {
@@ -39,16 +44,14 @@ export function downscaleImageData(
   image: ImageData,
   maxEdge: number,
 ): { data: ImageData; scale: number } {
-  const longest = Math.max(image.width, image.height);
-  if (!(maxEdge > 0) || longest <= maxEdge) return { data: image, scale: 1 };
-
-  // One uniform ratio for both axes. The per-axis ratios (w/image.width,
-  // h/image.height) differ from it by at most half a pixel of rounding; using
-  // the uniform ratio keeps the mapping isotropic, which is what the aspect
-  // preservation promises.
-  const scale = maxEdge / longest;
-  const w = Math.max(1, Math.round(image.width * scale));
-  const h = Math.max(1, Math.round(image.height * scale));
+  // The size decision — including the no-upscale clamp that gives `scale === 1`
+  // its meaning — lives in `detection-size.ts` and is unit-tested there. This
+  // function owns only the canvas work. Keeping the arithmetic in one place is
+  // the point: the live viewfinder loop sizes its frame from the same helper,
+  // and two copies of "how big should the detection frame be" is exactly the
+  // duplication that let the 4K raise silently quadruple it.
+  const { w, h, scale } = detectionSizeFor(image.width, image.height, maxEdge);
+  if (scale === 1) return { data: image, scale: 1 };
 
   const src = imageDataToCanvas(image);
   const out = document.createElement("canvas");

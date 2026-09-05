@@ -1,7 +1,13 @@
 import { getScanner, initScanner } from "@/lib/opencv-loader";
 import { imageDataToCanvas } from "./canvas-utils";
 import { convexHullArea, dist, interiorAngles, lerp, polygonArea } from "./geometry";
-import type { Detector, DetectionResult, Quad } from "./detector";
+import type { Detector, DetectionOutcome, DetectionResult, Quad } from "./detector";
+
+/** The subset of DetectionOutcome that `firstHardReject` can return. */
+export type HardReject = Extract<
+  DetectionOutcome,
+  "rejected-area" | "rejected-aspect" | "rejected-angle" | "rejected-convexity"
+>;
 
 export interface ClassicalParams {
   shadowNorm: boolean;
@@ -71,25 +77,22 @@ export class ClassicalDetector implements Detector {
         // has already set `error`, and a genuine "nothing found" cannot reach
         // here without one.
         error: error ?? (rawCorners ? "Scanner returned malformed corners" : undefined),
+        outcome: error ? "error" : rawCorners ? "malformed-corners" : "no-contour",
       };
     }
 
     const metrics = computeMetrics(quad, image);
-    if (!passesHardRejects(metrics, p)) {
-      return {
-        corners: null,
-        score: metrics.score(p),
-        candidates: [{ quad, score: metrics.score(p) }],
-        timingMs: performance.now() - start,
-      };
-    }
-
     const score = metrics.score(p);
+    const reject = firstHardReject(metrics, p);
+    // A rejected quad still travels in `candidates`. It is the only evidence
+    // that scanic DID find something here, and the Lab needs it to tell a
+    // too-tight threshold apart from a scene the scanner is blind on.
     return {
-      corners: quad,
+      corners: reject ? null : quad,
       score,
       candidates: [{ quad, score }],
       timingMs: performance.now() - start,
+      outcome: reject ?? "accepted",
     };
   }
 }
@@ -248,7 +251,8 @@ export function toQuad(raw: any): Quad | null {
   return { topLeft: tl, topRight: tr, bottomRight: br, bottomLeft: bl };
 }
 
-interface Metrics {
+/** Exported so `firstHardReject` can be unit-tested against synthetic metrics. */
+export interface Metrics {
   area: number;
   areaFraction: number;
   convexity: number;
@@ -305,12 +309,34 @@ function computeMetrics(quad: Quad, image: ImageData): Metrics {
   };
 }
 
-function passesHardRejects(m: Metrics, p: ClassicalParams): boolean {
-  if (m.areaFraction < p.minAreaFraction || m.areaFraction > p.maxAreaFraction) return false;
-  if (m.aspect < p.minAspect || m.aspect > p.maxAspect) return false;
-  if (m.minAngle < p.minAngleDeg || m.maxAngle > p.maxAngleDeg) return false;
-  if (m.convexity < 0.85) return false;
-  return true;
+/** Convexity floor. Still hardcoded; promoting it to a param is T10. */
+const MIN_CONVEXITY = 0.85;
+
+/**
+ * The first hard reject a quad trips, or null if it survives all of them.
+ *
+ * Returns WHICH gate fired rather than a bare boolean, because "we found a quad
+ * and threw it away" and "we found nothing" are the two hypotheses the Lab has
+ * to tell apart, and a boolean collapses them into the same `corners: null`.
+ * Order is deliberate and load-bearing for the degenerate case below: it reports
+ * the first failure, not all of them.
+ *
+ * Exported for tests. It is pure — it takes `Metrics`, not `ImageData` — so it
+ * runs in the node-env vitest suite with no DOM.
+ *
+ * ON `minAspect`: this reads like dead code and is not. `computeMetrics` sets
+ * `aspect = max/min`, which is >= 1 for any real quad, so a 0.4 floor looks
+ * unreachable. But the ternary at its definition falls back to `0` when either
+ * mean side length is zero, so a DEGENERATE quad scores 0 and this bound is what
+ * catches it. (`minAreaFraction` would catch it too, one line earlier — the
+ * redundancy is cheap and it stops the guard order becoming load-bearing.)
+ */
+export function firstHardReject(m: Metrics, p: ClassicalParams): HardReject | null {
+  if (m.areaFraction < p.minAreaFraction || m.areaFraction > p.maxAreaFraction) return "rejected-area";
+  if (m.aspect < p.minAspect || m.aspect > p.maxAspect) return "rejected-aspect";
+  if (m.minAngle < p.minAngleDeg || m.maxAngle > p.maxAngleDeg) return "rejected-angle";
+  if (m.convexity < MIN_CONVEXITY) return "rejected-convexity";
+  return null;
 }
 
 function sampleInterior(quad: Quad, image: ImageData): { uniformity: number; textDensity: number } {

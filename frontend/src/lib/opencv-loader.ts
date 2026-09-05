@@ -25,6 +25,12 @@ export async function initScanner(): Promise<void> {
   if (initPromise) return initPromise;
 
   const p = (async () => {
+    // Kept EQUAL to DETECTION_MAX_EDGE (detection-size.ts), deliberately not
+    // imported from it. Scanic downsamples anything larger to this before it
+    // looks for a contour (prepareScaleAndGrayscale), so matching the two means
+    // scanic does not resample a frame we already sized. But this bound belongs
+    // to scanic: a scanic upgrade that changes its own default should not be
+    // silently overridden by ours. If you change one, look at the other.
     const s = new Scanner({ maxProcessingDimension: 800, output: "canvas" });
     await s.initialize();
     scanner = s;
