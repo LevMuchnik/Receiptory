@@ -8,8 +8,10 @@ import {
   orderQuadByAngle,
   quadAreaFraction,
   clampPtToFrame,
+  quadsEqual,
+  scaleDetectionResult,
 } from "./geometry";
-import type { Pt, Quad } from "./detector";
+import type { DetectionResult, Pt, Quad } from "./detector";
 
 const quadPts = (q: Quad): Pt[] => [q.topLeft, q.topRight, q.bottomRight, q.bottomLeft];
 
@@ -214,5 +216,116 @@ describe("clampPtToFrame", () => {
 
   it("keeps points exactly on the boundary", () => {
     expect(clampPtToFrame({ x: 0, y: 200 }, 100, 200)).toEqual({ x: 0, y: 200 });
+  });
+});
+
+const mkQuad = (x = 0, y = 0): Quad => ({
+  topLeft: { x, y },
+  topRight: { x: x + 100, y },
+  bottomRight: { x: x + 100, y: y + 200 },
+  bottomLeft: { x, y: y + 200 },
+});
+
+describe("quadsEqual — the replacement for object identity", () => {
+  it("matches two structurally identical but distinct objects", () => {
+    const a = mkQuad();
+    const b = mkQuad();
+    expect(a).not.toBe(b); // distinct objects, the whole point
+    expect(quadsEqual(a, b)).toBe(true);
+  });
+
+  it("matches a quad against itself", () => {
+    const a = mkQuad();
+    expect(quadsEqual(a, a)).toBe(true);
+  });
+
+  it("rejects a quad with any single corner moved", () => {
+    const a = mkQuad();
+    for (const k of ["topLeft", "topRight", "bottomRight", "bottomLeft"] as const) {
+      const b = { ...mkQuad(), [k]: { x: 999, y: 999 } };
+      expect(quadsEqual(a, b)).toBe(false);
+    }
+  });
+
+  it("tolerates float drift from a scale-and-back round trip", () => {
+    const a = mkQuad();
+    const roundTripped = scaleQuadTwice(a, 1 / 3);
+    expect(quadsEqual(a, roundTripped)).toBe(true);
+  });
+
+  it("rejects a difference larger than epsilon", () => {
+    const a = mkQuad();
+    const b = { ...mkQuad(), topLeft: { x: 0.01, y: 0 } };
+    expect(quadsEqual(a, b)).toBe(false);
+    expect(quadsEqual(a, b, 0.1)).toBe(true);
+  });
+});
+
+/** Scale down then back up, so float error is real but tiny. */
+function scaleQuadTwice(q: Quad, k: number): Quad {
+  const down = {
+    topLeft: { x: q.topLeft.x * k, y: q.topLeft.y * k },
+    topRight: { x: q.topRight.x * k, y: q.topRight.y * k },
+    bottomRight: { x: q.bottomRight.x * k, y: q.bottomRight.y * k },
+    bottomLeft: { x: q.bottomLeft.x * k, y: q.bottomLeft.y * k },
+  };
+  return {
+    topLeft: { x: down.topLeft.x / k, y: down.topLeft.y / k },
+    topRight: { x: down.topRight.x / k, y: down.topRight.y / k },
+    bottomRight: { x: down.bottomRight.x / k, y: down.bottomRight.y / k },
+    bottomLeft: { x: down.bottomLeft.x / k, y: down.bottomLeft.y / k },
+  };
+}
+
+describe("scaleDetectionResult", () => {
+  const base = (over: Partial<DetectionResult> = {}): DetectionResult => ({
+    corners: mkQuad(),
+    score: 0.7,
+    candidates: [{ quad: mkQuad(), score: 0.7 }],
+    timingMs: 12,
+    outcome: "accepted",
+    ...over,
+  });
+
+  it("is a no-op at k === 1, returning the same object", () => {
+    const r = base();
+    expect(scaleDetectionResult(r, 1)).toBe(r);
+  });
+
+  it("scales corners and candidates by the same factor", () => {
+    const out = scaleDetectionResult(base(), 2);
+    expect(out.corners!.bottomRight).toEqual({ x: 200, y: 400 });
+    expect(out.candidates![0].quad.bottomRight).toEqual({ x: 200, y: 400 });
+  });
+
+  // A rejected result: corners null, but the candidate still carries the quad
+  // scanic found. Leaving it in detector space would misplace the near-miss
+  // outline the Lab draws from it.
+  it("scales the candidate of a REJECTED result, leaving corners null", () => {
+    const out = scaleDetectionResult(base({ corners: null, outcome: "rejected-convexity" }), 2);
+    expect(out.corners).toBeNull();
+    expect(out.candidates![0].quad.bottomRight).toEqual({ x: 200, y: 400 });
+    expect(out.outcome).toBe("rejected-convexity");
+  });
+
+  it("survives an absent candidates array", () => {
+    const out = scaleDetectionResult(base({ candidates: undefined }), 2);
+    expect(out.candidates).toBeUndefined();
+    expect(out.corners!.bottomRight).toEqual({ x: 200, y: 400 });
+  });
+
+  it("passes score, timingMs, outcome and error through untouched", () => {
+    const out = scaleDetectionResult(base({ error: "boom", outcome: "error" }), 2);
+    expect(out.score).toBe(0.7);
+    expect(out.timingMs).toBe(12);
+    expect(out.outcome).toBe("error");
+    expect(out.error).toBe("boom");
+  });
+
+  it("does not mutate its input", () => {
+    const r = base();
+    scaleDetectionResult(r, 2);
+    expect(r.corners!.bottomRight).toEqual({ x: 100, y: 200 });
+    expect(r.candidates![0].quad.bottomRight).toEqual({ x: 100, y: 200 });
   });
 });

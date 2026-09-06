@@ -1,7 +1,15 @@
 import { getScanner, initScanner } from "@/lib/opencv-loader";
 import { imageDataToCanvas } from "./canvas-utils";
 import { convexHullArea, dist, interiorAngles, lerp, polygonArea } from "./geometry";
-import type { Detector, DetectionResult, Quad } from "./detector";
+import type { Detector, DetectionOutcome, DetectionResult, Quad, RejectOutcome } from "./detector";
+
+/**
+ * What `firstHardReject` can return: every reject except `rejected-score`,
+ * which only the ML detector's score threshold produces. Derived from
+ * `RejectOutcome` rather than re-listing the members, so a new reject added to
+ * the union lands here automatically.
+ */
+export type HardReject = Exclude<RejectOutcome, "rejected-score">;
 
 export interface ClassicalParams {
   shadowNorm: boolean;
@@ -67,29 +75,27 @@ export class ClassicalDetector implements Detector {
         score: 0,
         candidates: [],
         timingMs: performance.now() - start,
-        // Corners present but malformed is a failure too; a plain miss above
-        // has already set `error`, and a genuine "nothing found" cannot reach
-        // here without one.
+        // Corners present but malformed is a failure too. A genuine "nothing
+        // found" DOES reach here without an error — `classifyScanResult` stays
+        // deliberately silent on scanic's default empty-frame message — and
+        // that is exactly the `no-contour` outcome below.
         error: error ?? (rawCorners ? "Scanner returned malformed corners" : undefined),
+        outcome: outcomeForNoQuad(classified),
       };
     }
 
     const metrics = computeMetrics(quad, image);
-    if (!passesHardRejects(metrics, p)) {
-      return {
-        corners: null,
-        score: metrics.score(p),
-        candidates: [{ quad, score: metrics.score(p) }],
-        timingMs: performance.now() - start,
-      };
-    }
-
     const score = metrics.score(p);
+    const reject = firstHardReject(metrics, p);
+    // A rejected quad still travels in `candidates`. It is the only evidence
+    // that scanic DID find something here, and the Lab needs it to tell a
+    // too-tight threshold apart from a scene the scanner is blind on.
     return {
-      corners: quad,
+      corners: reject ? null : quad,
       score,
       candidates: [{ quad, score }],
       timingMs: performance.now() - start,
+      outcome: reject ?? "accepted",
     };
   }
 }
@@ -226,6 +232,36 @@ export function classifyScanResult(r: {
   return { rawCorners: null, error: "Scanner returned no corners" };
 }
 
+/** The outcomes reachable when no usable quad came back. */
+export type NoQuadOutcome = Extract<
+  DetectionOutcome,
+  "error" | "malformed-corners" | "no-contour"
+>;
+
+/**
+ * Why did this scan produce no usable quad?
+ *
+ * Three different states that the viewfinder renders identically, so the only
+ * way to tell them apart downstream is to name them here:
+ *
+ *   error             the detector broke -- it never looked at this frame
+ *   malformed-corners it returned corners, but they were unusable (NaN, missing)
+ *   no-contour        it looked and honestly found nothing. A bare table.
+ *
+ * Extracted from `detect()` for the same reason `classifyScanResult` and
+ * `toQuad` were: `detect()` needs a canvas, this decision does not, so keeping
+ * it here makes it reachable from the node-env test suite.
+ *
+ * Note `malformed-corners` also carries an `error` string on the result, since
+ * malformed output IS a detector failure from the caller's point of view. The
+ * distinction is kept because "returned garbage" and "could not run" point at
+ * different bugs.
+ */
+export function outcomeForNoQuad(c: ScanClassification): NoQuadOutcome {
+  if (c.error) return "error";
+  return c.rawCorners ? "malformed-corners" : "no-contour";
+}
+
 /** Message for a scan() that threw rather than resolved. Always a failure. */
 export function scanThrowMessage(e: unknown): string {
   return `Scanner error: ${e instanceof Error ? e.message : String(e)}`;
@@ -248,7 +284,8 @@ export function toQuad(raw: any): Quad | null {
   return { topLeft: tl, topRight: tr, bottomRight: br, bottomLeft: bl };
 }
 
-interface Metrics {
+/** Exported so `firstHardReject` can be unit-tested against synthetic metrics. */
+export interface Metrics {
   area: number;
   areaFraction: number;
   convexity: number;
@@ -305,12 +342,44 @@ function computeMetrics(quad: Quad, image: ImageData): Metrics {
   };
 }
 
-function passesHardRejects(m: Metrics, p: ClassicalParams): boolean {
-  if (m.areaFraction < p.minAreaFraction || m.areaFraction > p.maxAreaFraction) return false;
-  if (m.aspect < p.minAspect || m.aspect > p.maxAspect) return false;
-  if (m.minAngle < p.minAngleDeg || m.maxAngle > p.maxAngleDeg) return false;
-  if (m.convexity < 0.85) return false;
-  return true;
+/** Convexity floor. Still hardcoded; promoting it to a param is T10. */
+const MIN_CONVEXITY = 0.85;
+
+/**
+ * The first hard reject a quad trips, or null if it survives all of them.
+ *
+ * Returns WHICH gate fired rather than a bare boolean, because "we found a quad
+ * and threw it away" and "we found nothing" are the two hypotheses the Lab has
+ * to tell apart, and a boolean collapses them into the same `corners: null`.
+ * Order is deliberate and load-bearing for the degenerate case below: it reports
+ * the first failure, not all of them.
+ *
+ * Exported for tests. It is pure — it takes `Metrics`, not `ImageData` — so it
+ * runs in the node-env vitest suite with no DOM.
+ *
+ * ON `minAspect`: this reads like dead code and is not. `computeMetrics` sets
+ * `aspect = max/min`, which is >= 1 for any real quad, so a 0.4 floor looks
+ * unreachable. But the ternary at its definition falls back to `0` when either
+ * mean side length is zero, so a DEGENERATE quad scores 0 and this bound is what
+ * catches it. (`minAreaFraction` would catch it too, one line earlier — the
+ * redundancy is cheap and it stops the guard order becoming load-bearing.)
+ */
+export function firstHardReject(m: Metrics, p: ClassicalParams): HardReject | null {
+  // NaN first, for the reason `toQuad` spells out: every check below is `x < t`
+  // or `x > t`, and ALL NaN comparisons are false, so a NaN metric would sail
+  // through all four and be reported as accepted. `toQuad` blocks NaN corner
+  // coordinates, but `areaFraction = area / max(imageArea, 1)` is NaN for a
+  // NaN-dimensioned ImageData, which is a different way in.
+  if (!Number.isFinite(m.areaFraction)) return "rejected-area";
+  if (!Number.isFinite(m.aspect)) return "rejected-aspect";
+  if (!Number.isFinite(m.minAngle) || !Number.isFinite(m.maxAngle)) return "rejected-angle";
+  if (!Number.isFinite(m.convexity)) return "rejected-convexity";
+
+  if (m.areaFraction < p.minAreaFraction || m.areaFraction > p.maxAreaFraction) return "rejected-area";
+  if (m.aspect < p.minAspect || m.aspect > p.maxAspect) return "rejected-aspect";
+  if (m.minAngle < p.minAngleDeg || m.maxAngle > p.maxAngleDeg) return "rejected-angle";
+  if (m.convexity < MIN_CONVEXITY) return "rejected-convexity";
+  return null;
 }
 
 function sampleInterior(quad: Quad, image: ImageData): { uniformity: number; textDensity: number } {

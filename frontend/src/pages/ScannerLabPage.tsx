@@ -4,19 +4,29 @@ import { useCamera } from "@/lib/useCamera";
 import { initScanner } from "@/lib/opencv-loader";
 import { ClassicalDetector, CLASSICAL_DEFAULTS, type ClassicalParams } from "@/lib/scanner/classical-detector";
 import { MLDetector, ML_DEFAULTS, type MLParams } from "@/lib/scanner/ml-detector";
-import type { Detector, DetectionResult, Quad } from "@/lib/scanner/detector";
-import { quadIoU, normalizeQuad, orderQuadByAngle } from "@/lib/scanner/geometry";
+import type { Detector, DetectionOutcome, DetectionResult, Quad } from "@/lib/scanner/detector";
+import { isRejectOutcome } from "@/lib/scanner/detector";
+import { quadIoU, normalizeQuad, orderQuadByAngle, quadsEqual, scaleDetectionResult } from "@/lib/scanner/geometry";
 import { downscaleImageData, imageDataToCanvas } from "@/lib/scanner/canvas-utils";
+import { DETECTION_MAX_EDGE } from "@/lib/scanner/detection-size";
+import { LONG_EDGE } from "@/lib/scanner/test-frame-upload";
 
 /**
  * The Lab preview deliberately does NOT take the scanner's 4K raise.
  *
  * Every frame the Lab captures is re-encoded to a 1280px long edge on upload
- * (see `imageDataToJpegBlob`), and every frame it evaluates is downscaled again
- * by the detector. A 4K stream here would buy nothing but a 33MB ImageData held
- * in `loaded` state on a phone that the design doc already flags for memory
- * pressure. The scanner, which keeps full resolution for the final extract,
- * gets the raise; the Lab does not.
+ * (see `imageDataToJpegBlob`). A 4K stream here would buy nothing but a 33MB
+ * ImageData held in `loaded` state on a phone that the design doc already flags
+ * for memory pressure. The scanner, which keeps full resolution for the final
+ * extract, gets the raise; the Lab does not.
+ *
+ * CORRECTION (2026-09-05): this comment used to also claim "every frame it
+ * evaluates is downscaled again by the detector". Nothing downscaled anything —
+ * `fetchImageData` sizes its canvas from `img.naturalWidth` and hands the
+ * detector the stored 1280px frame whole. So the Lab was measuring a resolution
+ * production never runs at, and any threshold tuned here did not transfer to the
+ * phone. `runDetect` and `runEval` now downscale to `DETECTION_MAX_EDGE`
+ * explicitly, and the eval report states the edge it used.
  *
  * The negotiated resolution is still surfaced under the viewfinder, so the
  * device's actual capability can be read off on-device without a debugger.
@@ -25,12 +35,13 @@ const LAB_PREVIEW_WIDTH = 1920;
 const LAB_PREVIEW_HEIGHT = 1080;
 
 /**
- * Match `test-frame-upload.ts` — the corpus stores 1280px-long-edge JPEGs at
- * q0.85. Lab captures used to upload at full resolution and q0.9, which is both
- * a multi-megabyte upload (worse at 4K) and a corpus that mixes resolutions the
- * eval then can't compare across.
+ * Imported from `test-frame-upload.ts` rather than restated: both paths write
+ * into the same corpus, and two numbers coupled only by a comment is how a
+ * corpus ends up mixing resolutions the eval cannot compare across. Lab captures
+ * used to upload at full resolution and q0.9, which was also a multi-megabyte
+ * upload at 4K.
  */
-const UPLOAD_LONG_EDGE = 1280;
+const UPLOAD_LONG_EDGE = LONG_EDGE;
 const UPLOAD_JPEG_QUALITY = 0.85;
 
 interface LoadedFrame {
@@ -67,6 +78,23 @@ interface EvalReport {
   errors: number;
   /** Frames skipped because their stored ground truth would not parse. */
   unparsed: number;
+  /**
+   * The longest edge every frame was downscaled to before detection. Stamped on
+   * the report because the corpus stores 1280px frames while the detector is
+   * tuned for ~800: without this number an eval result cannot be compared
+   * against another one taken at a different edge, which is exactly how the
+   * pre-2026-09-05 numbers became uninterpretable.
+   */
+  detectionEdge: number;
+  /**
+   * The `corners: null` breakdown — the measurement this whole Lab pass exists
+   * for. `misses` is "the scanner looked and found nothing"; `rejects` is "the
+   * scanner found a quad and our own geometry gates threw it away", keyed by
+   * which gate fired. They call for opposite fixes and used to be
+   * indistinguishable.
+   */
+  misses: number;
+  rejects: Partial<Record<DetectionOutcome, number>>;
 }
 
 const PALETTE_A = "#006d37";
@@ -171,8 +199,7 @@ export default function ScannerLabPage() {
     if (!loaded || !scannerReady) return;
     const det = detectorFor(panel.kind);
     const params = panel.kind === "ml" ? panel.ml : panel.classical;
-    const result = await det.detect(loaded.imageData, params);
-    set({ ...panel, result });
+    set({ ...panel, result: await detectAtRuntimeSize(det, loaded.imageData, params) });
   }, [loaded, scannerReady, detectorFor]);
 
   const saveGroundTruth = useCallback(async () => {
@@ -208,6 +235,8 @@ export default function ScannerLabPage() {
     let hits = 0;
     let errors = 0;
     let unparsed = 0;
+    let misses = 0;
+    const rejects: Partial<Record<DetectionOutcome, number>> = {};
     for (const f of annotated) {
       let gt: Quad;
       try {
@@ -217,7 +246,7 @@ export default function ScannerLabPage() {
         continue;
       }
       const imageData = await fetchImageData(api.scannerTestFrameImageUrl(f.id));
-      const result = await det.detect(imageData, params);
+      const result = await detectAtRuntimeSize(det, imageData, params);
       if (result.error) {
         // The detector broke; it did not look at this frame and miss. Scoring
         // it 0 would corrupt the median with a number that says nothing about
@@ -226,6 +255,16 @@ export default function ScannerLabPage() {
         continue;
       }
       timings.push(result.timingMs);
+      // Tally WHY a frame produced nothing, before it is scored 0 below. A
+      // rejected quad and an empty frame both score 0 IoU, so the median alone
+      // can never tell a too-tight threshold from a blind scanner.
+      if (!result.corners) {
+        if (isRejectOutcome(result.outcome)) {
+          rejects[result.outcome] = (rejects[result.outcome] ?? 0) + 1;
+        } else {
+          misses++;
+        }
+      }
       // Order BOTH quads before measuring. quadIoU's polygonClip defines
       // "inside" as isLeft >= 0, so a quad wound the other way yields an empty
       // intersection and IoU 0 -- which reads as "the detector missed", the
@@ -253,6 +292,9 @@ export default function ScannerLabPage() {
       medianTimingMs: median(timings),
       errors,
       unparsed,
+      detectionEdge: DETECTION_MAX_EDGE,
+      misses,
+      rejects,
     };
     set({ ...panel, evalReport: report });
   }, [frames, detectorFor]);
@@ -495,7 +537,11 @@ function DetectorPanel({
     const result = panel.result;
     if (result?.candidates) {
       for (const c of result.candidates) {
-        if (c.quad === result.corners) continue;
+        // Compare by VALUE, not by object identity. The accepted quad is drawn
+        // solid below; without this it would also draw here as a faint
+        // candidate underneath itself. Identity used to answer this, and broke
+        // silently the first time a transform mapped over the result.
+        if (result.corners && quadsEqual(c.quad, result.corners)) continue;
         drawQuad(ctx, c.quad, sx, sy, color, 1, false, 0.3);
       }
     }
@@ -557,12 +603,41 @@ function DetectorPanel({
         </div>
       )}
 
-      {panel.evalReport && (
+      {panel.evalReport && (() => {
+        const rejectCount = sumValues(panel.evalReport.rejects);
+        return (
         <div className="text-xs grid grid-cols-2 gap-2 bg-muted/50 p-3 rounded-md">
           <span>Eval on {panel.evalReport.count} annotated frames</span>
           <span>Hit rate: <strong>{(panel.evalReport.hitRate * 100).toFixed(0)}%</strong></span>
           <span>Median IoU: <strong>{panel.evalReport.medianIoU.toFixed(3)}</strong></span>
           <span>Median time: <strong>{panel.evalReport.medianTimingMs.toFixed(0)} ms</strong></span>
+          <span className="col-span-2 text-muted-foreground">
+            Detected at <strong>{panel.evalReport.detectionEdge}px</strong> long edge — only
+            comparable against other runs at the same edge.
+          </span>
+          {/*
+            The measurement this panel exists for: of the frames that produced
+            no corners, how many did the scanner never see a document in, versus
+            how many did it see one and our own gates discard. Tuning thresholds
+            can only ever fix the second.
+          */}
+          <span className="col-span-2">
+            No corners: <strong>{panel.evalReport.misses}</strong> scanner miss
+            {panel.evalReport.misses === 1 ? "" : "es"}
+            {", "}
+            <strong>{rejectCount}</strong> hard reject
+            {rejectCount === 1 ? "" : "s"}
+            {rejectCount > 0 && (
+              <span className="text-muted-foreground">
+                {" ("}
+                {Object.entries(panel.evalReport.rejects)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([k, v]) => `${k.replace("rejected-", "")} ${v}`)
+                  .join(", ")}
+                {")"}
+              </span>
+            )}
+          </span>
           {panel.evalReport.errors > 0 && (
             <span className="text-[#ba1a1a] font-bold">
               {panel.evalReport.errors} detector error{panel.evalReport.errors === 1 ? "" : "s"} (excluded -- this number is not a clean baseline)
@@ -572,7 +647,8 @@ function DetectorPanel({
             <span className="text-[#ba1a1a]">{panel.evalReport.unparsed} unparsable ground truth</span>
           )}
         </div>
-      )}
+        );
+      })()}
 
       <div className="flex gap-2">
         <button onClick={onDetect} className="flex-1 py-2 rounded-lg bg-primary text-primary-foreground font-bold text-sm">
@@ -601,6 +677,10 @@ function DetectorPanel({
       )}
     </div>
   );
+}
+
+function sumValues(counts: Partial<Record<string, number>>): number {
+  return Object.values(counts).reduce((a: number, b) => a + (b ?? 0), 0);
 }
 
 function Stat({ label, value }: { label: string; value: string }) {
@@ -775,6 +855,34 @@ function GroundTruthAnnotator({ frame, quad, onChange, onSave, canSave }: Annota
       </button>
     </div>
   );
+}
+
+/**
+ * Detect at the resolution the SCANNER runs at, not the one the corpus happens
+ * to be stored at.
+ *
+ * Corpus frames are stored at a 1280px long edge (`UPLOAD_LONG_EDGE`, matching
+ * `test-frame-upload.ts`). The detector is tuned for ~800. Until 2026-09-05 the
+ * Lab handed the stored frame over whole, so every IoU, every timing, and every
+ * threshold tuned against them belonged to a resolution production never runs at
+ * — and nothing said so.
+ *
+ * Corners come back in downscaled space and are scaled back to the source
+ * frame's space here, so every caller keeps working in one space: the loaded
+ * image's. `downscaleImageData` returns the ratio it actually applied and it is
+ * the only ratio used — recomputing it is how coordinate bugs are born.
+ *
+ * Note `scale` is 1 for any frame already within the target, in which case this
+ * is a pass-through with no copy.
+ */
+async function detectAtRuntimeSize(
+  det: Detector,
+  image: ImageData,
+  params: unknown,
+): Promise<DetectionResult> {
+  const { data, scale } = downscaleImageData(image, DETECTION_MAX_EDGE);
+  const result = await det.detect(data, params);
+  return scaleDetectionResult(result, 1 / scale);
 }
 
 async function fetchImageData(url: string): Promise<ImageData> {
