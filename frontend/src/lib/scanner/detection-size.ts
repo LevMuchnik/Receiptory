@@ -59,8 +59,19 @@ export function detectionSizeFor(
   maxEdge: number = DETECTION_MAX_EDGE,
 ): DetectionSize {
   const longest = Math.max(srcW, srcH);
-  // `NaN > 0` is false, so this one guard covers zero, negative and NaN.
-  if (!(maxEdge > 0) || !(longest > 0) || longest <= maxEdge) {
+  // Two guards, because one axis being bad is enough and they fail differently.
+  //
+  // SHORTEST > 0 — guarding the longest edge alone lets a partially-zero source
+  // through: (1920, 0) has a longest edge of 1920, reaches the scaling below,
+  // and `Math.max(1, Math.round(0 * scale))` invents a height of 1, an 800x1
+  // sliver. `Math.min(NaN, x)` is NaN and `NaN > 0` is false, so this also
+  // covers NaN on either axis.
+  //
+  // LONGEST finite — Infinity survives the check above whenever the other axis
+  // is a normal number: (Infinity, 1080) has a shortest edge of 1080, then
+  // `scale = 800 / Infinity` is 0, `w` comes out NaN, and `scale: 0` becomes
+  // Infinity at every `1 / scale` call site downstream.
+  if (!(maxEdge > 0) || !(Math.min(srcW, srcH) > 0) || !Number.isFinite(longest) || longest <= maxEdge) {
     return { w: srcW, h: srcH, scale: 1 };
   }
   const scale = maxEdge / longest;

@@ -2,7 +2,12 @@ import { api } from "@/lib/api";
 import type { Quad } from "./detector";
 import { normalizeQuad } from "./geometry";
 
-const LONG_EDGE = 1280;
+/**
+ * The corpus's stored resolution. Exported because `ScannerLabPage` uploads into
+ * the same corpus and must not store a different size; it used to keep its own
+ * copy of this number, coupled only by a comment.
+ */
+export const LONG_EDGE = 1280;
 const JPEG_QUALITY = 0.85;
 
 /**

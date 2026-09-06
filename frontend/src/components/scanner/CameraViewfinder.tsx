@@ -141,6 +141,9 @@ export default function CameraViewfinder({
     let lastDetectAt = 0;
     let handle = 0;
     let cancelled = false;
+    /** Last video dimensions published to the diagnostics strip. */
+    let lastVideoW = 0;
+    let lastVideoH = 0;
 
     const useRvfc = typeof video.requestVideoFrameCallback === "function";
 
@@ -215,6 +218,19 @@ export default function CameraViewfinder({
 
         const size = detectionSizeFor(video.videoWidth, video.videoHeight);
         const { w, h } = size;
+
+        // Refresh the strip whenever the VIDEO size changes, not only when the
+        // detection size does. With a fixed max edge those are no longer the
+        // same event: 3840x2160 and 1920x1080 both detect at 800x450, so keying
+        // the strip on the detection size alone would leave a mid-stream track
+        // renegotiation showing a stale `video` line next to a fresh `granted`
+        // line — two contradictory numbers in the readout built to settle
+        // exactly that question.
+        if (lastVideoW !== video.videoWidth || lastVideoH !== video.videoHeight) {
+          lastVideoW = video.videoWidth;
+          lastVideoH = video.videoHeight;
+          setDiagnostics({ videoW: lastVideoW, videoH: lastVideoH, detW: w, detH: h });
+        }
         if (offscreen.width !== w || offscreen.height !== h) {
           offscreen.width = w;
           offscreen.height = h;
@@ -226,9 +242,6 @@ export default function CameraViewfinder({
           smoother.reset();
           cornersRef.current = null;
           setDocumentDetected(false);
-          // Same trigger, so this costs one render per resolution change, not
-          // one per detection.
-          setDiagnostics({ videoW: video.videoWidth, videoH: video.videoHeight, detW: w, detH: h });
         }
         detW = w;
         detH = h;
@@ -381,7 +394,7 @@ export default function CameraViewfinder({
         <button
           type="button"
           onClick={() => setCapture4k((v) => !v)}
-          className="pointer-events-auto shrink-0 px-2 py-1 rounded-md bg-black/60 text-white text-[10px] font-bold tracking-wider backdrop-blur-sm active:bg-black/80"
+          className="pointer-events-auto shrink-0 px-2 py-1 rounded-md bg-black/75 text-white text-[10px] font-bold tracking-wider active:bg-black/90"
         >
           {capture4k ? "REQ 4K" : "REQ 1080p"}
         </button>

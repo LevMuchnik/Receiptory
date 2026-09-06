@@ -51,44 +51,31 @@ export function getScanner(): Scanner {
   return scanner;
 }
 
-/** Detect document corners from a (downscaled) video frame. */
-export async function detectCorners(imageData: ImageData): Promise<any> {
-  const s = getScanner();
-  const canvas = imageDataToCanvas(imageData);
-  const result = await s.scan(canvas, { mode: "detect" });
-  if (result.success && result.corners) {
-    return result.corners;
-  }
-  return null;
-}
-
 /**
  * Extract the document from a full-resolution capture.
- * Corners come from detectCorners() which ran on a 0.4x scaled frame,
- * so they need to be scaled up to match the full-res imageData.
+ *
+ * `corners` are in the SAME pixel space as `imageData` — raw-frame pixels.
+ *
+ * This used to take a `detectionScale` parameter defaulting to 0.4, back when
+ * corners arrived in detection space and had to be scaled up here. Callers now
+ * convert at the detector boundary using the ratio `detectionSizeFor` actually
+ * applied, so by the time corners reach this function there is nothing left to
+ * scale. The default was the dangerous part: it silently multiplied
+ * already-converted corners by 2.5, and the one caller had to pass `1`
+ * explicitly with a comment explaining why. Both are gone.
  */
 export async function extractAndEnhance(
   imageData: ImageData,
   corners: any | null,
-  detectionScale: number = 0.4,
 ): Promise<{ original: HTMLCanvasElement; enhanced: HTMLCanvasElement }> {
   const s = getScanner();
   const fullCanvas = imageDataToCanvas(imageData);
 
   let outputCanvas: HTMLCanvasElement | null = null;
 
-  // Scale corners from detection resolution to full resolution
   if (corners) {
-    const scale = 1 / detectionScale;
-    const scaledCorners = {
-      topLeft: { x: corners.topLeft.x * scale, y: corners.topLeft.y * scale },
-      topRight: { x: corners.topRight.x * scale, y: corners.topRight.y * scale },
-      bottomRight: { x: corners.bottomRight.x * scale, y: corners.bottomRight.y * scale },
-      bottomLeft: { x: corners.bottomLeft.x * scale, y: corners.bottomLeft.y * scale },
-    };
-
     try {
-      const result = await s.extract(fullCanvas, scaledCorners, { output: "canvas" });
+      const result = await s.extract(fullCanvas, corners, { output: "canvas" });
       const out = result.output as HTMLCanvasElement | undefined;
       // BOTH dimensions. A near-degenerate quad yields an N x 0 canvas, which
       // passed a width-only check, flowed on as a valid crop, enabled Submit,

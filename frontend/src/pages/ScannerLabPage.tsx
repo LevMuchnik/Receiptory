@@ -5,10 +5,11 @@ import { initScanner } from "@/lib/opencv-loader";
 import { ClassicalDetector, CLASSICAL_DEFAULTS, type ClassicalParams } from "@/lib/scanner/classical-detector";
 import { MLDetector, ML_DEFAULTS, type MLParams } from "@/lib/scanner/ml-detector";
 import type { Detector, DetectionOutcome, DetectionResult, Quad } from "@/lib/scanner/detector";
-import { REJECT_OUTCOMES } from "@/lib/scanner/detector";
-import { quadIoU, normalizeQuad, orderQuadByAngle, scaleQuad } from "@/lib/scanner/geometry";
+import { isRejectOutcome } from "@/lib/scanner/detector";
+import { quadIoU, normalizeQuad, orderQuadByAngle, quadsEqual, scaleDetectionResult } from "@/lib/scanner/geometry";
 import { downscaleImageData, imageDataToCanvas } from "@/lib/scanner/canvas-utils";
 import { DETECTION_MAX_EDGE } from "@/lib/scanner/detection-size";
+import { LONG_EDGE } from "@/lib/scanner/test-frame-upload";
 
 /**
  * The Lab preview deliberately does NOT take the scanner's 4K raise.
@@ -34,12 +35,13 @@ const LAB_PREVIEW_WIDTH = 1920;
 const LAB_PREVIEW_HEIGHT = 1080;
 
 /**
- * Match `test-frame-upload.ts` — the corpus stores 1280px-long-edge JPEGs at
- * q0.85. Lab captures used to upload at full resolution and q0.9, which is both
- * a multi-megabyte upload (worse at 4K) and a corpus that mixes resolutions the
- * eval then can't compare across.
+ * Imported from `test-frame-upload.ts` rather than restated: both paths write
+ * into the same corpus, and two numbers coupled only by a comment is how a
+ * corpus ends up mixing resolutions the eval cannot compare across. Lab captures
+ * used to upload at full resolution and q0.9, which was also a multi-megabyte
+ * upload at 4K.
  */
-const UPLOAD_LONG_EDGE = 1280;
+const UPLOAD_LONG_EDGE = LONG_EDGE;
 const UPLOAD_JPEG_QUALITY = 0.85;
 
 interface LoadedFrame {
@@ -257,7 +259,7 @@ export default function ScannerLabPage() {
       // rejected quad and an empty frame both score 0 IoU, so the median alone
       // can never tell a too-tight threshold from a blind scanner.
       if (!result.corners) {
-        if (result.outcome && REJECT_OUTCOMES.includes(result.outcome)) {
+        if (isRejectOutcome(result.outcome)) {
           rejects[result.outcome] = (rejects[result.outcome] ?? 0) + 1;
         } else {
           misses++;
@@ -535,7 +537,11 @@ function DetectorPanel({
     const result = panel.result;
     if (result?.candidates) {
       for (const c of result.candidates) {
-        if (c.quad === result.corners) continue;
+        // Compare by VALUE, not by object identity. The accepted quad is drawn
+        // solid below; without this it would also draw here as a faint
+        // candidate underneath itself. Identity used to answer this, and broke
+        // silently the first time a transform mapped over the result.
+        if (result.corners && quadsEqual(c.quad, result.corners)) continue;
         drawQuad(ctx, c.quad, sx, sy, color, 1, false, 0.3);
       }
     }
@@ -597,7 +603,9 @@ function DetectorPanel({
         </div>
       )}
 
-      {panel.evalReport && (
+      {panel.evalReport && (() => {
+        const rejectCount = sumValues(panel.evalReport.rejects);
+        return (
         <div className="text-xs grid grid-cols-2 gap-2 bg-muted/50 p-3 rounded-md">
           <span>Eval on {panel.evalReport.count} annotated frames</span>
           <span>Hit rate: <strong>{(panel.evalReport.hitRate * 100).toFixed(0)}%</strong></span>
@@ -617,9 +625,9 @@ function DetectorPanel({
             No corners: <strong>{panel.evalReport.misses}</strong> scanner miss
             {panel.evalReport.misses === 1 ? "" : "es"}
             {", "}
-            <strong>{sumValues(panel.evalReport.rejects)}</strong> hard reject
-            {sumValues(panel.evalReport.rejects) === 1 ? "" : "s"}
-            {sumValues(panel.evalReport.rejects) > 0 && (
+            <strong>{rejectCount}</strong> hard reject
+            {rejectCount === 1 ? "" : "s"}
+            {rejectCount > 0 && (
               <span className="text-muted-foreground">
                 {" ("}
                 {Object.entries(panel.evalReport.rejects)
@@ -639,7 +647,8 @@ function DetectorPanel({
             <span className="text-[#ba1a1a]">{panel.evalReport.unparsed} unparsable ground truth</span>
           )}
         </div>
-      )}
+        );
+      })()}
 
       <div className="flex gap-2">
         <button onClick={onDetect} className="flex-1 py-2 rounded-lg bg-primary text-primary-foreground font-bold text-sm">
@@ -873,26 +882,7 @@ async function detectAtRuntimeSize(
 ): Promise<DetectionResult> {
   const { data, scale } = downscaleImageData(image, DETECTION_MAX_EDGE);
   const result = await det.detect(data, params);
-  if (scale === 1) return result;
-  const k = 1 / scale;
-  const corners = result.corners ? scaleQuad(result.corners, k) : null;
-  return {
-    ...result,
-    corners,
-    // `candidates` carries the REJECTED quad, which is the whole point of the
-    // reject breakdown. Leaving it in downscaled space would put a landmine
-    // under the first caller that draws it.
-    //
-    // The identity reuse is load-bearing, not a micro-optimisation: the Lab
-    // overlay skips the candidate that IS the accepted quad by reference
-    // (`c.quad === result.corners`), so scaling them into two separate objects
-    // would draw the accepted quad twice, once faint and once solid. A rejected
-    // quad has `corners: null`, so it correctly stays a lone faint outline —
-    // which is how a near-miss is meant to look.
-    candidates: result.candidates?.map((c) =>
-      c.quad === result.corners && corners ? { ...c, quad: corners } : { ...c, quad: scaleQuad(c.quad, k) },
-    ),
-  };
+  return scaleDetectionResult(result, 1 / scale);
 }
 
 async function fetchImageData(url: string): Promise<ImageData> {

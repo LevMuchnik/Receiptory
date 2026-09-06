@@ -56,7 +56,45 @@ describe("detectionSizeFor", () => {
   it("returns scale 1 for a zero-size source rather than a fabricated size", () => {
     // videoWidth is 0 between camera-ready and the first decoded frame.
     expect(detectionSizeFor(0, 0, 800)).toEqual({ w: 0, h: 0, scale: 1 });
-    expect(detectionSizeFor(1920, 0, 800).scale).not.toBeNaN();
+  });
+
+  /**
+   * A PARTIALLY-zero source is the one that actually bit. Guarding the longest
+   * edge lets (1920, 0) through: it scales to w=800, and `Math.max(1, ...)`
+   * turns the zero height into 1, yielding an 800x1 sliver. The detect loop
+   * guards `video.videoWidth > 0` and NOT videoHeight, so this was reachable.
+   *
+   * The original test here asserted only `.scale` was `not.toBeNaN()`, which is
+   * true of the fabricated 0.4166..., so it passed while the bug was live.
+   * Assert the whole object.
+   */
+  it("returns the source unchanged when EITHER axis is zero", () => {
+    expect(detectionSizeFor(1920, 0, 800)).toEqual({ w: 1920, h: 0, scale: 1 });
+    expect(detectionSizeFor(0, 1080, 800)).toEqual({ w: 0, h: 1080, scale: 1 });
+  });
+
+  it("returns the source unchanged when either axis is non-finite", () => {
+    // A NaN canvas dimension propagates into areaFraction and defeats every
+    // hard reject downstream, since all NaN comparisons are false.
+    expect(detectionSizeFor(NaN, 1000, 800)).toEqual({ w: NaN, h: 1000, scale: 1 });
+    expect(detectionSizeFor(1920, NaN, 800)).toEqual({ w: 1920, h: NaN, scale: 1 });
+    // Infinity is the sneaky one: it survives a shortest-edge check when the
+    // other axis is normal, then scale computes to 0 and every downstream
+    // `1 / scale` becomes Infinity.
+    expect(detectionSizeFor(Infinity, 1080, 800)).toEqual({ w: Infinity, h: 1080, scale: 1 });
+    expect(detectionSizeFor(1920, Infinity, 800).scale).toBe(1);
+  });
+
+  it("never returns a scale of 0, whatever it is handed", () => {
+    const inputs: [number, number][] = [
+      [0, 0], [1920, 0], [0, 1080], [NaN, NaN], [NaN, 1080], [1920, NaN],
+      [Infinity, 1080], [1920, Infinity], [-100, 200], [3840, 2160], [640, 480],
+    ];
+    for (const [w, h] of inputs) {
+      const s = detectionSizeFor(w, h, 800);
+      expect(s.scale).toBeGreaterThan(0);
+      expect(Number.isFinite(s.scale)).toBe(true);
+    }
   });
 
   it("returns scale 1 for a non-positive or non-finite maxEdge", () => {

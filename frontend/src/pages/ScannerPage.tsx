@@ -100,18 +100,11 @@ export default function ScannerPage() {
     return () => { cancelled = true; };
   }, [dispatch, unsupported, insecure, classical, ml]);
 
-  /**
-   * Run the warp for a given crop quad and publish the result.
-   *
-   * `detectionScale: 1` is passed EXPLICITLY. `corners` is in raw-frame pixels
-   * now, and opencv-loader's default of 0.4 would multiply it by 2.5. The
-   * parameter disappears entirely in Increment 2; until then, never rely on its
-   * default. (Task T7.)
-   */
+  /** Run the warp for a given crop quad (raw-frame pixels) and publish it. */
   const runExtract = useCallback(
     async (raw: ImageData, corners: Quad | null, job: number) => {
       try {
-        const result = await extractAndEnhance(raw, corners, 1);
+        const result = await extractAndEnhance(raw, corners);
         if (jobRef.current !== job) return;
         dispatch({ type: "extracted", extracted: result.original, enhanced: result.enhanced });
       } catch (err: any) {

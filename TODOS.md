@@ -300,6 +300,29 @@ Deferred items captured during planning and review. Organized by component, sort
 **Depends on:** None
 **Depends on:** ML detection is shipped and live (Phase 1 of the ML detector plan). Only worth building if a non-WebGPU device enters the picture, or the S26 WASM fallback benchmark is bad
 
+### Remove the E2 diagnostics strip from the scanner viewfinder
+
+**What:** Delete the `REQ 4K` / `REQ 1080p` toggle and the `granted / video / detect / cam` readout from `CameraViewfinder.tsx`, plus the `Diagnostics` interface, the `capture4k` state, the `LADDER_CONTROL_1080P` constant and the `lastVideoW`/`lastVideoH` tracking that feeds it. Roughly 45 lines.
+
+**Why:** It is experiment scaffolding (T1/T2, the "did 4K break detection?" control) shipped unconditionally into the production scanner UI. It earns its place while the E2/E3/E4 verdicts are still being gathered — the owner is the only user and also the tester — but nothing in the change that added it schedules its removal, so it becomes permanent UI by default. Flagged independently by two reviewers on 2026-09-05.
+
+**Pros:**
+- Returns the viewfinder to a clean capture surface
+- Removes two semi-transparent overlays from a screen whose job is framing a receipt
+
+**Cons:**
+- The `cam` deviceId line is the only place a lens swap is visible; losing it means re-adding instrumentation if the question returns
+- A dev-only gate (`import.meta.env.DEV`) is NOT a substitute: the on-device tests run against the deployed production build, so gating would remove it from exactly the build that needs it
+
+**Context:**
+- Source: `/review` of `fix/scanner-detection-resolution`, 2026-09-05 (simplification + maintainability lenses)
+- Start: `frontend/src/components/scanner/CameraViewfinder.tsx`
+- Note the toggle can no longer reproduce pre-T6 detection: with a fixed `DETECTION_MAX_EDGE`, 3840x2160 and 1920x1080 both detect at 800x450. Its remaining value is isolating capture and lens effects, not detection cost.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** E2, E3 and E4 verdicts landing. Do not remove before then.
+
 ### Manual bounding-box specification in the review screen
 
 **What:** A "Set corners manually" button in `CaptureReview` that enters a mode where four taps place top-left, top-right, bottom-right and bottom-left directly. Plus hint text shown when the displayed quad came from the no-detection fallback rather than a real detection.

@@ -66,14 +66,33 @@ export type DetectionOutcome =
   /** The detector failed. Always paired with `error`. */
   | "error";
 
-/** The hard-reject outcomes, i.e. "found something, then threw it away". */
-export const REJECT_OUTCOMES: readonly DetectionOutcome[] = [
-  "rejected-area",
-  "rejected-aspect",
-  "rejected-angle",
-  "rejected-convexity",
-  "rejected-score",
-];
+/** The outcomes meaning "found something, then threw it away". */
+export type RejectOutcome = Extract<DetectionOutcome, `rejected-${string}`>;
+
+/**
+ * Exhaustiveness is enforced by the compiler, not by memory.
+ *
+ * `Record<RejectOutcome, true>` fails to typecheck the moment a new
+ * `rejected-*` member joins the union and is not listed here. The obvious
+ * spelling — `const REJECT_OUTCOMES: readonly DetectionOutcome[] = [...]` — is
+ * the trap: it accepts any subset, so a new reject silently misses the list and
+ * the Lab files it under "the scanner saw nothing", which is the exact
+ * conflation this outcome channel exists to remove.
+ */
+const REJECT_OUTCOME_SET: Record<RejectOutcome, true> = {
+  "rejected-area": true,
+  "rejected-aspect": true,
+  "rejected-angle": true,
+  "rejected-convexity": true,
+  "rejected-score": true,
+};
+
+export const REJECT_OUTCOMES = Object.keys(REJECT_OUTCOME_SET) as RejectOutcome[];
+
+/** Did this result find a quad and then discard it? */
+export function isRejectOutcome(o: DetectionOutcome | undefined): o is RejectOutcome {
+  return o !== undefined && o in REJECT_OUTCOME_SET;
+}
 
 export interface DetectionResult {
   /** Detected quad in the same space as the ImageData passed to detect(), or null. */
