@@ -59,6 +59,18 @@ interface CameraViewfinderProps {
  */
 const LADDER_CONTROL_1080P = { width: 1920, height: 1080 };
 
+/**
+ * How long to go without a detection before the badge stops saying "move the
+ * camera" and starts saying "shoot anyway".
+ *
+ * Deliberately not immediate. "Position document in frame" is the RIGHT first
+ * instruction — most empty frames are fixed by moving the phone, and a badge
+ * that offers an escape hatch from the first millisecond nags on every capture
+ * and trains the user to ignore it. This is the point where moving the camera
+ * has demonstrably not worked.
+ */
+const NO_DETECTION_HINT_MS = 4000;
+
 /** What the detection loop last actually ran on. Diagnostics only. */
 interface Diagnostics {
   videoW: number;
@@ -117,6 +129,14 @@ export default function CameraViewfinder({
    */
   const detectionScaleRef = useRef(1);
   const [documentDetected, setDocumentDetected] = useState(false);
+  /**
+   * True once detection has come up empty for `NO_DETECTION_HINT_MS` straight.
+   *
+   * Any detection at all resets it, so a box that merely flickers keeps the
+   * plain badge: flickering means detection IS working intermittently, and
+   * telling that user to give up and place corners by hand would be wrong.
+   */
+  const [noDetectionStreak, setNoDetectionStreak] = useState(false);
   const [detectorError, setDetectorError] = useState<string | null>(null);
   const detecting = useRef(false);
   const smoother = useMemo(() => new TemporalSmoother(), []);
@@ -263,6 +283,9 @@ export default function CameraViewfinder({
             const ema = smoother.getEMA();
             cornersRef.current = ema;
             setDocumentDetected(!!ema);
+            // Any accepted detection clears the stuck badge, so a box that
+            // merely flickers never trips it.
+            if (ema) setNoDetectionStreak(false);
             setDetectorError(result.error ?? null);
           })
           .catch((err: unknown) => {
@@ -287,6 +310,16 @@ export default function CameraViewfinder({
       else cancelAnimationFrame(handle);
     };
   }, [ready, videoRef, detector, detectorParams, smoother]);
+
+  // Only ARMS the timer. The reset lives beside `setDocumentDetected(true)` in
+  // the detection callback, which is an event handler rather than an effect —
+  // resetting here would be a set-state-in-effect, and the rule that flags it is
+  // right: the state change belongs at the event that causes it.
+  useEffect(() => {
+    if (documentDetected) return;
+    const t = setTimeout(() => setNoDetectionStreak(true), NO_DETECTION_HINT_MS);
+    return () => clearTimeout(t);
+  }, [documentDetected]);
 
   const handleCapture = useCallback(() => {
     const video = videoRef.current;
@@ -325,16 +358,28 @@ export default function CameraViewfinder({
     );
   }
 
+  /*
+    Four badge states, not three. The fourth exists because "Position document
+    in frame" is a dead end once moving the camera has stopped helping: the
+    shutter is deliberately never disabled on detection state, and the review
+    screen can set corners by hand, but nothing on this screen said so. A user
+    facing a permanently empty badge has no reason to believe shooting anyway
+    will get them anywhere.
+  */
   const badgeText = detectorError
     ? `Detector error: ${detectorError}`
     : documentDetected
       ? "Document detected"
-      : "Position document in frame";
+      : noDetectionStreak
+        ? "No document found. Shoot anyway, then set the corners by hand."
+        : "Position document in frame";
   const badgeClass = detectorError
     ? "bg-[#ba1a1a]/85 text-white"
     : documentDetected
       ? "bg-[#006d37]/80 text-white"
-      : "bg-black/50 text-white/70";
+      : noDetectionStreak
+        ? "bg-black/75 text-white"
+        : "bg-black/50 text-white/70";
 
   return (
     <div className="flex-1 relative bg-black flex items-center justify-center overflow-hidden">
@@ -443,7 +488,12 @@ export default function CameraViewfinder({
 
       <div className="absolute bottom-32 left-0 right-0 flex justify-center px-6">
         <span
-          className={`text-xs font-bold px-3 py-1 rounded-full backdrop-blur-sm max-w-full truncate ${badgeClass}`}
+          // The stuck message is a full sentence and must wrap; every other
+          // state is short, and `truncate` is what keeps a long detector error
+          // from pushing the badge off both edges of a phone screen.
+          className={`text-xs font-bold px-3 py-1 backdrop-blur-sm max-w-full ${badgeClass} ${
+            noDetectionStreak ? "rounded-xl text-center leading-snug" : "rounded-full truncate"
+          }`}
         >
           {badgeText}
         </span>
