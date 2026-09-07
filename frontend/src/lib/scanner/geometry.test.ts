@@ -10,6 +10,8 @@ import {
   clampPtToFrame,
   quadsEqual,
   scaleDetectionResult,
+  insetQuad,
+  quadFromPlacedPoints,
 } from "./geometry";
 import type { DetectionResult, Pt, Quad } from "./detector";
 
@@ -327,5 +329,102 @@ describe("scaleDetectionResult", () => {
     scaleDetectionResult(r, 2);
     expect(r.corners!.bottomRight).toEqual({ x: 100, y: 200 });
     expect(r.candidates![0].quad.bottomRight).toEqual({ x: 100, y: 200 });
+  });
+});
+
+describe("insetQuad — the fallback crop when detection found nothing", () => {
+  it("insets symmetrically by the given fraction", () => {
+    expect(insetQuad(1000, 500, 0.1)).toEqual({
+      topLeft: { x: 100, y: 50 },
+      topRight: { x: 900, y: 50 },
+      bottomRight: { x: 900, y: 450 },
+      bottomLeft: { x: 100, y: 450 },
+    });
+  });
+
+  it("defaults to a 10% inset", () => {
+    expect(insetQuad(1000, 500)).toEqual(insetQuad(1000, 500, 0.1));
+  });
+
+  it("scales with the frame rather than using fixed pixels", () => {
+    const small = insetQuad(100, 100);
+    const large = insetQuad(1000, 1000);
+    expect(large.topLeft.x).toBe(small.topLeft.x * 10);
+  });
+
+  it("is wound TL, TR, BR, BL — the order the review screen expects", () => {
+    const q = insetQuad(1000, 500);
+    expect(q.topLeft.x).toBeLessThan(q.topRight.x);
+    expect(q.topLeft.y).toBeLessThan(q.bottomLeft.y);
+    expect(q.bottomRight.x).toBeGreaterThan(q.bottomLeft.x);
+  });
+
+  it("survives a zero-sized frame without emitting NaN", () => {
+    const q = insetQuad(0, 0);
+    for (const p of quadPts(q)) {
+      expect(Number.isFinite(p.x)).toBe(true);
+      expect(Number.isFinite(p.y)).toBe(true);
+    }
+  });
+});
+
+describe("quadFromPlacedPoints — four taps to a crop quad", () => {
+  const tl = { x: 100, y: 100 };
+  const tr = { x: 900, y: 100 };
+  const br = { x: 900, y: 500 };
+  const bl = { x: 100, y: 500 };
+
+  it("builds the quad from four points tapped in order", () => {
+    expect(quadFromPlacedPoints([tl, tr, br, bl], 1000, 600)).toEqual({
+      topLeft: tl, topRight: tr, bottomRight: br, bottomLeft: bl,
+    });
+  });
+
+  /**
+   * The guarantee the on-screen prompt depends on: it says "order does not
+   * matter", and orderQuadByAngle is what makes that true.
+   */
+  it("repairs any tap ORDER to the same quad", () => {
+    const expected = { topLeft: tl, topRight: tr, bottomRight: br, bottomLeft: bl };
+    const orders = [
+      [br, bl, tl, tr],
+      [tr, tl, bl, br],
+      [bl, br, tr, tl],
+      [tl, br, tr, bl], // diagonal-first, the order that would make a bow-tie
+    ];
+    for (const o of orders) {
+      expect(quadFromPlacedPoints(o, 1000, 600)).toEqual(expected);
+    }
+  });
+
+  /**
+   * The review overlay letterboxes with `xMidYMid meet`, so there is margin
+   * around the picture that maps to coordinates outside it. A tap there must
+   * not place a corner off-frame.
+   */
+  it("clamps taps that land on the letterbox margin", () => {
+    const q = quadFromPlacedPoints(
+      [{ x: -500, y: -500 }, { x: 9999, y: -20 }, { x: 9999, y: 9999 }, { x: -30, y: 9999 }],
+      1000,
+      600,
+    )!;
+    for (const p of quadPts(q)) {
+      expect(p.x).toBeGreaterThanOrEqual(0);
+      expect(p.x).toBeLessThanOrEqual(1000);
+      expect(p.y).toBeGreaterThanOrEqual(0);
+      expect(p.y).toBeLessThanOrEqual(600);
+    }
+  });
+
+  it("refuses to build a quad from fewer or more than four points", () => {
+    expect(quadFromPlacedPoints([], 1000, 600)).toBeNull();
+    expect(quadFromPlacedPoints([tl], 1000, 600)).toBeNull();
+    expect(quadFromPlacedPoints([tl, tr, br], 1000, 600)).toBeNull();
+    expect(quadFromPlacedPoints([tl, tr, br, bl, tl], 1000, 600)).toBeNull();
+  });
+
+  it("never produces a self-intersecting quad", () => {
+    const q = quadFromPlacedPoints([tl, br, tr, bl], 1000, 600)!;
+    expect(isSelfIntersecting(q)).toBe(false);
   });
 });

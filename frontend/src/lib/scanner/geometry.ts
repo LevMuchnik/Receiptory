@@ -223,6 +223,45 @@ export function scaleDetectionResult(result: DetectionResult, k: number): Detect
   };
 }
 
+/**
+ * The fallback crop when detection found nothing: a symmetric inset of the frame.
+ *
+ * Lives here rather than in `CaptureReview` so it is reachable from the node-env
+ * suite — it is pure arithmetic, and the review screen leans on it for every
+ * harsh capture, which is exactly the case that gets the least manual testing.
+ */
+export function insetQuad(w: number, h: number, f = 0.1): Quad {
+  const x0 = w * f;
+  const x1 = w * (1 - f);
+  const y0 = h * f;
+  const y1 = h * (1 - f);
+  return {
+    topLeft: { x: x0, y: y0 },
+    topRight: { x: x1, y: y0 },
+    bottomRight: { x: x1, y: y1 },
+    bottomLeft: { x: x0, y: y1 },
+  };
+}
+
+/**
+ * Turn four tapped points into a crop quad, or null if there are not four.
+ *
+ * Two guarantees the caller depends on, both delegated to code that already
+ * exists and is already property-tested:
+ *
+ * - **Tap ORDER does not matter.** `orderQuadByAngle` sorts by angle around the
+ *   centroid and relabels TL/TR/BR/BL, so a user who taps the corners in any
+ *   sequence still gets a sane, non-self-intersecting quad. The on-screen
+ *   prompts are guidance, not a constraint the user can violate.
+ * - **Taps outside the image cannot escape the frame.** The review overlay
+ *   letterboxes with `xMidYMid meet`, so there is margin around the picture that
+ *   maps to coordinates outside it; every point is clamped before use.
+ */
+export function quadFromPlacedPoints(pts: Pt[], frameW: number, frameH: number): Quad | null {
+  if (pts.length !== 4) return null;
+  return orderQuadByAngle(pts.map((p) => clampPtToFrame(p, frameW, frameH)));
+}
+
 /** Clamp all four corners into the frame. */
 export function clampQuad(q: Quad, frameW: number, frameH: number): Quad {
   return {

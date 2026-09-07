@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import EnhancementToggle from "./EnhancementToggle";
 import type { Pt, Quad } from "@/lib/scanner/detector";
-import { clampPtToFrame, orderQuadByAngle, quadAreaFraction } from "@/lib/scanner/geometry";
+import {
+  clampPtToFrame,
+  insetQuad,
+  orderQuadByAngle,
+  quadAreaFraction,
+  quadFromPlacedPoints,
+} from "@/lib/scanner/geometry";
 import { rotateCanvas } from "@/lib/scanner/canvas-utils";
 
 /** Visible handle radius, in SCREEN pixels (converted to user units per paint). */
@@ -64,19 +70,11 @@ function quadToArray(q: Quad): Corners4 {
   return [q.topLeft, q.topRight, q.bottomRight, q.bottomLeft];
 }
 
+/** Labels for the four placement taps, in prompt order. */
+const PLACEMENT_PROMPTS = ["top-left", "top-right", "bottom-right", "bottom-left"] as const;
+
 /** Fallback quad when there is no detection: a 10% inset of the frame. */
-function insetCorners(w: number, h: number, f = 0.1): Corners4 {
-  const x0 = w * f;
-  const x1 = w * (1 - f);
-  const y0 = h * f;
-  const y1 = h * (1 - f);
-  return [
-    { x: x0, y: y0 },
-    { x: x1, y: y0 },
-    { x: x1, y: y1 },
-    { x: x0, y: y1 },
-  ];
-}
+const insetCorners = (w: number, h: number): Corners4 => quadToArray(insetQuad(w, h));
 
 export default function CaptureReview({
   raw,
@@ -112,6 +110,27 @@ export default function CaptureReview({
   const cornersRef = useRef<Corners4>(insetCorners(raw.width, raw.height));
   /** Screen px per raw-frame px under the current `meet` fit. */
   const scaleRef = useRef(1);
+  /**
+   * Manual corner placement. `null` means idle; an array means the mode is
+   * active and holds the points tapped so far.
+   *
+   * React state, not a ref, unlike the drag path: placement is at most four taps
+   * for the whole gesture, so a render per tap is free, and it buys the placed
+   * points being ordinary JSX instead of a second imperative paint path.
+   */
+  const [placing, setPlacing] = useState<Pt[] | null>(null);
+  /** Corners as they were when the mode was entered, so Cancel can restore. */
+  const placingSnapshot = useRef<Corners4 | null>(null);
+  /**
+   * `scaleRef` as a render-visible value, for sizing the placement dots.
+   *
+   * The drag path keeps the ref because it repaints at pointer rate and must not
+   * touch React state; reading that ref during render is a different thing and
+   * is what `react-hooks/refs` (correctly) rejects. This mirrors it from the two
+   * cold paths — mount and resize — which is all the placement overlay needs,
+   * since the fit cannot change mid-gesture without a resize.
+   */
+  const [screenScale, setScreenScale] = useState(1);
   const dragRef = useRef<{
     /** The pointer that owns this drag. A second finger must not steer it. */
     pointerId: number;
@@ -165,12 +184,18 @@ export default function CaptureReview({
   useEffect(() => {
     cornersRef.current = corners ? quadToArray(corners) : insetCorners(raw.width, raw.height);
     paint();
+    setScreenScale(scaleRef.current);
   }, [corners, raw, paint]);
 
   useEffect(() => {
     const svg = svgRef.current;
     if (!svg || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => paint());
+    // Cold path: fires on layout changes, never at pointer rate, so mirroring
+    // the scale into state here costs nothing.
+    const ro = new ResizeObserver(() => {
+      paint();
+      setScreenScale(scaleRef.current);
+    });
     ro.observe(svg);
     return () => ro.disconnect();
   }, [paint]);
@@ -193,6 +218,30 @@ export default function CaptureReview({
       if (dragRef.current) return;
       const u = toFrame(e.clientX, e.clientY);
       if (!u) return;
+
+      // PLACEMENT MODE takes the tap before the handle search runs. The
+      // hit-radius gate below is what makes corners nudge-only; skipping it
+      // entirely is the whole point of this mode.
+      if (placing) {
+        const next = [...placing, u];
+        if (next.length < 4) {
+          setPlacing(next);
+          e.preventDefault();
+          return;
+        }
+        const quad = quadFromPlacedPoints(next, raw.width, raw.height);
+        setPlacing(null);
+        placingSnapshot.current = null;
+        if (quad) {
+          cornersRef.current = quadToArray(quad);
+          paint();
+          // Same commit path a drag uses, so the warp, ScannerPage's race guard
+          // and the bow-tie repair all behave identically.
+          onCornersCommit(quad);
+        }
+        e.preventDefault();
+        return;
+      }
 
       let best = -1;
       let bestD = Infinity;
@@ -225,8 +274,46 @@ export default function CaptureReview({
       onDragStart();
       e.preventDefault();
     },
-    [toFrame, onDragStart],
+    [toFrame, onDragStart, placing, raw.width, raw.height, paint, onCornersCommit],
   );
+
+  /**
+   * Enter placement mode.
+   *
+   * `onDragStart()` fires here for the same reason a real drag fires it: it is
+   * ScannerPage's race guard, and a review-entry detect that resolves mid-
+   * placement must not yank corners out from under the user.
+   */
+  const startPlacing = useCallback(() => {
+    placingSnapshot.current = cornersRef.current;
+    setPlacing([]);
+    onDragStart();
+  }, [onDragStart]);
+
+  /**
+   * Leave placement mode without committing, restoring the previous corners.
+   *
+   * The `extracted === null` branch is not defensive padding. `startPlacing`
+   * raised ScannerPage's drag guard, which makes ScannerPage skip its
+   * review-entry warp on the assumption that a commit will run one instead. If
+   * the user cancels and nothing commits, `extracted` stays null forever and
+   * Submit is disabled for good -- a dead review screen. `handlePointerUp`
+   * carries the same escape for the same reason; this is the second door into
+   * that deadlock.
+   */
+  const cancelPlacing = useCallback(() => {
+    const restored = placingSnapshot.current;
+    setPlacing(null);
+    placingSnapshot.current = null;
+    if (restored) {
+      cornersRef.current = restored;
+      paint();
+    }
+    if (extracted === null) {
+      const pts = cornersRef.current;
+      onCornersCommit(orderQuadByAngle([pts[0], pts[1], pts[2], pts[3]]));
+    }
+  }, [paint, extracted, onCornersCommit]);
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent<SVGSVGElement>) => {
@@ -339,42 +426,123 @@ export default function CaptureReview({
             onPointerUp={handlePointerUp}
             onPointerCancel={handlePointerUp}
           >
-            <polygon
-              ref={polyRef}
-              points=""
-              fill="rgba(0, 109, 55, 0.18)"
-              stroke="#7ff0a8"
-              strokeWidth={2}
-              vectorEffect="non-scaling-stroke"
-            />
-            {[0, 1, 2, 3].map((i) => (
-              <circle
-                key={i}
-                ref={(el) => {
-                  circleRefs.current[i] = el;
-                }}
-                cx={0}
-                cy={0}
-                r={0}
-                fill="rgba(0, 0, 0, 0.35)"
+            {/* The live crop quad. Hidden while placing so the half-built
+                shape below is the only thing on screen. */}
+            <g display={placing ? "none" : "inline"}>
+              <polygon
+                ref={polyRef}
+                points=""
+                fill="rgba(0, 109, 55, 0.18)"
                 stroke="#7ff0a8"
-                strokeWidth={3}
+                strokeWidth={2}
                 vectorEffect="non-scaling-stroke"
               />
-            ))}
+              {[0, 1, 2, 3].map((i) => (
+                <circle
+                  key={i}
+                  ref={(el) => {
+                    circleRefs.current[i] = el;
+                  }}
+                  cx={0}
+                  cy={0}
+                  r={0}
+                  fill="rgba(0, 0, 0, 0.35)"
+                  stroke="#7ff0a8"
+                  strokeWidth={3}
+                  vectorEffect="non-scaling-stroke"
+                />
+              ))}
+            </g>
+
+            {/* The shape forming under the user's taps. Plain JSX, not the
+                imperative paint path: at most four taps for the whole gesture,
+                so a render each is free. */}
+            {placing && placing.length > 0 && (
+              <g>
+                <polyline
+                  points={placing.map((p) => `${p.x},${p.y}`).join(" ")}
+                  fill="none"
+                  stroke="#ffd60a"
+                  strokeWidth={2}
+                  strokeDasharray="8 6"
+                  vectorEffect="non-scaling-stroke"
+                />
+                {placing.map((p, i) => (
+                  <circle
+                    key={i}
+                    cx={p.x}
+                    cy={p.y}
+                    r={HANDLE_R_PX / screenScale}
+                    fill="rgba(0, 0, 0, 0.35)"
+                    stroke="#ffd60a"
+                    strokeWidth={3}
+                    vectorEffect="non-scaling-stroke"
+                  />
+                ))}
+              </g>
+            )}
           </svg>
 
-          {degenerate && (
+          {/* Placement prompt. Replaces every other bottom overlay while active
+              so the screen says exactly one thing at a time. */}
+          {placing && (
+            <div className="absolute inset-x-3 bottom-3 rounded-xl bg-black/85 p-3 text-center">
+              <p className="text-xs font-bold text-[#ffd60a]">
+                Tap the {PLACEMENT_PROMPTS[placing.length]} corner ({placing.length + 1} of 4)
+              </p>
+              <p className="mt-1 text-[11px] text-white/60">
+                Order does not matter, and you can drag any corner afterwards.
+              </p>
+              <button
+                onClick={cancelPlacing}
+                className="mt-2 w-full py-2 rounded-lg bg-white/15 text-white font-bold text-xs"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
+          {/*
+            The affordance. A capture whose detection came back empty gets a
+            generic inset rectangle and, before this, nothing telling the user it
+            was theirs to move -- which is what "there is no bbox to start
+            optimizing for" actually described. `corners === null` IS the
+            fallback signal: ScannerPage passes the detection through verbatim,
+            and this component substitutes the inset.
+          */}
+          {!placing && !corners && (
+            <div className="absolute inset-x-3 bottom-3 rounded-xl bg-black/80 p-3 text-center backdrop-blur-sm">
+              <p className="text-xs font-medium text-white/85">
+                No document found. Drag the corners to fit, or set them yourself.
+              </p>
+              <button
+                onClick={startPlacing}
+                className="mt-2 w-full py-2 rounded-lg bg-white/20 text-white font-bold text-xs"
+              >
+                Set corners manually
+              </button>
+            </div>
+          )}
+
+          {!placing && corners && degenerate && (
             <div className="absolute inset-x-3 bottom-3 rounded-xl bg-black/80 p-3 text-center backdrop-blur-sm">
               <p className="text-xs text-[#ffdad6] font-medium">
                 That crop is almost empty. Drag the corners back out, or keep the whole frame.
               </p>
-              <button
-                onClick={onUseFullFrame}
-                className="mt-2 w-full py-2 rounded-lg bg-white/15 text-white font-bold text-xs"
-              >
-                Use full frame
-              </button>
+              <div className="mt-2 flex gap-2">
+                <button
+                  onClick={onUseFullFrame}
+                  className="flex-1 py-2 rounded-lg bg-white/15 text-white font-bold text-xs"
+                >
+                  Use full frame
+                </button>
+                <button
+                  onClick={startPlacing}
+                  className="flex-1 py-2 rounded-lg bg-white/15 text-white font-bold text-xs"
+                >
+                  Set corners
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -417,7 +585,7 @@ export default function CaptureReview({
           </div>
         </div>
 
-        <div className="flex justify-center gap-4">
+        <div className="flex justify-center items-center gap-3">
           <button
             onClick={() => rotate(-90)}
             disabled={rotateDisabled}
@@ -431,6 +599,28 @@ export default function CaptureReview({
             className="p-3 rounded-full bg-white/10 text-white active:bg-white/20 disabled:opacity-30"
           >
             <span className="material-symbols-outlined">rotate_right</span>
+          </button>
+          {/*
+            The always-available entry point. The bottom-of-frame prompts only
+            appear when detection found nothing or the crop went degenerate, but
+            a detection that lands on the WRONG rectangle looks like a success
+            and offers no way out except four long drags. Switches to the crop
+            tab on the way in, since placing taps on the result pane would do
+            nothing.
+          */}
+          <button
+            onClick={() => {
+              setTab("crop");
+              if (placing) cancelPlacing();
+              else startPlacing();
+            }}
+            disabled={dragging}
+            className={`px-4 py-3 rounded-full font-bold text-xs flex items-center gap-1.5 disabled:opacity-30 ${
+              placing ? "bg-[#ffd60a] text-black" : "bg-white/10 text-white active:bg-white/20"
+            }`}
+          >
+            <span className="material-symbols-outlined text-sm">highlight_alt</span>
+            {placing ? "Cancel" : "Set corners"}
           </button>
         </div>
 
