@@ -244,6 +244,55 @@ export function insetQuad(w: number, h: number, f = 0.1): Quad {
 }
 
 /**
+ * How close two placement taps may be before the second is ignored, as a
+ * fraction of the frame's SHORTER edge.
+ *
+ * Coincident points are the failure this guards. `orderQuadByAngle` sorts by
+ * `atan2` around the centroid, and two identical points tie; the sort keeps
+ * their input order and the quad folds into a triangle with one doubled corner.
+ * A folded quad still measures ~27% of the frame, which clears
+ * `MIN_AREA_FRACTION`, so the review screen's "that crop is almost empty" escape
+ * never fires and the user gets a silently wrong crop. A double-tap at rest
+ * produces exactly this: two taps with identical clientX/clientY.
+ */
+export const MIN_TAP_SEPARATION_FRACTION = 0.02;
+
+export interface PlacementStep {
+  /** Points placed so far, after this tap. Unchanged if the tap was ignored. */
+  placed: Pt[];
+  /** Set only on the tap that completes the quad. */
+  commit: Quad | null;
+}
+
+/**
+ * Apply one placement tap.
+ *
+ * Pure, and extracted from the pointer handler for that reason: it is the only
+ * place the coincident-tap guard can live where a test can reach it.
+ *
+ * Contract:
+ * - a tap closer than `MIN_TAP_SEPARATION_FRACTION` to an already-placed point
+ *   is IGNORED, returning `placed` unchanged so the caller renders no change
+ * - taps 1-3 accumulate and commit nothing
+ * - tap 4 commits and resets `placed` to empty, so `placed.length` is never 4
+ *   (the prompt indexes on that length and would run off the end otherwise)
+ */
+export function advancePlacement(
+  placed: Pt[],
+  tap: Pt,
+  frameW: number,
+  frameH: number,
+): PlacementStep {
+  const p = clampPtToFrame(tap, frameW, frameH);
+  const minGap = Math.min(frameW, frameH) * MIN_TAP_SEPARATION_FRACTION;
+  if (placed.some((q) => dist(q, p) < minGap)) return { placed, commit: null };
+
+  const next = [...placed, p];
+  if (next.length < 4) return { placed: next, commit: null };
+  return { placed: [], commit: quadFromPlacedPoints(next, frameW, frameH) };
+}
+
+/**
  * Turn four tapped points into a crop quad, or null if there are not four.
  *
  * Two guarantees the caller depends on, both delegated to code that already

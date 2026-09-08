@@ -12,6 +12,8 @@ import {
   scaleDetectionResult,
   insetQuad,
   quadFromPlacedPoints,
+  advancePlacement,
+  MIN_TAP_SEPARATION_FRACTION,
 } from "./geometry";
 import type { DetectionResult, Pt, Quad } from "./detector";
 
@@ -359,12 +361,27 @@ describe("insetQuad — the fallback crop when detection found nothing", () => {
     expect(q.bottomRight.x).toBeGreaterThan(q.bottomLeft.x);
   });
 
-  it("survives a zero-sized frame without emitting NaN", () => {
-    const q = insetQuad(0, 0);
-    for (const p of quadPts(q)) {
-      expect(Number.isFinite(p.x)).toBe(true);
-      expect(Number.isFinite(p.y)).toBe(true);
+  /**
+   * Winding is load-bearing downstream (`polygonClip` defines "inside" by it, so
+   * a counter-wound quad silently scores IoU 0). `f` is exported API, and at
+   * f >= 0.5 the inset crosses over itself: at 0.5 all four corners collapse to
+   * the centre, above it topLeft.x overtakes topRight.x.
+   */
+  it("stays correctly wound across the usable range of f", () => {
+    for (const f of [0, 0.05, 0.1, 0.25, 0.45]) {
+      const q = insetQuad(1000, 500, f);
+      expect(q.topLeft.x).toBeLessThan(q.topRight.x);
+      expect(q.topLeft.y).toBeLessThan(q.bottomLeft.y);
     }
+  });
+
+  it("returns the full frame at f = 0", () => {
+    expect(insetQuad(1000, 500, 0)).toEqual({
+      topLeft: { x: 0, y: 0 },
+      topRight: { x: 1000, y: 0 },
+      bottomRight: { x: 1000, y: 500 },
+      bottomLeft: { x: 0, y: 500 },
+    });
   });
 });
 
@@ -423,8 +440,122 @@ describe("quadFromPlacedPoints — four taps to a crop quad", () => {
     expect(quadFromPlacedPoints([tl, tr, br, bl, tl], 1000, 600)).toBeNull();
   });
 
-  it("never produces a self-intersecting quad", () => {
-    const q = quadFromPlacedPoints([tl, br, tr, bl], 1000, 600)!;
-    expect(isSelfIntersecting(q)).toBe(false);
+  it("never produces a self-intersecting quad from four DISTINCT points", () => {
+    // A deterministic sweep, not one hand-picked permutation. The original
+    // version of this test asserted the property for a single input and so
+    // could not see the coincident-point case below.
+    let seed = 12345;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    for (let i = 0; i < 300; i++) {
+      const pts = Array.from({ length: 4 }, () => ({ x: rnd() * 1000, y: rnd() * 600 }));
+      // Skip near-coincident draws; those are `advancePlacement`'s job, below.
+      const tooClose = pts.some((a, ai) =>
+        pts.some((b, bi) => ai !== bi && Math.hypot(a.x - b.x, a.y - b.y) < 20),
+      );
+      if (tooClose) continue;
+      expect(isSelfIntersecting(quadFromPlacedPoints(pts, 1000, 600)!)).toBe(false);
+    }
+  });
+
+  /**
+   * The limit of what ordering can fix, stated so nobody assumes otherwise.
+   * `orderQuadByAngle` sorts by atan2 around the centroid; two coincident points
+   * tie, the sort keeps their input order, and the quad folds. Preventing this
+   * is `advancePlacement`'s job, not this function's.
+   */
+  it("CANNOT repair coincident points — the guard belongs upstream", () => {
+    const dup = { x: 100, y: 100 };
+    const folded = quadFromPlacedPoints([dup, dup, { x: 900, y: 100 }, { x: 500, y: 500 }], 1000, 600)!;
+    expect(isSelfIntersecting(folded)).toBe(true);
+  });
+
+  /**
+   * Pins the ORDER of operations, which the bounds-only clamp test above cannot
+   * see. Clamping moves the centroid, which moves the angular sort, so
+   * clamp-then-order and order-then-clamp disagree on asymmetric off-frame
+   * input. This input is one where they differ.
+   */
+  it("clamps BEFORE ordering, not after", () => {
+    const q = quadFromPlacedPoints(
+      [{ x: 1614, y: -231 }, { x: 835, y: 196 }, { x: 1337, y: 849 }, { x: 424, y: 1 }],
+      1000,
+      600,
+    )!;
+    const clampedThenOrdered = orderQuadByAngle(
+      [{ x: 1614, y: -231 }, { x: 835, y: 196 }, { x: 1337, y: 849 }, { x: 424, y: 1 }].map((p) =>
+        clampPtToFrame(p, 1000, 600),
+      ),
+    );
+    expect(q).toEqual(clampedThenOrdered);
+  });
+});
+
+describe("advancePlacement — one tap at a time", () => {
+  const W = 1000;
+  const H = 600;
+  const a = { x: 100, y: 100 };
+  const b = { x: 900, y: 100 };
+  const c = { x: 900, y: 500 };
+  const d = { x: 100, y: 500 };
+
+  it("accumulates taps 1 through 3 without committing", () => {
+    let placed: Pt[] = [];
+    for (const [i, p] of [a, b, c].entries()) {
+      const step = advancePlacement(placed, p, W, H);
+      expect(step.commit).toBeNull();
+      expect(step.placed).toHaveLength(i + 1);
+      placed = step.placed;
+    }
+  });
+
+  it("commits on the fourth tap and resets, so length is never 4", () => {
+    const step = advancePlacement([a, b, c], d, W, H);
+    expect(step.commit).not.toBeNull();
+    expect(step.placed).toEqual([]);
+  });
+
+  /**
+   * THE regression. A double-tap at rest yields two identical clientX/clientY,
+   * hence two identical frame points. Ordering cannot separate them and the quad
+   * folds into a triangle measuring ~27% of the frame — which clears
+   * MIN_AREA_FRACTION, so the "almost empty" escape never fires and the user
+   * silently gets a wrong crop.
+   */
+  it("IGNORES a tap coincident with one already placed", () => {
+    const step = advancePlacement([a], { ...a }, W, H);
+    expect(step.placed).toEqual([a]);
+    expect(step.commit).toBeNull();
+  });
+
+  it("ignores a tap merely too CLOSE, not just exactly coincident", () => {
+    const gap = Math.min(W, H) * MIN_TAP_SEPARATION_FRACTION;
+    const near = { x: a.x + gap * 0.5, y: a.y };
+    expect(advancePlacement([a], near, W, H).placed).toEqual([a]);
+    const far = { x: a.x + gap * 1.5, y: a.y };
+    expect(advancePlacement([a], far, W, H).placed).toHaveLength(2);
+  });
+
+  it("never commits a self-intersecting quad, however the taps land", () => {
+    let seed = 999;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    for (let i = 0; i < 300; i++) {
+      let placed: Pt[] = [];
+      let commit = null;
+      // Deliberately include repeats so the coincident path is exercised.
+      const taps = Array.from({ length: 12 }, () =>
+        rnd() < 0.3 ? { x: 300, y: 300 } : { x: rnd() * W, y: rnd() * H },
+      );
+      for (const t of taps) {
+        const step = advancePlacement(placed, t, W, H);
+        placed = step.placed;
+        if (step.commit) { commit = step.commit; break; }
+      }
+      if (commit) expect(isSelfIntersecting(commit)).toBe(false);
+    }
+  });
+
+  it("clamps a tap on the letterbox margin instead of dropping it", () => {
+    const step = advancePlacement([], { x: -400, y: -400 }, W, H);
+    expect(step.placed).toEqual([{ x: 0, y: 0 }]);
   });
 });

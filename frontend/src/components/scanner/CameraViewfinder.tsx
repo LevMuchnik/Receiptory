@@ -311,15 +311,35 @@ export default function CameraViewfinder({
     };
   }, [ready, videoRef, detector, detectorParams, smoother]);
 
-  // Only ARMS the timer. The reset lives beside `setDocumentDetected(true)` in
-  // the detection callback, which is an event handler rather than an effect —
-  // resetting here would be a set-state-in-effect, and the rule that flags it is
-  // right: the state change belongs at the event that causes it.
+  /*
+    Arms the timer only while a camera is actually running.
+
+    The `ready` gate is load-bearing, not tidiness. Without it the timer starts
+    at mount, which is before `getUserMedia` resolves — and the permission prompt
+    lives inside that call, with a 20s budget (`useCamera.READY_TIMEOUT_MS`).
+    A user who takes more than four seconds to tap "Allow" would read "No
+    document found" over a black spinner, next to a disabled shutter, having
+    never run a single detection. `ready` is also the semantically correct t=0:
+    the streak means "detection has come up empty", not "this component has
+    existed for a while".
+
+    The reset for the detected case lives beside `setDocumentDetected` in the
+    detection callback: the state change belongs at the event that causes it,
+    and setting state in an effect body is what `react-hooks/set-state-in-effect`
+    exists to catch.
+  */
   useEffect(() => {
-    if (documentDetected) return;
+    if (documentDetected || !ready) {
+      /* eslint-disable-next-line react-hooks/set-state-in-effect -- deliberate
+         reset when the camera goes away or a detection lands, matching the
+         re-acquire reset in useCamera.ts. Idempotent: React bails out when the
+         value is unchanged, so the steady state schedules no render. */
+      setNoDetectionStreak(false);
+      return;
+    }
     const t = setTimeout(() => setNoDetectionStreak(true), NO_DETECTION_HINT_MS);
     return () => clearTimeout(t);
-  }, [documentDetected]);
+  }, [documentDetected, ready]);
 
   const handleCapture = useCallback(() => {
     const video = videoRef.current;
@@ -359,25 +379,29 @@ export default function CameraViewfinder({
   }
 
   /*
-    Four badge states, not three. The fourth exists because "Position document
-    in frame" is a dead end once moving the camera has stopped helping: the
-    shutter is deliberately never disabled on detection state, and the review
-    screen can set corners by hand, but nothing on this screen said so. A user
-    facing a permanently empty badge has no reason to believe shooting anyway
-    will get them anywhere.
+    "Position document in frame" is a dead end once moving the camera has
+    stopped helping: the shutter is deliberately never disabled on detection
+    state and the review screen can set corners by hand, but nothing here said
+    so. `stuck` is the fourth badge state that says it.
+
+    ONE derived value drives text, colour and shape. Deriving them from separate
+    conditions let a persistent detector error reach the wrapping branch, which
+    stripped `truncate` from the one string it exists to protect — an error
+    keeps `documentDetected` false, so the streak fires underneath it.
   */
+  const stuck = !detectorError && !documentDetected && noDetectionStreak;
   const badgeText = detectorError
     ? `Detector error: ${detectorError}`
     : documentDetected
       ? "Document detected"
-      : noDetectionStreak
-        ? "No document found. Shoot anyway, then set the corners by hand."
+      : stuck
+        ? "No document found. Shoot anyway, then set corners on the next screen."
         : "Position document in frame";
   const badgeClass = detectorError
     ? "bg-[#ba1a1a]/85 text-white"
     : documentDetected
       ? "bg-[#006d37]/80 text-white"
-      : noDetectionStreak
+      : stuck
         ? "bg-black/75 text-white"
         : "bg-black/50 text-white/70";
 
@@ -492,7 +516,7 @@ export default function CameraViewfinder({
           // state is short, and `truncate` is what keeps a long detector error
           // from pushing the badge off both edges of a phone screen.
           className={`text-xs font-bold px-3 py-1 backdrop-blur-sm max-w-full ${badgeClass} ${
-            noDetectionStreak ? "rounded-xl text-center leading-snug" : "rounded-full truncate"
+            stuck ? "rounded-xl text-center leading-snug" : "rounded-full truncate"
           }`}
         >
           {badgeText}

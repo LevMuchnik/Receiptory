@@ -300,6 +300,28 @@ Deferred items captured during planning and review. Organized by component, sort
 **Depends on:** None
 **Depends on:** ML detection is shipped and live (Phase 1 of the ML detector plan). Only worth building if a non-WebGPU device enters the picture, or the S26 WASM fallback benchmark is bad
 
+### "No document found" panel flashes before the review re-detect answers
+
+**What:** Gate the crop pane's "No document found" panel on the review-entry re-detect having actually completed, rather than on `corners === null` alone. Either thread a `detecting` flag through `useScanner`'s reducer, or delay the panel's appearance ~300ms.
+
+**Why:** `ScannerPage.tsx:138` dispatches `captured` with `corners: fromEma` (often null) immediately, then awaits the re-detect. For that whole window `!placing && !corners` is true, so a full-width opaque panel making a definitive negative claim appears and then vanishes when the fresh detect lands and draws a quad. Sub-200ms, but it is the first thing on screen after the shutter and it says something that turns out to be false.
+
+**Pros:**
+- Removes a false negative claim from the most-seen moment in the flow
+
+**Cons:**
+- The reducer route adds a state field for a cosmetic issue; the delay route adds a timer per capture
+- Genuinely minor: the panel is helpful rather than alarming, and the flash is brief
+
+**Context:**
+- Source: design lens, `/review` of `feat/scanner-manual-corners`, 2026-09-08 (confidence 6/10)
+- Start: `frontend/src/pages/ScannerPage.tsx:138`, `frontend/src/components/scanner/CaptureReview.tsx` fallback panel
+- Deliberately deferred: that review pass already applied 14 fixes to this component, and stacking a cosmetic one raised regression risk more than it bought
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
 ### Remove the E2 diagnostics strip from the scanner viewfinder
 
 **What:** Delete the `REQ 4K` / `REQ 1080p` toggle and the `granted / video / detect / cam` readout from `CameraViewfinder.tsx`, plus the `Diagnostics` interface, the `capture4k` state, the `LADDER_CONTROL_1080P` constant and the `lastVideoW`/`lastVideoH` tracking that feeds it. Roughly 45 lines.

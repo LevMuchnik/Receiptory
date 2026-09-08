@@ -408,6 +408,7 @@ export default function ScannerPage() {
           pageCount={pages.length}
           onDragStart={handleDragStart}
           onCornersCommit={handleCornersCommit}
+          onGestureCancel={releaseDragGuard}
           onUseFullFrame={handleUseFullFrame}
           onRetake={handleRetake}
           onAddPage={handleAddPage}
