@@ -8,6 +8,34 @@ let scanner: Scanner | null = null;
 let initPromise: Promise<void> | null = null;
 
 /**
+ * Detection options that hold scanic 1.6 to the edge map and candidate pool
+ * 1.0.6 produced. Both detect paths inherit them through the constructor: the
+ * live detector (`classical-detector`) and the full-frame fallback in
+ * `extractAndEnhance`.
+ *
+ * Why 1.6 at all: 1.0.6's extract drew the warp as 8,192 anti-aliased triangles,
+ * and the seams came out as dark lines on narrow receipts (a 7.6px lattice on
+ * the 2026-09-11 Naya scan). 1.6's extract is a per-pixel inverse map.
+ *
+ * Why these three: 1.6's defaults derive Canny thresholds from each frame's
+ * gradient histogram and add cascade passes that dilate edges harder, then rank
+ * the pooled candidates by a score weighted toward large quads. On a narrow
+ * receipt on a wood desk that picks the wood grain. Over the 46-frame scanner
+ * corpus, defaults produced 11 wrong boxes on the 32 labelled frames against
+ * 1.0.6's 2. With these options it is 2, and all four recent 4K captures land
+ * on the receipt. Measured with the app's own ClassicalDetector; the numbers
+ * and the rollback procedure are in docs/designs/scanic-1.6-upgrade.md.
+ *
+ * `maxDocumentAspectRatio` is NOT here: it tracks `ClassicalParams.maxAspect`
+ * and is passed per call (see `scanicDetectOptions`).
+ */
+export const SCANIC_DETECTION_OPTIONS = {
+  lowThreshold: 75,
+  highThreshold: 200,
+  enableDetectionCascade: false,
+} as const;
+
+/**
  * Initialize the Scanic engine. Safe to call repeatedly; concurrent callers
  * share one in-flight promise.
  *
@@ -31,7 +59,7 @@ export async function initScanner(): Promise<void> {
     // scanic does not resample a frame we already sized. But this bound belongs
     // to scanic: a scanic upgrade that changes its own default should not be
     // silently overridden by ours. If you change one, look at the other.
-    const s = new Scanner({ maxProcessingDimension: 800, output: "canvas" });
+    const s = new Scanner({ maxProcessingDimension: 800, output: "canvas", ...SCANIC_DETECTION_OPTIONS });
     await s.initialize();
     scanner = s;
   })();

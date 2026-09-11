@@ -4,11 +4,22 @@ import {
   classifyScanResult,
   firstHardReject,
   outcomeForNoQuad,
+  scanicDetectOptions,
   scanThrowMessage,
   toQuad,
   type Metrics,
 } from "./classical-detector";
 import { REJECT_OUTCOMES, isRejectOutcome } from "./detector";
+
+describe("scanicDetectOptions — scanic's aspect cap follows ours", () => {
+  it("passes our maxAspect through, so scanic 1.6's 8:1 default never binds first", () => {
+    // A 10:1 restaurant slip is inside our 12:1 gate. Left at scanic's default
+    // of 8, scanic would mark it invalid and rank any valid rectangle nearby
+    // above it — the slip would never reach our gates to be accepted.
+    expect(scanicDetectOptions(CLASSICAL_DEFAULTS)).toEqual({ mode: "detect", maxDocumentAspectRatio: 12 });
+    expect(scanicDetectOptions({ maxAspect: 20 }).maxDocumentAspectRatio).toBe(20);
+  });
+});
 
 /**
  * The silent-failure suite.

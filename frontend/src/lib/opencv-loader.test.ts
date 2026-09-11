@@ -41,7 +41,7 @@ class FakeScanner {
 vi.mock("scanic", () => ({ Scanner: FakeScanner }));
 
 // Imported after the mock is registered; vi.mock is hoisted so this is safe.
-const { initScanner, getScanner, terminateScanner } = await import("./opencv-loader");
+const { initScanner, getScanner, terminateScanner, SCANIC_DETECTION_OPTIONS } = await import("./opencv-loader");
 
 beforeEach(() => {
   // terminateScanner() clears BOTH module globals, which is exactly the state a
@@ -130,5 +130,22 @@ describe("terminateScanner", () => {
 
     await initScanner();
     expect(constructed).toHaveLength(2);
+  });
+});
+
+describe("Scanner construction — scanic 1.6 held to 1.0.6 detection", () => {
+  it("builds the Scanner with the pinned detection options", async () => {
+    // Dropping these reverts detection to scanic 1.6's defaults, which on the
+    // scanner corpus drew 11 wrong boxes on 32 labelled frames (1.0.6: 2) and
+    // boxed the wood grain instead of the Naya receipt. See
+    // docs/designs/scanic-1.6-upgrade.md before changing any of them.
+    await initScanner();
+    expect(constructed[0].options).toMatchObject({
+      lowThreshold: 75,
+      highThreshold: 200,
+      enableDetectionCascade: false,
+      maxProcessingDimension: 800,
+    });
+    expect(constructed[0].options).toMatchObject(SCANIC_DETECTION_OPTIONS);
   });
 });

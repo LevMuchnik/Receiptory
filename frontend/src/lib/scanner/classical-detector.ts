@@ -62,7 +62,7 @@ export class ClassicalDetector implements Detector {
     let classified: ScanClassification;
     try {
       await initScanner();
-      classified = classifyScanResult(await getScanner().scan(canvas, { mode: "detect" }));
+      classified = classifyScanResult(await getScanner().scan(canvas, scanicDetectOptions(p)));
     } catch (e) {
       classified = { rawCorners: null, error: scanThrowMessage(e) };
     }
@@ -190,6 +190,22 @@ function canvasBlur(image: ImageData, radius: number): ImageData {
   return octx.getImageData(0, 0, image.width, image.height);
 }
 
+/**
+ * Per-call scanic options for a detect pass. The fixed ones live in
+ * `SCANIC_DETECTION_OPTIONS` (opencv-loader), set once on the Scanner.
+ *
+ * `maxDocumentAspectRatio` follows our own `maxAspect`. Scanic 1.6 marks any quad
+ * longer than 8:1 invalid by default and ranks every valid candidate above it,
+ * so a 10:1 restaurant slip would lose to whatever rectangle sat next to it,
+ * before our own gate (12:1) ever saw it. Scanic 1.0.6 had no such cap.
+ *
+ * Exported and pure so the node-env suite can pin the wiring; `detect()` itself
+ * needs a canvas.
+ */
+export function scanicDetectOptions(p: Pick<ClassicalParams, "maxAspect">) {
+  return { mode: "detect" as const, maxDocumentAspectRatio: p.maxAspect };
+}
+
 /** Scanic's default "nothing in this frame" message. Not a failure. */
 const SCANIC_EMPTY_MESSAGE = "No document detected";
 
@@ -207,9 +223,13 @@ export interface ScanClassification {
  * whether the viewfinder's error badge lights up.
  *
  * THE LOAD-BEARING CASE is `success: false` with scanic's own default message.
- * In detect mode scanic has exactly ONE such path: detectDocumentContour found
- * zero contours above minArea (scanic.js:1059-1066, propagated at :1366-1376).
- * That is an honest empty frame, and it fires on EVERY frame of a bare table.
+ * In classical detect mode scanic 1.6 has exactly ONE such path: no candidate
+ * with corners survived contour finding, and the result carries the literal
+ * "No document detected" (the only `success: false` message scanDocument emits
+ * outside ML mode; checked in the minified 1.6.0 dist, which ships no source).
+ * A candidate that fails scanic's own validity gates is still returned when no
+ * valid one exists, so our gates keep seeing it. That is an honest empty frame,
+ * and it fires on EVERY frame of a bare table.
  * Setting `error` there would pin the badge on permanently and destroy the only
  * signal meaning "the detector is broken" — the entire reason the error channel
  * exists. So stay silent on the default message; surface only a message scanic
