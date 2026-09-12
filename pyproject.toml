@@ -4,13 +4,13 @@ version = "1.2.0"
 description = "Self-hosted receipt and invoice management system"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.115.0",
+    "fastapi>=0.141.0",
     "uvicorn[standard]>=0.34.0",
-    "python-multipart>=0.0.18",
+    "python-multipart>=0.0.31",
     "litellm>=1.93.0",
     "PyMuPDF>=1.25.0",
-    "Pillow>=11.0.0",
-    "weasyprint>=63.0",
+    "Pillow>=12.3.0",
+    "weasyprint>=70.0",
     "bcrypt>=4.2.0",
     "itsdangerous>=2.2.0",
     "croniter>=6.0.0",
