@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import sqlite3
 import logging
 import tempfile
 from datetime import datetime, timezone
@@ -17,10 +18,10 @@ def build_backup(data_dir: str) -> str:
     backup_dir = os.path.join(tempfile.gettempdir(), f"receiptory_backup_{timestamp}")
     os.makedirs(backup_dir, exist_ok=True)
 
-    # Copy SQLite database
+    # Snapshot SQLite database
     db_path = os.path.join(data_dir, "receiptory.db")
     if os.path.exists(db_path):
-        shutil.copy2(db_path, os.path.join(backup_dir, "receiptory.db"))
+        snapshot_database(db_path, os.path.join(backup_dir, "receiptory.db"))
 
     # Copy storage files
     storage_dir = os.path.join(data_dir, "storage")
@@ -43,6 +44,40 @@ def build_backup(data_dir: str) -> str:
 
     logger.info(f"Backup assembled at {backup_dir}")
     return backup_dir
+
+
+def snapshot_database(db_path: str, dest_path: str) -> None:
+    """Copy the database as a consistent, restorable snapshot.
+
+    A plain file copy is wrong here, and silently so. The database runs in WAL
+    mode (see init_db), where a committed transaction lives in receiptory.db-wal
+    until something checkpoints it. Copying only receiptory.db therefore yields a
+    backup missing everything since the last checkpoint -- and since the schema
+    itself arrives through the same WAL, a copy taken early enough restores to a
+    database with no tables at all. Copying the -wal and -shm alongside it is not
+    the fix either: the three files are only coherent together at an instant the
+    copy cannot pin, so a busy moment gives a torn set.
+
+    The online backup API takes a read lock and writes a fully checkpointed
+    standalone database that needs no sidecar files, which is also why the
+    backup directory contains no -wal or -shm.
+
+    Raises if the snapshot fails its integrity check, so a bad backup fails the
+    run loudly instead of being uploaded and discovered at restore time.
+    """
+    source = sqlite3.connect(db_path, timeout=30)
+    try:
+        dest = sqlite3.connect(dest_path)
+        try:
+            source.backup(dest)
+            result = dest.execute("PRAGMA integrity_check").fetchone()[0]
+        finally:
+            dest.close()
+    finally:
+        source.close()
+
+    if result != "ok":
+        raise RuntimeError(f"Backup snapshot failed integrity check: {result}")
 
 
 def _export_jsonl(output_path: str) -> None:
