@@ -14,8 +14,9 @@
  * overridden by ours.
  *
  * Why 800 specifically, and why a fixed edge rather than a fraction of the
- * video: scanic downsamples anything larger to 800 before it looks for a
- * contour (`prepareScaleAndGrayscale`, scanic.js:961), so pixels above this are
+ * video: scanic downsamples anything larger to `maxProcessingDimension` (800)
+ * before it looks for a contour (still true in 1.6.0, whose minified dist no
+ * longer has the 1.0.6 function names or line numbers), so pixels above this are
  * discarded — but only AFTER `classical-detector.preprocess()` has paid five
  * per-pixel JS passes and two canvas round-trips on them. A fraction of the
  * video silently rescales that cost with whatever the camera ladder negotiated;

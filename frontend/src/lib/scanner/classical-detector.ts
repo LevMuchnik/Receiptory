@@ -1,3 +1,4 @@
+import type { DetectionOptions } from "scanic";
 import { getScanner, initScanner } from "@/lib/opencv-loader";
 import { imageDataToCanvas } from "./canvas-utils";
 import { convexHullArea, dist, interiorAngles, lerp, polygonArea } from "./geometry";
@@ -203,7 +204,7 @@ function canvasBlur(image: ImageData, radius: number): ImageData {
  * needs a canvas.
  */
 export function scanicDetectOptions(p: Pick<ClassicalParams, "maxAspect">) {
-  return { mode: "detect" as const, maxDocumentAspectRatio: p.maxAspect };
+  return { mode: "detect" as const, maxDocumentAspectRatio: p.maxAspect } satisfies DetectionOptions;
 }
 
 /** Scanic's default "nothing in this frame" message. Not a failure. */
