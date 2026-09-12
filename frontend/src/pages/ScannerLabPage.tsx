@@ -5,6 +5,33 @@ import { initScanner } from "@/lib/opencv-loader";
 import { ClassicalDetector, CLASSICAL_DEFAULTS, type ClassicalParams } from "@/lib/scanner/classical-detector";
 import { MLDetector, ML_DEFAULTS, type MLParams } from "@/lib/scanner/ml-detector";
 import type { Detector, DetectionResult, Quad } from "@/lib/scanner/detector";
+import { quadIoU, normalizeQuad, orderQuadByAngle } from "@/lib/scanner/geometry";
+import { downscaleImageData, imageDataToCanvas } from "@/lib/scanner/canvas-utils";
+
+/**
+ * The Lab preview deliberately does NOT take the scanner's 4K raise.
+ *
+ * Every frame the Lab captures is re-encoded to a 1280px long edge on upload
+ * (see `imageDataToJpegBlob`), and every frame it evaluates is downscaled again
+ * by the detector. A 4K stream here would buy nothing but a 33MB ImageData held
+ * in `loaded` state on a phone that the design doc already flags for memory
+ * pressure. The scanner, which keeps full resolution for the final extract,
+ * gets the raise; the Lab does not.
+ *
+ * The negotiated resolution is still surfaced under the viewfinder, so the
+ * device's actual capability can be read off on-device without a debugger.
+ */
+const LAB_PREVIEW_WIDTH = 1920;
+const LAB_PREVIEW_HEIGHT = 1080;
+
+/**
+ * Match `test-frame-upload.ts` — the corpus stores 1280px-long-edge JPEGs at
+ * q0.85. Lab captures used to upload at full resolution and q0.9, which is both
+ * a multi-megabyte upload (worse at 4K) and a corpus that mixes resolutions the
+ * eval then can't compare across.
+ */
+const UPLOAD_LONG_EDGE = 1280;
+const UPLOAD_JPEG_QUALITY = 0.85;
 
 interface LoadedFrame {
   frameId: number | null;
@@ -25,10 +52,21 @@ interface PanelState {
 }
 
 interface EvalReport {
+  /** Frames that actually produced a comparable detection. */
   count: number;
   hitRate: number;
   medianIoU: number;
   medianTimingMs: number;
+  /**
+   * Frames where the detector FAILED (DetectionResult.error) rather than
+   * honestly finding nothing. These are excluded from the IoU distribution
+   * entirely. Folding them in as 0-IoU misses is how a wrong model URL or a
+   * dead Scanic init reads as "median IoU 0.00 -- the detector is bad", which
+   * is the exact misreading this eval exists to prevent.
+   */
+  errors: number;
+  /** Frames skipped because their stored ground truth would not parse. */
+  unparsed: number;
 }
 
 const PALETTE_A = "#006d37";
@@ -50,6 +88,8 @@ export default function ScannerLabPage() {
   const [loaded, setLoaded] = useState<LoadedFrame | null>(null);
   const [groundTruth, setGroundTruth] = useState<Quad | null>(null);
   const [activeBanner, setActiveBanner] = useState<string | null>(null);
+  /** Bumped to remount LabCamera and retry camera acquisition from rung 1. */
+  const [cameraAttempt, setCameraAttempt] = useState(0);
 
   const classical = useMemo(() => new ClassicalDetector(), []);
   const ml = useMemo(() => new MLDetector(), []);
@@ -137,7 +177,7 @@ export default function ScannerLabPage() {
 
   const saveGroundTruth = useCallback(async () => {
     if (!loaded?.frameId || !groundTruth) return;
-    const normalized = normalizeQuadCoords(groundTruth, loaded.width, loaded.height);
+    const normalized = normalizeQuad(groundTruth, loaded.width, loaded.height);
     await api.patchScannerTestFrame(loaded.frameId, {
       ground_truth_json: JSON.stringify(normalized),
     });
@@ -166,30 +206,53 @@ export default function ScannerLabPage() {
     const ious: number[] = [];
     const timings: number[] = [];
     let hits = 0;
+    let errors = 0;
+    let unparsed = 0;
     for (const f of annotated) {
       let gt: Quad;
       try {
         gt = JSON.parse(f.ground_truth_json!) as Quad;
       } catch {
+        unparsed++;
         continue;
       }
       const imageData = await fetchImageData(api.scannerTestFrameImageUrl(f.id));
       const result = await det.detect(imageData, params);
+      if (result.error) {
+        // The detector broke; it did not look at this frame and miss. Scoring
+        // it 0 would corrupt the median with a number that says nothing about
+        // accuracy. Count it separately and surface it.
+        errors++;
+        continue;
+      }
       timings.push(result.timingMs);
+      // Order BOTH quads before measuring. quadIoU's polygonClip defines
+      // "inside" as isLeft >= 0, so a quad wound the other way yields an empty
+      // intersection and IoU 0 -- which reads as "the detector missed", the
+      // exact misreading that killed the 2026-07-03 design. Ground truth is
+      // hand-annotated and never re-wound, and detector output carries no
+      // winding guarantee either.
       const iou = result.corners
         ? quadIoU(
-            denormalizeQuadIfNormalized(gt, imageData.width, imageData.height),
-            result.corners,
+            orderQuadByAngle(
+              quadPoints(denormalizeQuadIfNormalized(gt, imageData.width, imageData.height)),
+            ),
+            orderQuadByAngle(quadPoints(result.corners)),
           )
         : 0;
       ious.push(iou);
       if (iou >= 0.85) hits++;
     }
     const report: EvalReport = {
-      count: annotated.length,
-      hitRate: hits / annotated.length,
+      // Denominator is frames actually scored, not frames attempted. Dividing
+      // by annotated.length while skipping frames silently under-reported the
+      // hit rate.
+      count: ious.length,
+      hitRate: ious.length > 0 ? hits / ious.length : 0,
       medianIoU: median(ious),
       medianTimingMs: median(timings),
+      errors,
+      unparsed,
     };
     set({ ...panel, evalReport: report });
   }, [frames, detectorFor]);
@@ -210,7 +273,13 @@ export default function ScannerLabPage() {
       <section className="bg-card rounded-xl p-5 shadow-[0_8px_32px_rgba(25,28,30,0.06)]">
         <h2 className="text-lg font-headline font-bold text-primary mb-4">1. Pick or capture a frame</h2>
         <div className="grid lg:grid-cols-2 gap-5">
-          <LabCamera onCapture={adoptCapturedFrame} />
+          {/* `key` is the retry mechanism: bumping it remounts LabCamera, which
+              tears down any half-acquired stream and walks the ladder afresh. */}
+          <LabCamera
+            key={cameraAttempt}
+            onCapture={adoptCapturedFrame}
+            onRetry={() => setCameraAttempt((n) => n + 1)}
+          />
           <FramePicker frames={frames} selectedId={loaded?.frameId ?? null} onPick={loadFrame} onDelete={removeFrame} />
         </div>
       </section>
@@ -261,8 +330,17 @@ export default function ScannerLabPage() {
   );
 }
 
-function LabCamera({ onCapture }: { onCapture: (image: ImageData) => void }) {
-  const { videoRef, error, ready } = useCamera();
+function LabCamera({
+  onCapture,
+  onRetry,
+}: {
+  onCapture: (image: ImageData) => void;
+  onRetry: () => void;
+}) {
+  const { videoRef, error, ready, settings } = useCamera({
+    width: LAB_PREVIEW_WIDTH,
+    height: LAB_PREVIEW_HEIGHT,
+  });
 
   const capture = useCallback(() => {
     const video = videoRef.current;
@@ -280,7 +358,16 @@ function LabCamera({ onCapture }: { onCapture: (image: ImageData) => void }) {
       <div className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Live camera</div>
       <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
         {error ? (
-          <div className="absolute inset-0 flex items-center justify-center text-white text-sm p-4 text-center">{error}</div>
+          // The stuck/failure messages end in "Tap to retry", so make that true:
+          // remounting LabCamera re-runs the whole constraint ladder from rung 1.
+          <button
+            type="button"
+            onClick={onRetry}
+            className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-white text-sm p-4 text-center"
+          >
+            <span className="material-symbols-outlined">videocam_off</span>
+            {error}
+          </button>
         ) : (
           <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
         )}
@@ -289,6 +376,15 @@ function LabCamera({ onCapture }: { onCapture: (image: ImageData) => void }) {
             <span className="material-symbols-outlined text-white animate-spin">progress_activity</span>
           </div>
         )}
+      </div>
+      {/* Negotiated resolution, not the requested one — measurement 8a wants the
+          detection resolution recorded, and this is where it can be read. */}
+      <div className="text-[11px] text-muted-foreground font-mono">
+        {settings
+          ? `granted ${settings.width ?? "?"}x${settings.height ?? "?"}` +
+            (settings.frameRate ? ` @ ${Math.round(settings.frameRate)}fps` : "") +
+            (settings.facingMode ? ` (${settings.facingMode})` : "")
+          : `requested ${LAB_PREVIEW_WIDTH}x${LAB_PREVIEW_HEIGHT}…`}
       </div>
       <button
         onClick={capture}
@@ -441,8 +537,25 @@ function DetectorPanel({
         <Stat label="score" value={panel.result ? panel.result.score.toFixed(3) : "—"} />
         <Stat label="time" value={panel.result ? `${panel.result.timingMs.toFixed(0)} ms` : "—"} />
         <Stat label="candidates" value={String(panel.result?.candidates?.length ?? 0)} />
-        <Stat label="status" value={panel.result?.corners ? "accepted" : panel.result ? "rejected" : "—"} />
+        <Stat
+          label="status"
+          value={
+            panel.result?.error
+              ? "error"
+              : panel.result?.corners
+                ? "accepted"
+                : panel.result
+                  ? "rejected"
+                  : "—"
+          }
+        />
       </div>
+
+      {panel.result?.error && (
+        <div className="text-xs bg-[#ba1a1a]/10 text-[#ba1a1a] p-2 rounded-md font-medium">
+          {panel.result.error}
+        </div>
+      )}
 
       {panel.evalReport && (
         <div className="text-xs grid grid-cols-2 gap-2 bg-muted/50 p-3 rounded-md">
@@ -450,6 +563,14 @@ function DetectorPanel({
           <span>Hit rate: <strong>{(panel.evalReport.hitRate * 100).toFixed(0)}%</strong></span>
           <span>Median IoU: <strong>{panel.evalReport.medianIoU.toFixed(3)}</strong></span>
           <span>Median time: <strong>{panel.evalReport.medianTimingMs.toFixed(0)} ms</strong></span>
+          {panel.evalReport.errors > 0 && (
+            <span className="text-[#ba1a1a] font-bold">
+              {panel.evalReport.errors} detector error{panel.evalReport.errors === 1 ? "" : "s"} (excluded -- this number is not a clean baseline)
+            </span>
+          )}
+          {panel.evalReport.unparsed > 0 && (
+            <span className="text-[#ba1a1a]">{panel.evalReport.unparsed} unparsable ground truth</span>
+          )}
         </div>
       )}
 
@@ -676,12 +797,22 @@ function loadImage(url: string): Promise<HTMLImageElement> {
   });
 }
 
+/**
+ * Encode a captured frame for upload, capped at `UPLOAD_LONG_EDGE`.
+ *
+ * The cap is the point: this used to encode at full resolution, so a 4K capture
+ * became a multi-megabyte POST of pixels the corpus immediately throws away.
+ * `downscaleImageData` returns the input untouched when it already fits, so a
+ * 1080p capture costs nothing extra.
+ *
+ * The upload's `width`/`height` metadata still describes the ORIGINAL capture,
+ * not this blob — same convention as `test-frame-upload.ts`, and the reason
+ * stored corner data is normalized to 0-1.
+ */
 async function imageDataToJpegBlob(image: ImageData): Promise<Blob | null> {
-  const c = document.createElement("canvas");
-  c.width = image.width;
-  c.height = image.height;
-  c.getContext("2d")!.putImageData(image, 0, 0);
-  return new Promise((resolve) => c.toBlob((b) => resolve(b), "image/jpeg", 0.9));
+  const { data } = downscaleImageData(image, UPLOAD_LONG_EDGE);
+  const c = imageDataToCanvas(data);
+  return new Promise((resolve) => c.toBlob((b) => resolve(b), "image/jpeg", UPLOAD_JPEG_QUALITY));
 }
 
 function drawQuad(
@@ -719,15 +850,6 @@ function colorWithAlpha(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-function normalizeQuadCoords(quad: Quad, w: number, h: number): Quad {
-  return {
-    topLeft: { x: quad.topLeft.x / w, y: quad.topLeft.y / h },
-    topRight: { x: quad.topRight.x / w, y: quad.topRight.y / h },
-    bottomRight: { x: quad.bottomRight.x / w, y: quad.bottomRight.y / h },
-    bottomLeft: { x: quad.bottomLeft.x / w, y: quad.bottomLeft.y / h },
-  };
-}
-
 function denormalizeQuadIfNormalized(quad: Quad, w: number, h: number): Quad {
   const maxV = Math.max(
     quad.topLeft.x, quad.topLeft.y,
@@ -744,64 +866,12 @@ function denormalizeQuadIfNormalized(quad: Quad, w: number, h: number): Quad {
   };
 }
 
-function quadIoU(a: Quad, b: Quad): number {
-  const polyA = [a.topLeft, a.topRight, a.bottomRight, a.bottomLeft];
-  const polyB = [b.topLeft, b.topRight, b.bottomRight, b.bottomLeft];
-  const inter = polygonClip(polyA, polyB);
-  const interArea = polygonArea(inter);
-  const areaA = polygonArea(polyA);
-  const areaB = polygonArea(polyB);
-  const union = areaA + areaB - interArea;
-  return union > 0 ? interArea / union : 0;
-}
+// quadIoU / polygonClip moved to lib/scanner/geometry.ts so the accuracy metric
+// that produces every "median IoU" number in the design docs is unit-testable.
+// Its winding sensitivity is documented and regression-tested there.
 
-interface Pt2 { x: number; y: number; }
-
-function polygonClip(subject: Pt2[], clip: Pt2[]): Pt2[] {
-  let output = subject.slice();
-  for (let i = 0; i < clip.length; i++) {
-    if (output.length === 0) break;
-    const input = output;
-    output = [];
-    const A = clip[i];
-    const B = clip[(i + 1) % clip.length];
-    for (let j = 0; j < input.length; j++) {
-      const P = input[j];
-      const Q = input[(j + 1) % input.length];
-      const Pin = isLeft(A, B, P) >= 0;
-      const Qin = isLeft(A, B, Q) >= 0;
-      if (Pin) {
-        output.push(P);
-        if (!Qin) output.push(intersect(P, Q, A, B));
-      } else if (Qin) {
-        output.push(intersect(P, Q, A, B));
-      }
-    }
-  }
-  return output;
-}
-
-function isLeft(A: Pt2, B: Pt2, P: Pt2): number {
-  return (B.x - A.x) * (P.y - A.y) - (B.y - A.y) * (P.x - A.x);
-}
-
-function intersect(P: Pt2, Q: Pt2, A: Pt2, B: Pt2): Pt2 {
-  const r = { x: Q.x - P.x, y: Q.y - P.y };
-  const s = { x: B.x - A.x, y: B.y - A.y };
-  const denom = r.x * s.y - r.y * s.x;
-  if (Math.abs(denom) < 1e-9) return P;
-  const t = ((A.x - P.x) * s.y - (A.y - P.y) * s.x) / denom;
-  return { x: P.x + t * r.x, y: P.y + t * r.y };
-}
-
-function polygonArea(pts: Pt2[]): number {
-  if (pts.length < 3) return 0;
-  let a = 0;
-  for (let i = 0; i < pts.length; i++) {
-    const j = (i + 1) % pts.length;
-    a += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
-  }
-  return Math.abs(a) / 2;
+function quadPoints(q: Quad) {
+  return [q.topLeft, q.topRight, q.bottomRight, q.bottomLeft];
 }
 
 function median(xs: number[]): number {

@@ -2,32 +2,47 @@
 
 import { Scanner } from "scanic";
 
+import { imageDataToCanvas } from "./scanner/canvas-utils";
+
 let scanner: Scanner | null = null;
 let initPromise: Promise<void> | null = null;
 
+/**
+ * Initialize the Scanic engine. Safe to call repeatedly; concurrent callers
+ * share one in-flight promise.
+ *
+ * The module-level `scanner` is published only AFTER `initialize()` resolves,
+ * and `initPromise` is cleared on rejection. An earlier version assigned
+ * `scanner` before awaiting `initialize()`, so a single init failure left a
+ * half-built instance behind: `if (scanner) return` short-circuited every later
+ * call and the failure latched permanently with no way to retry.
+ *
+ * Rejections propagate to the caller — classical-detector's catch depends on
+ * that to populate DetectionResult.error.
+ */
 export async function initScanner(): Promise<void> {
   if (scanner) return;
   if (initPromise) return initPromise;
 
-  initPromise = (async () => {
-    scanner = new Scanner({ maxProcessingDimension: 800, output: "canvas" });
-    await scanner.initialize();
+  const p = (async () => {
+    const s = new Scanner({ maxProcessingDimension: 800, output: "canvas" });
+    await s.initialize();
+    scanner = s;
   })();
 
-  return initPromise;
+  initPromise = p;
+  try {
+    await p;
+  } catch (e) {
+    // Allow a retry: drop the failed promise so the next call starts over.
+    if (initPromise === p) initPromise = null;
+    throw e;
+  }
 }
 
 export function getScanner(): Scanner {
   if (!scanner) throw new Error("Scanner not initialized — call initScanner() first");
   return scanner;
-}
-
-function imageDataToCanvas(imageData: ImageData): HTMLCanvasElement {
-  const c = document.createElement("canvas");
-  c.width = imageData.width;
-  c.height = imageData.height;
-  c.getContext("2d")!.putImageData(imageData, 0, 0);
-  return c;
 }
 
 /** Detect document corners from a (downscaled) video frame. */
@@ -68,11 +83,25 @@ export async function extractAndEnhance(
 
     try {
       const result = await s.extract(fullCanvas, scaledCorners, { output: "canvas" });
-      if (result.success && result.output && (result.output as HTMLCanvasElement).width > 0) {
-        outputCanvas = result.output as HTMLCanvasElement;
+      const out = result.output as HTMLCanvasElement | undefined;
+      // BOTH dimensions. A near-degenerate quad yields an N x 0 canvas, which
+      // passed a width-only check, flowed on as a valid crop, enabled Submit,
+      // and became a blank page in the PDF.
+      if (result.success && out && out.width > 0 && out.height > 0) {
+        outputCanvas = out;
       }
     } catch (e) {
       console.warn("Extract with corners failed:", e);
+    }
+
+    // Deliberately NOT falling through to the full-frame detect-and-crop below.
+    // That rung runs a FRESH detection and crops to whatever scanic picks,
+    // ignoring the corners the user just dragged -- so a failed warp would file
+    // a crop they never chose while the review screen kept showing their quad.
+    // If their corners could not be honoured, hand back the whole frame instead.
+    if (!outputCanvas) {
+      const enhanced = enhanceCanvas(fullCanvas);
+      return { original: fullCanvas, enhanced };
     }
   }
 

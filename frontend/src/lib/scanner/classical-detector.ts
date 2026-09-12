@@ -1,5 +1,7 @@
 import { getScanner, initScanner } from "@/lib/opencv-loader";
-import type { Detector, DetectionResult, Quad, Pt } from "./detector";
+import { imageDataToCanvas } from "./canvas-utils";
+import { convexHullArea, dist, interiorAngles, lerp, polygonArea } from "./geometry";
+import type { Detector, DetectionResult, Quad } from "./detector";
 
 export interface ClassicalParams {
   shadowNorm: boolean;
@@ -49,18 +51,27 @@ export class ClassicalDetector implements Detector {
     const preprocessed = preprocess(image, p);
     const canvas = imageDataToCanvas(preprocessed);
 
-    let rawCorners: any = null;
+    let classified: ScanClassification;
     try {
       await initScanner();
-      const r = await getScanner().scan(canvas, { mode: "detect" });
-      if (r.success && r.corners) rawCorners = r.corners;
-    } catch {
-      rawCorners = null;
+      classified = classifyScanResult(await getScanner().scan(canvas, { mode: "detect" }));
+    } catch (e) {
+      classified = { rawCorners: null, error: scanThrowMessage(e) };
     }
+    const { rawCorners, error } = classified;
 
-    const quad = normalizeQuad(rawCorners);
+    const quad = toQuad(rawCorners);
     if (!quad) {
-      return { corners: null, score: 0, candidates: [], timingMs: performance.now() - start };
+      return {
+        corners: null,
+        score: 0,
+        candidates: [],
+        timingMs: performance.now() - start,
+        // Corners present but malformed is a failure too; a plain miss above
+        // has already set `error`, and a genuine "nothing found" cannot reach
+        // here without one.
+        error: error ?? (rawCorners ? "Scanner returned malformed corners" : undefined),
+      };
     }
 
     const metrics = computeMetrics(quad, image);
@@ -81,14 +92,6 @@ export class ClassicalDetector implements Detector {
       timingMs: performance.now() - start,
     };
   }
-}
-
-function imageDataToCanvas(image: ImageData): HTMLCanvasElement {
-  const c = document.createElement("canvas");
-  c.width = image.width;
-  c.height = image.height;
-  c.getContext("2d")!.putImageData(image, 0, 0);
-  return c;
 }
 
 function preprocess(image: ImageData, p: ClassicalParams): ImageData {
@@ -181,14 +184,67 @@ function canvasBlur(image: ImageData, radius: number): ImageData {
   return octx.getImageData(0, 0, image.width, image.height);
 }
 
-function normalizeQuad(raw: any): Quad | null {
+/** Scanic's default "nothing in this frame" message. Not a failure. */
+const SCANIC_EMPTY_MESSAGE = "No document detected";
+
+export interface ScanClassification {
+  rawCorners: any;
+  /** Set ONLY for genuine detector failure. Absent means "ran fine". */
+  error?: string;
+}
+
+/**
+ * Turn one scanic `scan(mode:"detect")` result into corners-or-error.
+ *
+ * Extracted from `detect()` so it is testable: `detect()` itself needs a canvas
+ * for preprocessing, but this decision is pure and it is the one that decides
+ * whether the viewfinder's error badge lights up.
+ *
+ * THE LOAD-BEARING CASE is `success: false` with scanic's own default message.
+ * In detect mode scanic has exactly ONE such path: detectDocumentContour found
+ * zero contours above minArea (scanic.js:1059-1066, propagated at :1366-1376).
+ * That is an honest empty frame, and it fires on EVERY frame of a bare table.
+ * Setting `error` there would pin the badge on permanently and destroy the only
+ * signal meaning "the detector is broken" — the entire reason the error channel
+ * exists. So stay silent on the default message; surface only a message scanic
+ * does not normally emit.
+ */
+export function classifyScanResult(r: {
+  success?: boolean;
+  corners?: unknown;
+  message?: string;
+} | null | undefined): ScanClassification {
+  if (!r) return { rawCorners: null, error: "Scanner returned no result" };
+  if (r.success && r.corners) return { rawCorners: r.corners };
+  if (!r.success) {
+    return r.message && r.message !== SCANIC_EMPTY_MESSAGE
+      ? { rawCorners: null, error: `Scanner: ${r.message}` }
+      : { rawCorners: null };
+  }
+  // success:true with no corners is not a shape scanic documents; treat it as
+  // a failure rather than a silent miss.
+  return { rawCorners: null, error: "Scanner returned no corners" };
+}
+
+/** Message for a scan() that threw rather than resolved. Always a failure. */
+export function scanThrowMessage(e: unknown): string {
+  return `Scanner error: ${e instanceof Error ? e.message : String(e)}`;
+}
+
+export function toQuad(raw: any): Quad | null {
   if (!raw) return null;
   const tl = raw.topLeft ?? raw[0];
   const tr = raw.topRight ?? raw[1];
   const br = raw.bottomRight ?? raw[2];
   const bl = raw.bottomLeft ?? raw[3];
   if (!tl || !tr || !br || !bl) return null;
-  if ([tl, tr, br, bl].some((p) => typeof p.x !== "number" || typeof p.y !== "number")) return null;
+  // Number.isFinite, not typeof === "number": NaN and Infinity ARE numbers, and
+  // they defeat every downstream guard silently. Every hard-reject comparison is
+  // `x < t` / `x > t`, and all NaN comparisons are false, so a NaN quad passes
+  // them all; the smoother's drift gate never fires; clampQuad returns NaN; the
+  // viewfinder draws nothing while the badge says "Document detected"; and in
+  // review the handles become un-grabbable with no escape offered.
+  if ([tl, tr, br, bl].some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return null;
   return { topLeft: tl, topRight: tr, bottomRight: br, bottomLeft: bl };
 }
 
@@ -257,56 +313,6 @@ function passesHardRejects(m: Metrics, p: ClassicalParams): boolean {
   return true;
 }
 
-function polygonArea(pts: Pt[]): number {
-  let a = 0;
-  for (let i = 0; i < pts.length; i++) {
-    const j = (i + 1) % pts.length;
-    a += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
-  }
-  return Math.abs(a) / 2;
-}
-
-function convexHullArea(pts: Pt[]): number {
-  const sorted = [...pts].sort((a, b) => a.x - b.x || a.y - b.y);
-  const cross = (o: Pt, a: Pt, b: Pt) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-  const lower: Pt[] = [];
-  for (const p of sorted) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-    lower.push(p);
-  }
-  const upper: Pt[] = [];
-  for (let i = sorted.length - 1; i >= 0; i--) {
-    const p = sorted[i];
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-    upper.push(p);
-  }
-  return polygonArea([...lower.slice(0, -1), ...upper.slice(0, -1)]);
-}
-
-function dist(a: Pt, b: Pt): number {
-  return Math.hypot(a.x - b.x, a.y - b.y);
-}
-
-function interiorAngles(pts: Pt[]): number[] {
-  const out: number[] = [];
-  for (let i = 0; i < pts.length; i++) {
-    const prev = pts[(i + pts.length - 1) % pts.length];
-    const cur = pts[i];
-    const next = pts[(i + 1) % pts.length];
-    const v1 = { x: prev.x - cur.x, y: prev.y - cur.y };
-    const v2 = { x: next.x - cur.x, y: next.y - cur.y };
-    const dot = v1.x * v2.x + v1.y * v2.y;
-    const mag = Math.hypot(v1.x, v1.y) * Math.hypot(v2.x, v2.y);
-    if (mag === 0) {
-      out.push(0);
-      continue;
-    }
-    const cos = Math.max(-1, Math.min(1, dot / mag));
-    out.push((Math.acos(cos) * 180) / Math.PI);
-  }
-  return out;
-}
-
 function sampleInterior(quad: Quad, image: ImageData): { uniformity: number; textDensity: number } {
   const samples = sampleQuadGray(quad, image, 32, 32);
   if (samples.length === 0) return { uniformity: 0, textDensity: 0 };
@@ -347,8 +353,4 @@ function sampleQuadGray(quad: Quad, image: ImageData, gridU: number, gridV: numb
     }
   }
   return out;
-}
-
-function lerp(a: Pt, b: Pt, t: number): Pt {
-  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
 }

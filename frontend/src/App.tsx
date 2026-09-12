@@ -11,7 +11,18 @@ import SettingsPage from "@/pages/SettingsPage";
 import ScannerPage from "@/pages/ScannerPage";
 import ScannerLabPage from "@/pages/ScannerLabPage";
 import Sidebar from "@/components/Sidebar";
+import { Toaster } from "@/components/ui/sonner";
 import { isAndroid } from "@/lib/platform";
+
+/**
+ * The sonner wrapper reads `next-themes`, which this app does not provide — it
+ * has its own ThemeContext. Without this bridge the Toaster falls back to
+ * "system" and ignores an in-app light/dark choice.
+ */
+function AppToaster() {
+  const { resolved } = useTheme();
+  return <Toaster theme={resolved} position="top-center" richColors />;
+}
 
 function ProtectedRoute({ children, redirectAndroid }: { children: React.ReactNode; redirectAndroid?: boolean }) {
   const { username, loading } = useAuth();
@@ -105,6 +116,7 @@ export default function App() {
     <BrowserRouter>
       <ThemeProvider>
       <AuthProvider>
+        <AppToaster />
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/" element={<ProtectedRoute redirectAndroid><AppLayout><DashboardPage /></AppLayout></ProtectedRoute>} />
