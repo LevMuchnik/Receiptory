@@ -221,7 +221,11 @@ Set `RECEIPTORY_WATCHED_FOLDER_PATH` to a directory. Files dropped there are aut
 
 ## Cloud Backup
 
-Receiptory backs up to Google Drive and/or OneDrive via OAuth. Both can be active simultaneously. Backups are scheduled via cron and include the database, all document files, and metadata exports (JSONL + CSV + Excel).
+Receiptory backs up to Google Drive and/or OneDrive via OAuth. Both can be active simultaneously. Backups are scheduled via cron and include the database, all document files, the logs, a `metadata.jsonl` export of every document, and a `settings.json` with sensitive values masked. (CSV and Excel are available from Export in the UI; they are not part of a backup.)
+
+The database is captured with SQLite's online backup API, so it is a consistent snapshot rather than a file copy, and it needs no `-wal`/`-shm` sidecar to restore.
+
+**Secrets are stripped from the backup.** The uploaded copy has the LLM API keys, Telegram bot token, Gmail app password, cloud OAuth tokens and login password hash removed, because the backup is uploaded with no encryption of its own. **Restoring therefore requires re-entering them** — `settings.json` lists which keys existed, with masked values.
 
 ### Google Drive
 
