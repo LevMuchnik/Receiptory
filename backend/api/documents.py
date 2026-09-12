@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse, Response
 
 from backend.auth import require_auth
 from backend.database import get_connection
+from backend.processing.extract import totals_mismatch, format_totals_reason
 from backend.storage import render_page, clear_page_cache, get_file_path
 from backend.config import get_setting
 from backend.models import (
@@ -220,7 +221,51 @@ def edit_document(doc_id: int, update: DocumentUpdate, username: str = Depends(r
 
     set_clauses = [f"{k} = ?" for k in changes]
     set_clauses.extend(["manually_edited = 1", "edit_history = ?", "updated_at = ?"])
-    values = list(changes.values()) + [json.dumps(history), now, doc_id]
+    # `review_reason` never appears in `changes` (it is not a DocumentUpdate
+    # field), so the history loop above cannot record it. Record it here, or the
+    # audit trail shows a vendor-name edit and a warning that vanished with
+    # nothing tying the two together.
+    _reason_before = existing["review_reason"] if "review_reason" in existing.keys() else None
+    # Approving (or otherwise moving a document out of needs_review) settles the
+    # question the reason was asking, so the reason goes with it. Leaving it
+    # behind would keep "totals disagree" on a document the owner just approved.
+    extra_values: list = []
+    if changes.get("status") and changes["status"] != "needs_review":
+        set_clauses.append("review_reason = NULL")
+    elif {"total_amount", "subtotal", "tax_amount"} & changes.keys():
+        # RECOMPUTE, never blank. An earlier revision cleared the reason whenever
+        # one of these keys was present, which the metadata form sends on every
+        # save whether or not it changed — so fixing a vendor typo erased a
+        # totals warning nobody had answered. And blanking on a real edit is just
+        # as wrong when the new numbers still disagree: that leaves the document
+        # in needs_review with the explanation deleted, which is the state this
+        # column exists to abolish.
+        merged = {
+            k: (changes[k] if k in changes else existing[k])
+            for k in ("subtotal", "tax_amount", "total_amount")
+        }
+        new_diff = totals_mismatch(merged["subtotal"], merged["tax_amount"], merged["total_amount"])
+        if new_diff is None:
+            set_clauses.append("review_reason = NULL")
+        else:
+            set_clauses.append("review_reason = ?")
+            extra_values.append(
+                format_totals_reason(merged["subtotal"], merged["tax_amount"], merged["total_amount"], new_diff)
+            )
+    # Record the reason's own change in the audit trail, before the history JSON
+    # is serialized into the UPDATE below. extra_values holds the new text when
+    # one was written, and is empty when the clause was "review_reason = NULL".
+    _reason_touched = any(c.startswith("review_reason") for c in set_clauses)
+    _reason_after = extra_values[0] if extra_values else None
+    if _reason_touched and _reason_before != _reason_after:
+        history.append({
+            "field": "review_reason",
+            "old_value": _reason_before,
+            "new_value": _reason_after,
+            "timestamp": now,
+        })
+
+    values = list(changes.values()) + [json.dumps(history), now] + extra_values + [doc_id]
 
     with get_connection() as conn:
         conn.execute(
@@ -251,7 +296,7 @@ def reprocess_document(doc_id: int, request: Request, username: str = Depends(re
     with get_connection() as conn:
         conn.execute(
             """UPDATE documents SET
-                status = 'pending', processing_error = NULL,
+                status = 'pending', processing_error = NULL, review_reason = NULL,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
             WHERE id = ?""",
             (doc_id,),
@@ -270,7 +315,7 @@ def batch_reprocess(body: BatchReprocessRequest, request: Request, username: str
         placeholders = ",".join("?" * len(body.document_ids))
         with get_connection() as conn:
             conn.execute(
-                f"UPDATE documents SET status = 'pending', processing_error = NULL WHERE id IN ({placeholders})",
+                f"UPDATE documents SET status = 'pending', processing_error = NULL, review_reason = NULL WHERE id IN ({placeholders})",
                 body.document_ids,
             )
         for did in body.document_ids:
@@ -289,7 +334,7 @@ def batch_reprocess(body: BatchReprocessRequest, request: Request, username: str
     where = " AND ".join(conditions)
     with get_connection() as conn:
         conn.execute(
-            f"UPDATE documents SET status = 'pending', processing_error = NULL WHERE {where}",
+            f"UPDATE documents SET status = 'pending', processing_error = NULL, review_reason = NULL WHERE {where}",
             params,
         )
         count = conn.execute("SELECT changes()").fetchone()[0]

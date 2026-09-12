@@ -2,7 +2,7 @@ import json
 import logging
 import pytest
 from unittest.mock import patch
-from backend.processing.extract import (build_extraction_prompt, parse_llm_response, extract_document, ParseFailure, _MAX_PARSE_RETRIES)
+from backend.processing.extract import (build_extraction_prompt, parse_llm_response, extract_document, totals_mismatch, ParseFailure, _MAX_PARSE_RETRIES)
 from tests.conftest import SAMPLE_LLM_RESPONSE, mock_llm_response
 
 EXTRACT_LOGGER = "backend.processing.extract"
@@ -656,3 +656,90 @@ def test_build_prompt_separates_expense_and_issued_categories():
     office_pos = prompt.index("Office Supplies")
     tax_inv_pos = prompt.index("Tax Invoice")
     assert expense_pos < office_pos < issued_pos < tax_inv_pos
+
+
+# --- totals_mismatch: the document's own arithmetic ---------------------------
+#
+# The bug this guards: the same Naya receipt was filed twice as 736.00 and once
+# as 824.00 (doc #314, 2026-09-12), every time carrying subtotal 623.73 and tax
+# 112.27. The 824 is the card charge including an 88.00 tip printed below the
+# billed total. Nothing caught it, because the extraction was 0.98 confident.
+
+def test_totals_mismatch_none_when_the_arithmetic_holds():
+    assert totals_mismatch(623.73, 112.27, 736.00) is None
+
+
+def test_totals_mismatch_catches_a_tip_folded_into_the_total():
+    diff = totals_mismatch(623.73, 112.27, 824.00)
+    assert diff == pytest.approx(88.00, abs=0.01)
+
+
+def test_totals_mismatch_reports_the_sign_so_the_caller_can_say_which_way():
+    # AliExpress-shaped: a discount makes the total SMALLER than subtotal + tax.
+    diff = totals_mismatch(79.19, 0.0, 66.81)
+    assert diff is not None and diff < 0
+
+
+def test_totals_mismatch_pins_the_absolute_tolerance_tightly():
+    # A mutation test caught this suite napping: raising TOTALS_TOLERANCE from
+    # 0.02 to 0.029 left every other assertion here passing. On a 10.00 total the
+    # relative floor is only 0.01, so the absolute tolerance is what decides --
+    # which makes these two lines the ones that actually pin the constant.
+    assert totals_mismatch(5.00, 5.00, 10.019) is None      # just inside 0.02
+    assert totals_mismatch(5.00, 5.00, 10.021) is not None  # just outside it
+
+
+def test_totals_mismatch_tolerates_currency_rounding():
+    # Half an agora out is the receipt rounding, not a wrong line. On small
+    # amounts the flat 2-agora tolerance is the binding one: 0.1% of 20 is a
+    # fifth of an agora, so `max()` keeps the absolute floor in charge there.
+    assert totals_mismatch(10.005, 0.0, 10.01) is None
+    assert totals_mismatch(10.00, 10.00, 20.02) is None
+    assert totals_mismatch(10.00, 10.00, 20.03) is not None
+
+
+def test_totals_mismatch_silent_when_any_number_is_missing():
+    # A receipt that states no VAT line is not a contradiction, and neither is a
+    # non-financial document with no numbers at all.
+    assert totals_mismatch(None, None, None) is None
+    assert totals_mismatch(100.0, None, 118.0) is None
+    assert totals_mismatch(None, 18.0, 118.0) is None
+    assert totals_mismatch(100.0, 18.0, None) is None
+
+
+def test_totals_mismatch_silent_on_non_finite_numbers():
+    # A salvaged parse can yield inf/nan; comparing those would flag every
+    # document forever, and the guard has to fail open, not shut.
+    assert totals_mismatch(float("nan"), 0.0, 100.0) is None
+    assert totals_mismatch(float("inf"), 0.0, 100.0) is None
+    assert totals_mismatch(100.0, 0.0, float("nan")) is None
+
+
+def test_totals_mismatch_honours_a_caller_tolerance():
+    assert totals_mismatch(100.0, 0.0, 100.5, tolerance=1.0) is None
+    assert totals_mismatch(100.0, 0.0, 100.5, tolerance=0.1) is not None
+
+
+def test_prompt_defines_total_amount_as_the_billed_total():
+    # The prompt is the only thing standing between a tip line and an expense
+    # total, so pin the instruction rather than trusting it stays written.
+    prompt = build_extraction_prompt(business_names=[], business_addresses=[], business_tax_ids=[], expense_categories=[], issued_categories=[])
+    assert "subtotal + tax_amount" in prompt
+    # Where the card charge is supposed to GO, rather than the example key's
+              # name, which a benign reword can rename without weakening anything.
+    assert "additional_fields" in prompt
+    assert "tip" in prompt.lower()
+
+
+def test_totals_mismatch_scales_the_tolerance_with_the_invoice():
+    # Real invoices from the owner's corpus that the flat 2-agora tolerance
+    # flagged for their own per-line VAT rounding. A 4-agora gap on 93,135 is
+    # noise; the same gap on a 20 receipt is not.
+    assert totals_mismatch(78928.00, 14207.04, 93135.00) is None   # -0.04 on 93,135
+    assert totals_mismatch(18176.00, 3271.68, 21448.00) is None    # +0.32 on 21,448
+    assert totals_mismatch(368.40, 66.30, 435.00) is None          # +0.30 on 435
+    # ...and the genuine ones still flag, at every size.
+    assert totals_mismatch(623.73, 112.27, 824.00) is not None     # +88.00 tip
+    assert totals_mismatch(145.76, 26.24, 198.00) is not None      # +26.00 tip
+    assert totals_mismatch(143.57, 0.0, 163.52) is not None        # +19.95 shipping
+    assert totals_mismatch(10.00, 0.0, 10.05) is not None          # 5 agorot on a 10 receipt

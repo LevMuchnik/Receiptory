@@ -103,6 +103,11 @@ def test_migration_008_applies_through_runner_on_upgrade(tmp_path):
         "applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));"
         "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, "
         "updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));"
+        # A real install at version 7 has documents, and the runner applies EVERY
+        # later migration, not just 008 — 009 adds a column to this table. Without
+        # it the fixture is a database no upgrade path ever produces, and the test
+        # fails on whichever migration lands next rather than on its own subject.
+        "CREATE TABLE documents (id INTEGER PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending');"
     )
     for v in range(1, 8):  # simulate migrations 001..007 already applied
         db.execute("INSERT INTO schema_version (version) VALUES (?)", (v,))
@@ -113,4 +118,9 @@ def test_migration_008_applies_through_runner_on_upgrade(tmp_path):
 
     assert db.execute("SELECT value FROM settings WHERE key='llm_temperature'").fetchone()["value"] == "1.0"
     assert db.execute("SELECT COUNT(*) AS c FROM schema_version WHERE version=8").fetchone()["c"] == 1
+    # 009 rides along on the same upgrade. Pin its effect rather than only
+    # shaping the fixture so it does not explode: a no-op 009 would otherwise
+    # pass every assertion here.
+    assert db.execute("SELECT COUNT(*) AS c FROM schema_version WHERE version=9").fetchone()["c"] == 1
+    assert "review_reason" in [r[1] for r in db.execute("PRAGMA table_info(documents)")]
     db.close()

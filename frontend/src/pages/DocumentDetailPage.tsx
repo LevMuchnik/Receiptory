@@ -121,6 +121,19 @@ export default function DocumentDetailPage() {
           </div>
         </div>
 
+        {/*
+          Why this document is in the queue. Without it "Needs Review" is a
+          verdict with no argument — and since a totals mismatch can flag a
+          document the model was 98% sure of, the confidence number next to it
+          reads as a contradiction rather than an explanation.
+        */}
+        {doc.status === "needs_review" && doc.review_reason && (
+          <div className="w-full rounded-lg bg-[#ffdad6]/40 border border-[#ffdad6] px-3 py-2 mb-3 flex items-start gap-2">
+            <span className="material-symbols-outlined text-sm text-[#8c1d18] mt-0.5">flag</span>
+            <p className="text-xs text-[#8c1d18] leading-snug">{doc.review_reason}</p>
+          </div>
+        )}
+
         <div className="flex gap-2 flex-wrap">
           {doc.status === "needs_review" && (
             <Button

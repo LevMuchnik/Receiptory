@@ -90,7 +90,16 @@ Return a single JSON object with these fields:
 - line_items: array of {{"description": "...", "quantity": N, "unit_price": N}}
 - subtotal: pre-tax amount (null for non-financial)
 - tax_amount: tax amount (null for non-financial)
-- total_amount: total amount (null for non-financial)
+- total_amount: the document's own stated total for what was billed, tax included
+  (null for non-financial). This is the line the document calls its total -- in
+  Hebrew receipts, "סה\"כ לתשלום" / "סה\"כ כולל מע\"מ". It must equal
+  subtotal + tax_amount whenever both are present.
+  Do NOT use the amount actually charged to a card when it differs: a tip added
+  at the terminal, a rounding line, a deposit or a partial payment all change
+  what was charged without changing the document's total. Put that figure in
+  additional_fields instead, e.g. {{"key": "total_charged", "value": "824.00"}}
+  alongside {{"key": "tip_amount", "value": "88.00"}}, and leave total_amount as
+  the billed total.
 - currency: ISO 4217 code (ILS, USD, EUR, etc.)
 - payment_method: cash, credit_card, bank_transfer, etc. (if detectable)
 - payment_identifier: card last digits, account number, etc.
@@ -102,6 +111,71 @@ Return a single JSON object with these fields:
 - extraction_confidence: 0.0 to 1.0 confidence score
 
 Return ONLY the JSON object, no markdown fences or explanation."""
+
+
+TOTALS_TOLERANCE = 0.02
+# Per-line VAT rounding grows with the invoice, so the tolerance has to as well.
+# 0.1% sits in the middle of a stable range: 0.05% still flags a 435 receipt for
+# a 30-agora rounding, and 0.2% changes nothing versus 0.1% on the real corpus.
+ROUNDING_FRACTION = 0.001
+
+
+def totals_mismatch(
+    subtotal: float | None,
+    tax_amount: float | None,
+    total_amount: float | None,
+    tolerance: float = TOTALS_TOLERANCE,
+) -> float | None:
+    """The unexplained gap when subtotal + tax_amount != total_amount, else None.
+
+    A receipt states its own arithmetic, so when all three numbers are present
+    they have to agree. When they do not, one of them was read off the wrong
+    line -- and the one that gets read wrong is the total, because restaurant
+    receipts print the card charge (bill + tip) below the billed total, and
+    marketplace receipts print a shipping or discount line the same way. Filing
+    that as `total_amount` silently inflates or deflates the expense: the same
+    Naya receipt came in twice as 736.00 and once as 824.00 (document #314,
+    2026-09-12), all three carrying subtotal 623.73 and tax 112.27.
+
+    Returns the signed difference so the caller can say which way it is off.
+    Anything past the tolerance is a real disagreement, including a legitimate
+    one (shipping, a discount), which is still worth a human glance before it
+    lands in an expense total.
+
+    The tolerance is absolute OR relative, whichever is larger, because printed
+    VAT is rounded per line: a 4-agora gap is noise on a 93,135 invoice and a
+    wrong number on a 20 one. Measured over the owner's 244 documents, the flat
+    2-agora tolerance alone flagged three invoices for their own rounding
+    (-0.04 on 93,135, +0.32 on 21,448, +0.30 on 435); the 0.1% floor drops
+    exactly those three and keeps all fifteen genuine disagreements, including
+    the 88.00 tip that prompted this.
+
+    Pure, so the test suite can cover it without a database or an LLM.
+    """
+    values = (subtotal, tax_amount, total_amount)
+    if any(v is None for v in values):
+        return None
+    if any(not math.isfinite(v) for v in values):  # type: ignore[arg-type]
+        return None
+    diff = total_amount - (subtotal + tax_amount)  # type: ignore[operator]
+    allowed = max(tolerance, ROUNDING_FRACTION * abs(total_amount))  # type: ignore[arg-type]
+    return diff if abs(diff) > allowed else None
+
+
+def format_totals_reason(
+    subtotal: float, tax_amount: float, total_amount: float, diff: float
+) -> str:
+    """The sentence shown to the owner for a totals disagreement.
+
+    Shared by the pipeline (which writes it at extraction time) and the document
+    PATCH endpoint (which rewrites it when the numbers are edited), so the two
+    cannot drift into describing the same condition differently.
+    """
+    return (
+        f"Totals disagree: subtotal {subtotal:.2f} + tax {tax_amount:.2f} "
+        f"= {subtotal + tax_amount:.2f}, but total reads {total_amount:.2f} "
+        f"({diff:+.2f}). Check for a tip, shipping or discount line."
+    )
 
 
 _JSON_DECODER = json.JSONDecoder()

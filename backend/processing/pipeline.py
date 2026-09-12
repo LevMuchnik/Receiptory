@@ -7,7 +7,7 @@ from backend.database import get_connection
 from backend.config import get_setting, resolve_llm_api_key
 from backend.storage import (get_file_path, save_filed, render_all_pages_to_memory, get_pdf_page_count)
 from backend.processing.normalize import normalize_file
-from backend.processing.extract import extract_document, ExtractionResult
+from backend.processing.extract import extract_document, totals_mismatch, format_totals_reason, ExtractionResult
 from backend.processing.filing import generate_stored_filename
 
 logger = logging.getLogger(__name__)
@@ -74,10 +74,27 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
     if ext.vendor_tax_id and ext.vendor_tax_id in business_tax_ids:
         doc_type = "issued_invoice"
     status = "processed"
+    review_reason = None
     # Missing confidence is NOT full confidence — a response that omitted the
     # score (wrong-shaped but salvageable JSON) deserves a human eye.
     if ext.extraction_confidence is None or ext.extraction_confidence < confidence_threshold:
         status = "needs_review"
+        review_reason = (
+            "Extraction confidence missing"
+            if ext.extraction_confidence is None
+            else f"Extraction confidence {ext.extraction_confidence:.2f} is below the {confidence_threshold} threshold"
+        )
+    # The document's own arithmetic has to hold. When it does not, the total was
+    # read off the wrong line — typically a card charge including a tip, or a
+    # shipping/discount line — and filing it would put the wrong number in every
+    # expense total. A confident extraction can still be wrong this way: #314
+    # (2026-09-12) filed 824.00 against subtotal 623.73 + tax 112.27 at 0.98.
+    diff = totals_mismatch(ext.subtotal, ext.tax_amount, ext.total_amount)
+    if diff is not None:
+        status = "needs_review"
+        detail = format_totals_reason(ext.subtotal, ext.tax_amount, ext.total_amount, diff)
+        review_reason = f"{review_reason}. {detail}" if review_reason else detail
+        logger.warning(f"Document {doc_id}: {detail}")
     stored_filename = generate_stored_filename(receipt_date=ext.receipt_date, vendor_receipt_id=ext.vendor_receipt_id, file_hash=file_hash)
     save_filed(pdf_path, stored_filename, data_dir)
     category_id = None
@@ -97,8 +114,8 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
                     category_id = cat_row["id"]
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with get_connection() as conn:
-        conn.execute("""UPDATE documents SET document_type = ?, stored_filename = ?, page_count = ?, receipt_date = ?, document_title = ?, vendor_name = ?, vendor_tax_id = ?, vendor_receipt_id = ?, client_name = ?, client_tax_id = ?, description = ?, line_items = ?, subtotal = ?, tax_amount = ?, total_amount = ?, currency = ?, payment_method = ?, payment_identifier = ?, language = ?, additional_fields = ?, raw_extracted_text = ?, category_id = ?, status = ?, extraction_confidence = ?, processing_model = ?, processing_tokens_in = ?, processing_tokens_out = ?, processing_cost_usd = ?, processing_date = ?, processing_attempts = processing_attempts + 1, processing_error = NULL, updated_at = ? WHERE id = ?""",
-            (doc_type, stored_filename, page_count, ext.receipt_date, ext.document_title, ext.vendor_name, ext.vendor_tax_id, ext.vendor_receipt_id, ext.client_name, ext.client_tax_id, ext.description, json.dumps(ext.line_items) if ext.line_items else None, ext.subtotal, ext.tax_amount, ext.total_amount, ext.currency, ext.payment_method, ext.payment_identifier, ext.language, json.dumps(ext.additional_fields) if ext.additional_fields else None, ext.raw_extracted_text, category_id, status, ext.extraction_confidence, llm_result.model, llm_result.tokens_in, llm_result.tokens_out, estimate_cost(llm_result.model, llm_result.tokens_in, llm_result.tokens_out), now, now, doc_id))
+        conn.execute("""UPDATE documents SET document_type = ?, stored_filename = ?, page_count = ?, receipt_date = ?, document_title = ?, vendor_name = ?, vendor_tax_id = ?, vendor_receipt_id = ?, client_name = ?, client_tax_id = ?, description = ?, line_items = ?, subtotal = ?, tax_amount = ?, total_amount = ?, currency = ?, payment_method = ?, payment_identifier = ?, language = ?, additional_fields = ?, raw_extracted_text = ?, category_id = ?, status = ?, review_reason = ?, extraction_confidence = ?, processing_model = ?, processing_tokens_in = ?, processing_tokens_out = ?, processing_cost_usd = ?, processing_date = ?, processing_attempts = processing_attempts + 1, processing_error = NULL, updated_at = ? WHERE id = ?""",
+            (doc_type, stored_filename, page_count, ext.receipt_date, ext.document_title, ext.vendor_name, ext.vendor_tax_id, ext.vendor_receipt_id, ext.client_name, ext.client_tax_id, ext.description, json.dumps(ext.line_items) if ext.line_items else None, ext.subtotal, ext.tax_amount, ext.total_amount, ext.currency, ext.payment_method, ext.payment_identifier, ext.language, json.dumps(ext.additional_fields) if ext.additional_fields else None, ext.raw_extracted_text, category_id, status, review_reason, ext.extraction_confidence, llm_result.model, llm_result.tokens_in, llm_result.tokens_out, estimate_cost(llm_result.model, llm_result.tokens_in, llm_result.tokens_out), now, now, doc_id))
     logger.info(f"Document {doc_id} processed successfully: {status}")
     try:
         from backend.notifications.notifier import notify
@@ -112,6 +129,7 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
             "currency": ext.currency,
             "category_name": ext.category_name,
             "extraction_confidence": ext.extraction_confidence,
+            "review_reason": review_reason,
             "submission_channel": doc["submission_channel"],
             "sender_identifier": doc["sender_identifier"],
         })
