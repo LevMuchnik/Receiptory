@@ -18,7 +18,7 @@ import {
   imageDataToCanvas,
   rotateCanvas,
 } from "@/lib/scanner/canvas-utils";
-import { scaleQuad, clampQuad } from "@/lib/scanner/geometry";
+import { scaleQuad, clampQuad, insetQuad } from "@/lib/scanner/geometry";
 import { uploadTestFrame } from "@/lib/scanner/test-frame-upload";
 import ScannerNav from "@/components/scanner/ScannerNav";
 import CameraViewfinder from "@/components/scanner/CameraViewfinder";
@@ -165,7 +165,10 @@ export default function ScannerPage() {
       // and warping the stale quad first would only burn a full-res pass.
       if (handleTouchedRef.current) return;
 
-      await runExtract(imageData, corners, job);
+      // No detection: crop the inset quad CaptureReview is drawing, so Submit
+      // files exactly what is on screen. `corners` in state stays null, which
+      // is what drives review's "No document found" prompt.
+      await runExtract(imageData, corners ?? insetQuad(w, h), job);
     },
     [dispatch, detector, detectorParams, runExtract],
   );
@@ -223,10 +226,9 @@ export default function ScannerPage() {
 
   /**
    * Escape hatch (success criterion 3: no scan is ever lost). Deliberately does
-   * NOT go through extractAndEnhance: its own fallback ladder can end in a
-   * detect+extract that crops, which is the one thing "use full frame" must
-   * never do. The raw frame is handed through verbatim; `enhanced` is null, so
-   * EnhancementToggle just shows it.
+   * NOT go through extractAndEnhance, which would re-encode the frame through a
+   * warp and the contrast filter; "use full frame" means the raw frame, verbatim.
+   * `enhanced` is null, so EnhancementToggle just shows it.
    */
   const handleUseFullFrame = useCallback(() => {
     if (state.phase !== "reviewing") return;

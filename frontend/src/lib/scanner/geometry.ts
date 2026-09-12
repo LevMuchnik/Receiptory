@@ -243,6 +243,69 @@ export function insetQuad(w: number, h: number, f = 0.1): Quad {
   };
 }
 
+/** Shortest side, in the quad's own pixels, the perspective warp will accept. */
+export const MIN_WARP_SIDE_PX = 8;
+
+/**
+ * Smallest |sin| of the turn at any corner. Below this the corner is flat enough
+ * to make the homography numerically singular. 0.01 is about 0.6 degrees.
+ */
+const MIN_WARP_TURN_SIN = 0.01;
+
+/** Do segments a-b and c-d properly cross (endpoints touching does not count)? */
+function segmentsCross(a: Pt, b: Pt, c: Pt, d: Pt): boolean {
+  const side = (o: Pt, p: Pt, q: Pt) => Math.sign((p.x - o.x) * (q.y - o.y) - (p.y - o.y) * (q.x - o.x));
+  const d1 = side(a, b, c);
+  const d2 = side(a, b, d);
+  const d3 = side(c, d, a);
+  const d4 = side(c, d, b);
+  return d1 !== 0 && d2 !== 0 && d3 !== 0 && d4 !== 0 && d1 !== d2 && d3 !== d4;
+}
+
+/**
+ * Can this quad be handed to the perspective warp? It must be finite, have no
+ * side shorter than `MIN_WARP_SIDE_PX`, no corner flat enough to make the
+ * homography singular, and no crossing edges (a bow-tie).
+ *
+ * Why the warp needs this: scanic 1.6's extract rejects only an exactly-zero
+ * determinant. Collinear or coincident corners give a singular solve whose
+ * result is NaN, every output pixel truncates to 0, and it reports success:
+ * a solid black page, filed as the receipt. Reproduced 2026-09-11 for three
+ * corners on one frame edge, all four collinear, and two coincident corners,
+ * all of which review's drag handles can produce by clamping to the frame.
+ * Callers hand back the whole frame instead, the same policy as a failed warp.
+ *
+ * A CONCAVE quad — one handle dragged past the opposite diagonal — is NOT
+ * refused, though an earlier revision of this guard demanded strict convexity.
+ * It warps fine, oddly but deterministically, and the odd result is exactly
+ * what review is drawing. Refusing it would file the whole frame while the
+ * screen showed the dented box: the shown-vs-filed split this branch removed
+ * from the no-detection path. Only shapes the warp cannot honour are refused.
+ */
+export function isWarpableQuad(q: Quad, minSide = MIN_WARP_SIDE_PX): boolean {
+  const pts = [q.topLeft, q.topRight, q.bottomRight, q.bottomLeft];
+  if (pts.some((p) => !p || !Number.isFinite(p.x) || !Number.isFinite(p.y))) return false;
+
+  for (let i = 0; i < 4; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % 4];
+    const c = pts[(i + 2) % 4];
+    const ab = dist(a, b);
+    const bc = dist(b, c);
+    if (ab < minSide) return false;
+    // |cross| / (|ab| * |bc|) is |sin(turn)|: scale-free, so a 4K quad and its
+    // review-space preview get the same verdict.
+    const cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+    if (Math.abs(cross) < MIN_WARP_TURN_SIN * ab * bc) return false;
+  }
+
+  // Opposite edges crossing is a bow-tie: the quad folds through itself and the
+  // warp has no coherent interior to sample.
+  return !(
+    segmentsCross(pts[0], pts[1], pts[2], pts[3]) || segmentsCross(pts[1], pts[2], pts[3], pts[0])
+  );
+}
+
 /**
  * How close two placement taps may be before the second is ignored, as a
  * fraction of the frame's SHORTER edge.

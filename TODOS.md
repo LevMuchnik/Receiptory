@@ -167,31 +167,11 @@ Deferred items captured during planning and review. Organized by component, sort
 **Priority:** P1
 **Depends on:** Increment 0's measurement (it sets how much resolution a page actually needs)
 
-### Scanic WASM instance leaks on every scanner close
-
-**What:** `terminateScanner()` sets `scanner = null; initPromise = null` with no disposal call on the scanic instance.
-
-**Why:** `ScannerPage.handleClose` calls it on every scanner exit, so each open/close cycle instantiates a fresh `Scanner` and orphans the previous WASM heap. Monotonic memory growth across a phone session, on top of the multi-page pressure above.
-
-**Pros:**
-- Likely a one-line fix or a one-line deletion
-
-**Cons:**
-- Needs an API check first: if `scanic@1.0.6` exposes no dispose/terminate, the correct fix is to STOP nulling the instance and drop the `terminateScanner()` call from `handleClose` entirely, which changes teardown semantics
-
-**Context:**
-- Source: adversarial review 2026-09-04, finding 13
-- Start: `frontend/src/lib/opencv-loader.ts` `terminateScanner`, and `frontend/node_modules/scanic/src/scanic.d.ts` for the disposal API
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** None
-
 ### Harden the detector-to-viewfinder coordinate handoff across orientation changes
 
 **What:** Capture `{detW, detH, detectionScale}` as one immutable object alongside the corners inside the detect `.then()`, and run `orderQuadByAngle` on detector output at the boundary.
 
-**Why:** Two remaining seams. (1) `detW`/`detH`/`detectionScaleRef` are written BEFORE `detector.detect()` is awaited while `cornersRef` is written AFTER, so a resolution change mid-detect leaves the overlay viewBox and the corners in different spaces, and `handleCapture` divides old-space corners by the new scale — a wrong-but-plausible crop with no error. The smoother reset added on 2026-09-04 covers the blend-across-spaces half of this, not the in-flight half. (2) No detector output is passed through `orderQuadByAngle`, and `blendQuads` assumes label stability, so a detector that relabels a near-square quad produces a bow-tie EMA that reaches `scanic.extract` and yields a mirrored warp. It self-heals after 2 drift rejects; the intervening frames are garbage.
+**Why:** Two remaining seams. (1) `detW`/`detH`/`detectionScaleRef` are written BEFORE `detector.detect()` is awaited while `cornersRef` is written AFTER, so a resolution change mid-detect leaves the overlay viewBox and the corners in different spaces, and `handleCapture` divides old-space corners by the new scale — a wrong-but-plausible crop with no error. The smoother reset added on 2026-09-04 covers the blend-across-spaces half of this, not the in-flight half. (2) No detector output is passed through `orderQuadByAngle`, and `blendQuads` assumes label stability, so a detector that relabels a near-square quad produces a bow-tie EMA. Since the scanic 1.6 branch, `isWarpableQuad` refuses that quad and the capture files the whole uncropped frame instead of a mirrored warp — better, but still not the crop the user was shown. It self-heals after 2 drift rejects; the intervening frames are garbage.
 
 **Pros:**
 - Closes the last coordinate-space seam in a subsystem that exists because of a coordinate-space bug
@@ -394,7 +374,7 @@ Deferred items captured during planning and review. Organized by component, sort
 
 **Effort:** S
 **Priority:** P2
-**Depends on:** The Lab A/B of `{shadowNorm: false, saturationPrior: false}` over the stored corpus. If preprocessing does not improve median IoU, **delete it rather than optimise it** — Scanic grayscales and downsamples the result anyway (`prepareScaleAndGrayscale`), and this TODO evaporates.
+**Depends on:** The Lab A/B of `{shadowNorm: false, saturationPrior: false}` over the stored corpus. If preprocessing does not improve median IoU, **delete it rather than optimise it** — Scanic grayscales and downsamples the result anyway (still true in 1.6.0, whose minified dist no longer carries the 1.0.6 function names), and this TODO evaporates.
 
 ### Web Worker for live detection
 

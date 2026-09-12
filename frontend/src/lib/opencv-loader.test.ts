@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { readFileSync } from "node:fs";
 
 /**
  * The init-latch regression suite (defect 8).
@@ -38,10 +39,10 @@ class FakeScanner {
   }
 }
 
-vi.mock("scanic", () => ({ Scanner: FakeScanner }));
+vi.mock("scanic", () => ({ Scanner: FakeScanner, extractDocument: vi.fn() }));
 
 // Imported after the mock is registered; vi.mock is hoisted so this is safe.
-const { initScanner, getScanner, terminateScanner } = await import("./opencv-loader");
+const { initScanner, getScanner, terminateScanner, SCANIC_DETECTION_OPTIONS } = await import("./opencv-loader");
 
 beforeEach(() => {
   // terminateScanner() clears BOTH module globals, which is exactly the state a
@@ -130,5 +131,44 @@ describe("terminateScanner", () => {
 
     await initScanner();
     expect(constructed).toHaveLength(2);
+  });
+});
+
+describe("Scanner construction — scanic 1.6 held to 1.0.6 detection", () => {
+  it("builds the Scanner with the pinned detection options", async () => {
+    // Dropping these reverts detection to scanic 1.6's defaults, which on the
+    // scanner corpus drew 11 wrong boxes on 32 labelled frames (1.0.6: 2) and
+    // boxed the wood grain instead of the Naya receipt. See
+    // docs/designs/scanic-1.6-upgrade.md before changing any of them.
+    await initScanner();
+    expect(constructed[0].options).toMatchObject({
+      lowThreshold: 75,
+      highThreshold: 200,
+      enableDetectionCascade: false,
+      maxProcessingDimension: 800,
+    });
+    expect(constructed[0].options).toMatchObject(SCANIC_DETECTION_OPTIONS);
+  });
+
+  it("pins the edge map ONLY — the aspect cap stays a per-call option", () => {
+    // `maxDocumentAspectRatio` tracks ClassicalParams.maxAspect and is passed
+    // per scan by `scanicDetectOptions`. Moving it here would freeze it at
+    // whatever the default happened to be on the day, and silently decouple it
+    // from the gate in `classifyMetrics` that is supposed to own it.
+    expect(Object.keys(SCANIC_DETECTION_OPTIONS).sort()).toEqual([
+      "enableDetectionCascade",
+      "highThreshold",
+      "lowThreshold",
+    ]);
+  });
+
+  it("is still running the scanic version the detection parity was measured on", () => {
+    // A tripwire, on purpose. These options were validated against 1.6.0's
+    // detector over the scanner corpus; a different version may read them
+    // differently or rank candidates differently. If this fails because you
+    // bumped scanic, repeat the Evidence measurement in
+    // docs/designs/scanic-1.6-upgrade.md, then update this version.
+    const pkg = JSON.parse(readFileSync(new URL("../../node_modules/scanic/package.json", import.meta.url), "utf8"));
+    expect(pkg.version).toBe("1.6.0");
   });
 });

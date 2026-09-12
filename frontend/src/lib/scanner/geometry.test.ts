@@ -14,10 +14,163 @@ import {
   quadFromPlacedPoints,
   advancePlacement,
   MIN_TAP_SEPARATION_FRACTION,
+  isWarpableQuad,
+  MIN_WARP_SIDE_PX,
 } from "./geometry";
 import type { DetectionResult, Pt, Quad } from "./detector";
 
 const quadPts = (q: Quad): Pt[] => [q.topLeft, q.topRight, q.bottomRight, q.bottomLeft];
+
+const Q = (tl: [number, number], tr: [number, number], br: [number, number], bl: [number, number]): Quad => ({
+  topLeft: { x: tl[0], y: tl[1] },
+  topRight: { x: tr[0], y: tr[1] },
+  bottomRight: { x: br[0], y: br[1] },
+  bottomLeft: { x: bl[0], y: bl[1] },
+});
+
+describe("isWarpableQuad — no black pages from a folded crop", () => {
+  // The three degenerate shapes below each made scanic 1.6's extract return a
+  // 100% black page with success:true (reproduced on a 2160x3840 frame).
+  it("rejects three corners on one frame edge", () => {
+    expect(isWarpableQuad(Q([0, 0], [900, 1500], [0, 2500], [0, 3839]))).toBe(false);
+  });
+
+  it("rejects four collinear corners", () => {
+    expect(isWarpableQuad(Q([0, 0], [700, 0], [1400, 0], [2159, 0]))).toBe(false);
+  });
+
+  it("rejects two coincident corners", () => {
+    expect(isWarpableQuad(Q([0, 0], [2159, 0], [2159, 0], [0, 3839]))).toBe(false);
+  });
+
+  it("rejects a bow-tie", () => {
+    expect(isWarpableQuad(Q([0, 0], [1000, 1000], [1000, 0], [0, 1000]))).toBe(false);
+  });
+
+  it("rejects a side shorter than MIN_WARP_SIDE_PX", () => {
+    expect(isWarpableQuad(Q([0, 0], [2000, 0], [2000, MIN_WARP_SIDE_PX - 1], [0, MIN_WARP_SIDE_PX - 1]))).toBe(false);
+  });
+
+  it("rejects non-finite corners", () => {
+    expect(isWarpableQuad(Q([0, 0], [100, 0], [100, NaN], [0, 100]))).toBe(false);
+    expect(isWarpableQuad(Q([0, 0], [Infinity, 0], [100, 100], [0, 100]))).toBe(false);
+  });
+
+  it("accepts real crops: the inset default, a tilted receipt, and either winding", () => {
+    expect(isWarpableQuad(insetQuad(2160, 3840))).toBe(true);
+    // The Naya capture's quad in raw-frame pixels: long, thin, sheared.
+    expect(isWarpableQuad(Q([725, 792], [1205, 792], [1257, 2923], [773, 2923]))).toBe(true);
+    // Counter-clockwise winding is still convex.
+    expect(isWarpableQuad(Q([0, 0], [0, 1000], [800, 1000], [800, 0]))).toBe(true);
+  });
+
+  it("accepts the full-frame quad that 'Use full frame' sets", () => {
+    expect(isWarpableQuad(Q([0, 0], [2160, 0], [2160, 3840], [0, 3840]))).toBe(true);
+  });
+});
+
+describe("isWarpableQuad — where the rejection boundary actually sits", () => {
+  /** A quad whose TOP-RIGHT corner turns by `d` pixels over a 1000px run. */
+  const flatByPixels = (d: number): Quad => Q([0, 0], [1000, 0], [2000, d], [1000, 2000]);
+
+  it("rejects a corner flatter than the turn threshold and accepts one just past it", () => {
+    // The guard is |sin(turn)| >= 0.01, so over a 1000px run the corner has to
+    // rise ~10px. An exactly-collinear corner is only the extreme of this: the
+    // singular solve that black-pages a scan starts well before three corners
+    // line up perfectly, which is why the test that matters is the near miss.
+    expect(isWarpableQuad(flatByPixels(0))).toBe(false);
+    expect(isWarpableQuad(flatByPixels(9))).toBe(false);
+    expect(isWarpableQuad(flatByPixels(11))).toBe(true);
+  });
+
+  it("judges turn by angle, not by pixels — the same shape at any size gets the same verdict", () => {
+    // `cross` and `ab * bc` both scale with the square of the shape, so the
+    // ratio does not. A 4K capture and a review-space preview of the same quad
+    // must not disagree about whether it can be warped.
+    const scaled = (q: Quad, s: number): Quad =>
+      Q(
+        [q.topLeft.x * s, q.topLeft.y * s],
+        [q.topRight.x * s, q.topRight.y * s],
+        [q.bottomRight.x * s, q.bottomRight.y * s],
+        [q.bottomLeft.x * s, q.bottomLeft.y * s],
+      );
+    // Scales chosen to keep every side above MIN_WARP_SIDE_PX, so only the turn
+    // test is in play.
+    for (const s of [0.02, 1, 100]) {
+      expect(isWarpableQuad(scaled(flatByPixels(3), s))).toBe(false);
+      expect(isWarpableQuad(scaled(flatByPixels(300), s))).toBe(true);
+    }
+  });
+
+  it("ACCEPTS a concave quad — one drag handle pulled inside the other three", () => {
+    // NOT a bow-tie: angle-ordered, simple, and exactly what `onCornersCommit`
+    // hands over when someone drags a corner past the opposite diagonal. The
+    // warp honours it (oddly, but deterministically) and review is drawing that
+    // same dented box, so refusing it would file the whole frame instead and
+    // re-open the shown-vs-filed split this branch closed. Only shapes the warp
+    // cannot honour — flat corners, tiny sides, bow-ties — are refused.
+    const concave = orderQuadByAngle([
+      { x: 0, y: 0 },
+      { x: 1000, y: 0 },
+      { x: 500, y: 400 },
+      { x: 0, y: 1000 },
+    ]);
+    expect(isSelfIntersecting(concave)).toBe(false);
+    expect(isWarpableQuad(concave)).toBe(true);
+  });
+
+  it("still rejects a bow-tie once convexity is no longer the test", () => {
+    // The bow-tie and the concave quad both have mixed turn directions, so the
+    // edge-crossing check is the only thing left telling them apart.
+    const bowtie = Q([0, 0], [1000, 1000], [1000, 0], [0, 1000]);
+    expect(isSelfIntersecting(bowtie)).toBe(true);
+    expect(isWarpableQuad(bowtie)).toBe(false);
+  });
+
+  it("honours a caller-supplied minSide instead of the default", () => {
+    const thin = Q([0, 0], [2000, 0], [2000, 20], [0, 20]);
+    expect(isWarpableQuad(thin)).toBe(true);
+    expect(isWarpableQuad(thin, 8)).toBe(true);
+    expect(isWarpableQuad(thin, 21)).toBe(false);
+  });
+
+  it("rejects a quad with a missing corner rather than throwing on it", () => {
+    // Reachable from anything that builds a Quad out of an array — a short
+    // corner list reads `undefined` off the end. A throw here would surface as
+    // "Capture failed" on a scan that could simply have fallen back.
+    const holed = { ...Q([0, 0], [1000, 0], [1000, 1000], [0, 1000]), bottomLeft: undefined };
+    expect(isWarpableQuad(holed as unknown as Quad)).toBe(false);
+  });
+});
+
+describe("isWarpableQuad ∘ insetQuad — the no-detection capture still crops", () => {
+  // ScannerPage.handleCapture now hands `insetQuad(w, h)` to extractAndEnhance
+  // when detection found nothing, and extractAndEnhance drops any quad
+  // isWarpableQuad refuses. If these two ever disagreed, EVERY no-detection
+  // capture would silently file the uncropped frame while review drew an inset
+  // box — the exact "review shows one thing, the PDF holds another" defect this
+  // branch set out to remove.
+  it("accepts the inset quad at every capture size the camera ladder produces", () => {
+    const sizes: [number, number][] = [
+      [640, 480],
+      [1280, 720],
+      [1920, 1080],
+      [1080, 1920],
+      [2160, 3840],
+      [3840, 2160],
+      [4032, 3024],
+    ];
+    for (const [w, h] of sizes) {
+      expect(isWarpableQuad(insetQuad(w, h))).toBe(true);
+    }
+  });
+
+  it("gives out only on frames far below any real capture, and then by the side gate", () => {
+    // A 10% inset of a 10px frame leaves an 8px side — exactly MIN_WARP_SIDE_PX.
+    expect(isWarpableQuad(insetQuad(10, 10))).toBe(true);
+    expect(isWarpableQuad(insetQuad(9, 9))).toBe(false);
+  });
+});
 
 /**
  * True if the quad's two pairs of opposite edges cross — i.e. it is a bow-tie.

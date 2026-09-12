@@ -1,11 +1,44 @@
 // Scanner engine using Scanic (lightweight document scanner, ~100KB WASM)
 
-import { Scanner } from "scanic";
+import { Scanner, extractDocument, type DetectionOptions } from "scanic";
 
 import { imageDataToCanvas } from "./scanner/canvas-utils";
+import type { Quad } from "./scanner/detector";
+import { isWarpableQuad } from "./scanner/geometry";
 
 let scanner: Scanner | null = null;
 let initPromise: Promise<void> | null = null;
+
+/**
+ * Detection options that hold scanic 1.6 to the edge map 1.0.6 produced: fixed
+ * Canny thresholds and a single pass. The live detector (`classical-detector`)
+ * is the only scanic detect call; `extractAndEnhance` never detects.
+ *
+ * Why 1.6 at all: 1.0.6's extract drew the warp as 8,192 anti-aliased triangles,
+ * and the seams came out as dark lines on narrow receipts (a 7.6px lattice on
+ * the 2026-09-11 Naya scan). 1.6's extract is a per-pixel inverse map.
+ *
+ * Why these three: 1.6's defaults derive Canny thresholds from each frame's
+ * gradient histogram and add cascade passes that dilate edges harder, then rank
+ * the pooled candidates by a score weighted toward large quads. On a narrow
+ * receipt on a wood desk that picks the wood grain. Over the 46-frame scanner
+ * corpus, defaults produced 11 wrong boxes on the 32 labelled frames against
+ * 1.0.6's 2. With these options it is 2, and the recent 4K receipt captures land
+ * on the receipt. Measured with the app's own ClassicalDetector; the numbers
+ * and the rollback procedure are in docs/designs/scanic-1.6-upgrade.md.
+ *
+ * Not full parity: 1.6 still ranks up to 12 candidate contours and refines
+ * corners its own way, where 1.0.6 took the largest contour. The accepted-frame
+ * sets differ by a frame or two; the design record lists which.
+ *
+ * `maxDocumentAspectRatio` is NOT here: it tracks `ClassicalParams.maxAspect`
+ * and is passed per call (see `scanicDetectOptions`).
+ */
+export const SCANIC_DETECTION_OPTIONS = {
+  lowThreshold: 75,
+  highThreshold: 200,
+  enableDetectionCascade: false,
+} as const satisfies DetectionOptions;
 
 /**
  * Initialize the Scanic engine. Safe to call repeatedly; concurrent callers
@@ -19,6 +52,12 @@ let initPromise: Promise<void> | null = null;
  *
  * Rejections propagate to the caller — classical-detector's catch depends on
  * that to populate DetectionResult.error.
+ *
+ * Since scanic 1.6, `initialize()` itself never rejects: it swallows a WASM load
+ * failure and runs the JS pipeline instead, so a WASM failure is a slowdown, not
+ * an error badge. The latch handling above still matters for anything else that
+ * throws here (the constructor, a future scanic that rejects again), and its
+ * tests drive it with a fake that does reject.
  */
 export async function initScanner(): Promise<void> {
   if (scanner) return;
@@ -27,11 +66,11 @@ export async function initScanner(): Promise<void> {
   const p = (async () => {
     // Kept EQUAL to DETECTION_MAX_EDGE (detection-size.ts), deliberately not
     // imported from it. Scanic downsamples anything larger to this before it
-    // looks for a contour (prepareScaleAndGrayscale), so matching the two means
+    // looks for a contour (its scale-and-grayscale prep), so matching the two means
     // scanic does not resample a frame we already sized. But this bound belongs
     // to scanic: a scanic upgrade that changes its own default should not be
     // silently overridden by ours. If you change one, look at the other.
-    const s = new Scanner({ maxProcessingDimension: 800, output: "canvas" });
+    const s = new Scanner({ maxProcessingDimension: 800, output: "canvas", ...SCANIC_DETECTION_OPTIONS });
     await s.initialize();
     scanner = s;
   })();
@@ -63,20 +102,31 @@ export function getScanner(): Scanner {
  * scale. The default was the dangerous part: it silently multiplied
  * already-converted corners by 2.5, and the one caller had to pass `1`
  * explicitly with a comment explaining why. Both are gone.
+ *
+ * What you see is what gets cropped. With no corners, a quad the warp cannot
+ * honour (`isWarpableQuad`), or a failed warp, this hands back the whole frame.
+ * It never runs a detection of its own. It used to: with no corners it ran
+ * scanic's full-frame detect-and-crop, unpreprocessed and ungated, and filed
+ * whatever came back while review showed a different quad. Under scanic 1.6
+ * that was usually a speck (0.1% of the frame on corpus frames #1, #12, #46).
+ * The caller now passes the inset quad review draws when detection found
+ * nothing (ScannerPage.handleCapture).
  */
 export async function extractAndEnhance(
   imageData: ImageData,
-  corners: any | null,
+  corners: Quad | null,
 ): Promise<{ original: HTMLCanvasElement; enhanced: HTMLCanvasElement }> {
-  const s = getScanner();
   const fullCanvas = imageDataToCanvas(imageData);
 
   let outputCanvas: HTMLCanvasElement | null = null;
 
-  if (corners) {
+  if (corners && isWarpableQuad(corners)) {
     try {
-      const result = await s.extract(fullCanvas, corners, { output: "canvas" });
-      const out = result.output as HTMLCanvasElement | undefined;
+      // The exported function, not Scanner#extract: scanic 1.6's typings do not
+      // declare the method, and extract needs neither WASM nor an initialized
+      // Scanner.
+      const result = await extractDocument(fullCanvas, corners, { output: "canvas" });
+      const out = result.output as HTMLCanvasElement | null;
       // BOTH dimensions. A near-degenerate quad yields an N x 0 canvas, which
       // passed a width-only check, flowed on as a valid crop, enabled Submit,
       // and became a blank page in the PDF.
@@ -86,37 +136,10 @@ export async function extractAndEnhance(
     } catch (e) {
       console.warn("Extract with corners failed:", e);
     }
-
-    // Deliberately NOT falling through to the full-frame detect-and-crop below.
-    // That rung runs a FRESH detection and crops to whatever scanic picks,
-    // ignoring the corners the user just dragged -- so a failed warp would file
-    // a crop they never chose while the review screen kept showing their quad.
-    // If their corners could not be honoured, hand back the whole frame instead.
-    if (!outputCanvas) {
-      const enhanced = enhanceCanvas(fullCanvas);
-      return { original: fullCanvas, enhanced };
-    }
   }
 
-  // Fallback: run full detect+extract on the full-res frame
-  if (!outputCanvas) {
-    try {
-      const result = await s.scan(fullCanvas, { mode: "extract", output: "canvas" });
-      if (result.success && result.output && (result.output as HTMLCanvasElement).width > 0) {
-        outputCanvas = result.output as HTMLCanvasElement;
-      }
-    } catch (e) {
-      console.warn("Full scan failed:", e);
-    }
-  }
-
-  // Final fallback: raw frame
-  if (!outputCanvas) {
-    outputCanvas = fullCanvas;
-  }
-
-  const enhanced = enhanceCanvas(outputCanvas);
-  return { original: outputCanvas, enhanced };
+  const original = outputCanvas ?? fullCanvas;
+  return { original, enhanced: enhanceCanvas(original) };
 }
 
 function enhanceCanvas(source: HTMLCanvasElement): HTMLCanvasElement {
