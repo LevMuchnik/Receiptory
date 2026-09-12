@@ -171,9 +171,10 @@ def format_needs_review(doc: dict, base_url: str) -> dict:
 
 
 def format_backup_ok(backup_info: dict) -> dict:
-    backup_type = backup_info.get("backup_type", "unknown")
+    backup_type = html_escape(str(backup_info.get("backup_type", "unknown")))
     size_bytes = backup_info.get("size_bytes", 0)
-    destination = backup_info.get("destination", "unknown")
+    # Owner-configured rclone remote string, so it reaches an HTML sink unchecked.
+    destination = html_escape(str(backup_info.get("destination", "unknown")))
 
     size_mb = size_bytes / (1024 * 1024) if size_bytes else 0
     size_str = f"{size_mb:.0f} MB" if size_mb >= 1 else f"{size_bytes} bytes"
@@ -197,8 +198,31 @@ def format_backup_ok(backup_info: dict) -> dict:
     return {"subject": subject, "caption": caption, "html": html}
 
 
+# Telegram rejects a sendMessage over 4096 characters, and the caller only logs
+# the rejection. A backup error can now carry rclone stderr for several
+# destinations, so the text is capped well under the limit with room for the
+# surrounding markup.
+_MAX_ERROR_CHARS = 1500
+
+
+def _for_notification(text: str) -> str:
+    """Escape and cap text that came from outside, for an HTML sink.
+
+    Both sinks parse HTML -- Telegram sends with parse_mode="HTML" and the email
+    body is a text/html part. Unescaped rclone stderr containing < > or & makes
+    Telegram answer 400 and send nothing, and send_telegram_notification only
+    logs that. The alert most worth delivering is the one most likely to carry
+    awkward characters, so it would be the one silently dropped.
+    """
+    text = str(text)
+    if len(text) > _MAX_ERROR_CHARS:
+        text = text[:_MAX_ERROR_CHARS] + " [truncated]"
+    return html_escape(text)
+
+
 def format_backup_failed(error_msg: dict) -> dict:
     error = error_msg.get("error", "Unknown error") if isinstance(error_msg, dict) else str(error_msg)
+    error = _for_notification(error)
 
     subject = "Receiptory: Backup failed"
 

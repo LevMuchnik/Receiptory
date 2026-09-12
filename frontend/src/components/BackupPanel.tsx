@@ -31,22 +31,21 @@ export default function BackupPanel() {
     }
   };
 
-  // "partial" means the backup was written locally but reached only some of its
-  // destinations. Without its own branch it falls through to the blue "pending"
-  // style, which reads as still-running -- the opposite of what it is.
-  const statusColor = (status: string) => {
-    if (status === "completed") return "text-[#007239] font-bold";
-    if (status === "failed")    return "text-[#93000a] font-bold";
-    if (status === "partial")   return "text-[#8a5200] font-bold";
-    return "text-[#3323cc] font-bold";
-  };
+  // One record, so a status and its styling are defined together. The previous
+  // parallel if-ladders meant "partial" had to be added to both and would
+  // otherwise fall through to the blue default, reading as still-running.
+  const OK = "#007239";
+  const BAD = "#93000a";
+  const WARN = "#8a5200";
 
-  const statusIcon = (status: string) => {
-    if (status === "completed") return "check_circle";
-    if (status === "failed") return "error";
-    if (status === "partial") return "warning";
-    return "pending";
+  const STATUS_STYLE: Record<string, { color: string; icon: string }> = {
+    completed: { color: OK, icon: "check_circle" },
+    partial: { color: WARN, icon: "warning" },
+    failed: { color: BAD, icon: "error" },
+    running: { color: "#3323cc", icon: "sync" },
   };
+  const styleFor = (status: string) =>
+    STATUS_STYLE[status] ?? { color: "#3323cc", icon: "pending" };
 
   const visible = showAll ? backups : backups.slice(0, INITIAL_SHOW);
   const hasMore = backups.length > INITIAL_SHOW;
@@ -74,7 +73,7 @@ export default function BackupPanel() {
               <div key={b.id} className="flex items-center justify-between text-xs py-2">
                 <div className="flex items-center gap-3">
                   <span className="material-symbols-outlined text-sm text-muted-foreground">
-                    {statusIcon(b.status)}
+                    {styleFor(b.status).icon}
                   </span>
                   <div>
                     <p className="font-mono text-foreground">{b.started_at}</p>
@@ -82,12 +81,23 @@ export default function BackupPanel() {
                   </div>
                 </div>
                 <div className="text-right">
-                  <span className={statusColor(b.status)}>{b.status.toUpperCase()}</span>
+                  <span className="font-bold" style={{ color: styleFor(b.status).color }}>
+                    {b.status.toUpperCase()}
+                  </span>
                   {b.size_bytes != null && b.size_bytes > 0 && (
                     <p className="text-muted-foreground">{(b.size_bytes / 1024 / 1024).toFixed(1)} MB</p>
                   )}
+                  {/* A completed run can carry an error: the upload worked and
+                      only the retention sweep failed. Painting that in failure
+                      red under a green COMPLETED badge contradicts itself. */}
                   {b.error && (
-                    <p className="text-[#93000a] text-[10px] max-w-[200px] truncate" title={b.error}>{b.error}</p>
+                    <p
+                      className="text-[10px] max-w-[200px] truncate"
+                      style={{ color: b.status === "completed" ? WARN : BAD }}
+                      title={b.error}
+                    >
+                      {b.error}
+                    </p>
                   )}
                 </div>
               </div>
