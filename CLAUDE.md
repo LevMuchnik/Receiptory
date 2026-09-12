@@ -28,7 +28,8 @@ frontend/src/           # React SPA
   lib/api.ts            # Fetch wrapper with auth handling
   lib/pdf-builder.ts    # Scanned pages -> PDF (page size from pixels, see Gotchas)
   lib/scanner/          # Detection + geometry: canvas-utils, geometry, coords,
-                        # smoother, classical-detector, ml-detector
+                        # smoother, classical-detector, ml-detector,
+                        # detection-size (the shared detection resolution)
   lib/**/*.test.ts      # vitest suite (pure logic, node env)
   contexts/             # AuthContext
   pages/                # Page components
@@ -85,7 +86,7 @@ cd .claude/skills/gstack && ./setup
 - `test_normalize.py::test_html_to_pdf` is skipped on Windows (weasyprint requires GTK/Pango native libs). Passes in Docker/Linux.
 - Backend API tests use `create_app(data_dir, run_background=False)` with `TestClient`.
 
-**Frontend (vitest):** `cd frontend && npm test` (9 files, 115 tests).
+**Frontend (vitest):** `cd frontend && npm test` (11 files, 160 tests).
 
 - Config is `frontend/vitest.config.ts`: `environment: "node"`, **no jsdom**, `include: ["src/**/*.test.ts"]`. Tests live next to the module they cover (`src/lib/scanner/geometry.test.ts`, ...).
 - Pure logic only, on purpose. `ImageData`, `HTMLCanvasElement`, and `drawImage` do not exist in Node, so anything touching a canvas (`src/lib/scanner/canvas-utils.ts`) is deliberately untested — covering it means jsdom plus the native `canvas` package, which drags cairo/pango build deps into the Docker image.
@@ -114,6 +115,8 @@ cd .claude/skills/gstack && ./setup
 - The `frontend/dist/` directory persists after builds. If present, the static files mount activates. Always set `RECEIPTORY_DEV=1` when running backend + Vite dev server together.
 - SQLite `executescript()` auto-commits and can interfere with transaction isolation. The migration runner uses a dedicated connection that's closed after migrations.
 - **Scanner DPI is coupled across the stack.** `TARGET_DPI` in `frontend/src/lib/pdf-builder.ts` (200) sizes each scanned PDF page in millimetres from its own pixel dimensions; `page_render_dpi` in `backend/config.py` (200) rasters that PDF back to pixels for the LLM. The round trip is 1:1 only while the two are equal — change one without the other and capture resolution is silently thrown away before the model ever sees it. Both files carry reciprocal comments.
+- **Detection resolution is a fixed edge, never a fraction of the video.** `DETECTION_MAX_EDGE` in `frontend/src/lib/scanner/detection-size.ts` (800) sizes every detection frame — the live viewfinder loop, the review-entry re-detect, and the Lab's eval. It used to be `videoWidth * 0.4`, which was tuned at 1080p (768px); raising the camera ladder to 4K silently made it 1536px, and the live box went jumpy on-device with no error anywhere. Scanic discards everything above 800 itself (`maxProcessingDimension`, kept equal but deliberately not derived), so the extra pixels only ever cost `preprocess()` time. `detectionSizeFor` never upscales — a fixed target is not monotonically a downscale the way a fraction was.
+- **`staleMs` must exceed one detection cycle.** `TemporalSmoother`'s `staleMs` (250ms) versus `MIN_DETECT_INTERVAL_MS` (80ms) plus detect latency. Breach it and the live box goes jumpy — but *only* jumpy: `reset()` empties the buffer, so the next `push` skips the warmup drift gate and the box returns within one cycle. A box that is absent for seconds means `corners: null` repeatedly, which is a detector or hard-reject problem instead. Both files carry reciprocal comments.
 - jsPDF **sorts** a `format: [w, h]` array and then uses `orientation` to decide which value is the page width, so `{orientation: "portrait", format: [300, 100]}` yields a 100x300 page and the image is silently clipped. Derive orientation from the dimensions instead: `w > h ? "landscape" : "portrait"`.
 
 ## gstack

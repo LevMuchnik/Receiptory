@@ -7,7 +7,12 @@
  *
  * Not unit-tested on purpose: `ImageData` and `drawImage` do not exist in Node,
  * and these are thin, branchless wrappers around the browser's own scaling.
+ * Anything here with real arithmetic in it belongs in a DOM-free module that
+ * CAN be tested — `downscaleImageData` delegates its sizing to
+ * `detection-size.ts` for exactly that reason.
  */
+
+import { detectionSizeFor } from "./detection-size";
 
 /** Wrap an ImageData in a canvas of the same dimensions. */
 export function imageDataToCanvas(image: ImageData): HTMLCanvasElement {
@@ -39,25 +44,61 @@ export function downscaleImageData(
   image: ImageData,
   maxEdge: number,
 ): { data: ImageData; scale: number } {
-  const longest = Math.max(image.width, image.height);
-  if (!(maxEdge > 0) || longest <= maxEdge) return { data: image, scale: 1 };
+  // The size decision — including the no-upscale clamp that gives `scale === 1`
+  // its meaning — lives in `detection-size.ts` and is unit-tested there. This
+  // function owns only the canvas work. Keeping the arithmetic in one place is
+  // the point: the live viewfinder loop sizes its frame from the same helper,
+  // and two copies of "how big should the detection frame be" is exactly the
+  // duplication that let the 4K raise silently quadruple it.
+  const { w, h, scale } = detectionSizeFor(image.width, image.height, maxEdge);
+  if (scale === 1) return { data: image, scale: 1 };
 
-  // One uniform ratio for both axes. The per-axis ratios (w/image.width,
-  // h/image.height) differ from it by at most half a pixel of rounding; using
-  // the uniform ratio keeps the mapping isotropic, which is what the aspect
-  // preservation promises.
-  const scale = maxEdge / longest;
-  const w = Math.max(1, Math.round(image.width * scale));
-  const h = Math.max(1, Math.round(image.height * scale));
+  const src = scratch(0, image.width, image.height);
+  src.getContext("2d")!.putImageData(image, 0, 0);
 
-  const src = imageDataToCanvas(image);
-  const out = document.createElement("canvas");
-  out.width = w;
-  out.height = h;
+  const out = scratch(1, w, h);
   const ctx = out.getContext("2d", { willReadFrequently: true })!;
   ctx.drawImage(src, 0, 0, w, h);
 
   return { data: ctx.getImageData(0, 0, w, h), scale };
+}
+
+/**
+ * Two reusable canvases, resized in place rather than reallocated per call.
+ *
+ * This function is called once per frame by the Lab's `runEval` loop, which
+ * walks the whole corpus without yielding. Canvas backing stores are external
+ * memory, so a GC with no heap-pressure signal happily lets dozens of them pile
+ * up — the "eval dies partway through the corpus on a phone" shape. The live
+ * viewfinder loop already avoids this by creating its offscreen canvas once
+ * (`CameraViewfinder`); this brings the shared helper in line.
+ *
+ * Safe because `downscaleImageData` is fully synchronous: two calls can never
+ * interleave and share a scratch buffer mid-use. Anything that makes this
+ * function async must give up the scratch canvases.
+ *
+ * NOT used by `imageDataToCanvas` — its callers keep the canvas they are handed
+ * (scanic's `extract` holds one across an await), so those must stay fresh.
+ */
+const scratchCanvases: (HTMLCanvasElement | null)[] = [null, null];
+
+function scratch(slot: 0 | 1, w: number, h: number): HTMLCanvasElement {
+  let c = scratchCanvases[slot];
+  if (!c) {
+    c = document.createElement("canvas");
+    scratchCanvases[slot] = c;
+  }
+  if (c.width !== w || c.height !== h) {
+    // Assigning either dimension clears the canvas, so this doubles as the wipe.
+    c.width = w;
+    c.height = h;
+  } else {
+    // Same size as last time: nothing cleared it, so clear it explicitly. The
+    // callers below fully overwrite the surface, but relying on that silently
+    // couples this helper to their compositing mode.
+    c.getContext("2d")!.clearRect(0, 0, w, h);
+  }
+  return c;
 }
 
 /**

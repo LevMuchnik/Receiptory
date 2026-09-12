@@ -41,7 +41,26 @@ export interface SmootherOptions {
   warmupFrames?: number;
   /** Consecutive drift-rejects that force a reset. Primary release rule. */
   maxConsecutiveDriftRejects?: number;
-  /** Milliseconds without an accepted detection before the lock expires. */
+  /**
+   * Milliseconds without an accepted detection before the lock expires.
+   *
+   * COUPLED CONSTANT — this must exceed one full detection cycle, which is
+   * `MIN_DETECT_INTERVAL_MS` (CameraViewfinder, 80ms) plus however long
+   * `Detector.detect()` takes. Detection is capped at `DETECTION_MAX_EDGE`
+   * (detection-size.ts) to keep that true; a fraction-of-video sizing let the
+   * 4K camera raise push detect latency past this bound, and the box went
+   * jumpy on-device with no error anywhere. Raise one, check the other.
+   *
+   * Same shape as the TARGET_DPI / page_render_dpi pair in CLAUDE.md Gotchas:
+   * two numbers that must stay in a relationship, enforced only by this note.
+   *
+   * Note what breaching it does NOT do. `reset()` empties `buffer`, so the very
+   * next `push` sees `buffer.length (0) >= warmupFrames` as false and accepts
+   * unconditionally — the box returns within one cycle. A slow detector makes
+   * the box JUMPY, never sustainedly absent. Sustained absence means
+   * `corners: null` repeatedly, which is a detector or hard-reject problem and
+   * no amount of tuning here will touch it.
+   */
   staleMs?: number;
 }
 

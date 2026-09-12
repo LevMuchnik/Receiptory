@@ -39,6 +39,7 @@ export class MLDetector implements Detector {
         corners: null,
         score: 0,
         candidates: [],
+        outcome: "error",
         timingMs: 0,
         error: "No ML model configured",
       };
@@ -54,6 +55,7 @@ export class MLDetector implements Detector {
         corners: null,
         score: 0,
         candidates: [],
+        outcome: "error",
         timingMs: performance.now() - start,
         error: `ML model load failed: ${message}`,
       };
@@ -66,6 +68,7 @@ export class MLDetector implements Detector {
         corners: null,
         score: 0,
         candidates: [],
+        outcome: "error",
         timingMs: performance.now() - start,
         error: "ML model load failed: session unavailable",
       };
@@ -85,6 +88,7 @@ export class MLDetector implements Detector {
         corners: null,
         score: 0,
         candidates: [],
+        outcome: "error",
         timingMs: performance.now() - start,
         error: `ML inference failed: ${message}`,
       };
@@ -102,6 +106,7 @@ export class MLDetector implements Detector {
         corners: null,
         score: 0,
         candidates: [],
+        outcome: "error",
         timingMs: performance.now() - start,
         error: "ML output did not match the expected tensor shape",
       };
@@ -115,6 +120,10 @@ export class MLDetector implements Detector {
       score,
       candidates: [{ quad: corners, score }],
       timingMs: performance.now() - start,
+      // A below-threshold score is this detector's only "found something, threw
+      // it away" path — the ML analogue of a classical hard reject, and the
+      // reason the Lab's breakdown can compare the two detectors at all.
+      outcome: accepted ? "accepted" : "rejected-score",
     };
   }
 

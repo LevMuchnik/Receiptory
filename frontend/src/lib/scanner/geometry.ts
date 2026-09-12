@@ -9,7 +9,7 @@
  * A quad written TL -> TR -> BR -> BL therefore winds clockwise on screen.
  */
 
-import type { Pt, Quad } from "./detector";
+import type { DetectionResult, Pt, Quad } from "./detector";
 
 /** Shoelace area of an arbitrary polygon (absolute value, so winding-agnostic). */
 export function polygonArea(pts: Pt[]): number {
@@ -176,6 +176,50 @@ export function scaleQuad(q: Quad, k: number): Quad {
     topRight: { x: q.topRight.x * k, y: q.topRight.y * k },
     bottomRight: { x: q.bottomRight.x * k, y: q.bottomRight.y * k },
     bottomLeft: { x: q.bottomLeft.x * k, y: q.bottomLeft.y * k },
+  };
+}
+
+/**
+ * Do two quads describe the same four corners?
+ *
+ * Exists so consumers can stop using object identity (`a === b`) to ask this.
+ * Identity is a tempting dedupe key when a detector returns the same object in
+ * both `corners` and `candidates[0].quad`, but it is a contract nothing in the
+ * type system enforces: the moment any transform maps over a result, the two
+ * become separate objects and the identity check silently stops matching. That
+ * happened here on 2026-09-05 — a downscale-and-rescale step split them, and the
+ * Lab overlay began drawing the accepted quad twice with no test able to catch
+ * it, because the symptom is purely visual.
+ *
+ * Epsilon rather than exact equality: the quads being compared have usually been
+ * through a float scale-and-back, so bitwise equality is not the question being
+ * asked. The default is far tighter than a pixel.
+ */
+export function quadsEqual(a: Quad, b: Quad, epsilon = 1e-6): boolean {
+  const keys = ["topLeft", "topRight", "bottomRight", "bottomLeft"] as const;
+  return keys.every(
+    (k) => Math.abs(a[k].x - b[k].x) <= epsilon && Math.abs(a[k].y - b[k].y) <= epsilon,
+  );
+}
+
+/**
+ * Scale every quad a detection result carries by `k`, leaving the rest intact.
+ *
+ * Pure: the caller does the canvas work, this does the arithmetic. Extracted so
+ * the coordinate mapping is reachable from the node-env test suite — the same
+ * reason `classifyScanResult` and `toQuad` were pulled out of `detect()`.
+ *
+ * `candidates` matters as much as `corners`: it carries the REJECTED quad, which
+ * is the whole point of the reject breakdown, and leaving it in the detector's
+ * space while `corners` moves to the caller's would put a landmine under the
+ * first consumer that draws it.
+ */
+export function scaleDetectionResult(result: DetectionResult, k: number): DetectionResult {
+  if (k === 1) return result;
+  return {
+    ...result,
+    corners: result.corners ? scaleQuad(result.corners, k) : null,
+    candidates: result.candidates?.map((c) => ({ ...c, quad: scaleQuad(c.quad, k) })),
   };
 }
 

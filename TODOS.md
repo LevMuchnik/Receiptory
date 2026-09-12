@@ -300,6 +300,80 @@ Deferred items captured during planning and review. Organized by component, sort
 **Depends on:** None
 **Depends on:** ML detection is shipped and live (Phase 1 of the ML detector plan). Only worth building if a non-WebGPU device enters the picture, or the S26 WASM fallback benchmark is bad
 
+### Remove the E2 diagnostics strip from the scanner viewfinder
+
+**What:** Delete the `REQ 4K` / `REQ 1080p` toggle and the `granted / video / detect / cam` readout from `CameraViewfinder.tsx`, plus the `Diagnostics` interface, the `capture4k` state, the `LADDER_CONTROL_1080P` constant and the `lastVideoW`/`lastVideoH` tracking that feeds it. Roughly 45 lines.
+
+**Why:** It is experiment scaffolding (T1/T2, the "did 4K break detection?" control) shipped unconditionally into the production scanner UI. It earns its place while the E2/E3/E4 verdicts are still being gathered — the owner is the only user and also the tester — but nothing in the change that added it schedules its removal, so it becomes permanent UI by default. Flagged independently by two reviewers on 2026-09-05.
+
+**Pros:**
+- Returns the viewfinder to a clean capture surface
+- Removes two semi-transparent overlays from a screen whose job is framing a receipt
+
+**Cons:**
+- The `cam` deviceId line is the only place a lens swap is visible; losing it means re-adding instrumentation if the question returns
+- A dev-only gate (`import.meta.env.DEV`) is NOT a substitute: the on-device tests run against the deployed production build, so gating would remove it from exactly the build that needs it
+
+**Context:**
+- Source: `/review` of `fix/scanner-detection-resolution`, 2026-09-05 (simplification + maintainability lenses)
+- Start: `frontend/src/components/scanner/CameraViewfinder.tsx`
+- Note the toggle can no longer reproduce pre-T6 detection: with a fixed `DETECTION_MAX_EDGE`, 3840x2160 and 1920x1080 both detect at 800x450. Its remaining value is isolating capture and lens effects, not detection cost.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** E2, E3 and E4 verdicts landing. Do not remove before then.
+
+### Manual bounding-box specification in the review screen
+
+**What:** A "Set corners manually" button in `CaptureReview` that enters a mode where four taps place top-left, top-right, bottom-right and bottom-left directly. Plus hint text shown when the displayed quad came from the no-detection fallback rather than a real detection.
+
+**Why:** When detection returns nothing the user gets `insetCorners(raw.width, raw.height)` — a 10% inset quad (`CaptureReview.tsx:112,:166`) — and the only available move is dragging its four corners inward. `handlePointerDown:206` returns early for any tap further than `HANDLE_HIT_R_PX` (44 screen px) from an existing corner, so corners can be nudged but never placed. For a small receipt in a large frame that is four long drags from the frame edges, and nothing on screen says the box is interactive at all. Owner raised it 2026-09-05: "in cases in which bbox cannot be found automatically, user is unable to set the box."
+
+**Design decided 2026-09-05** (owner chose option C of three):
+- Tap-to-place mode behind an explicit button, NOT tap-anywhere-moves-nearest and NOT drag-to-draw.
+- Rejected tap-anywhere-moves-nearest: it is a two-line change but reverses the deliberate non-destructive-tap design at `handlePointerUp:280-288`, so a stray tap on an already-good box would move a corner and burn a full-resolution re-warp.
+- Rejected drag-to-draw: a dragged rectangle is axis-aligned, and the four-corner quad exists precisely so an angled receipt is perspective-corrected on warp. It would need corner-dragging afterwards anyway — two gestures instead of one.
+
+**Pros:**
+- The button is the affordance the screen currently lacks
+- Preserves arbitrary quads, so perspective correction survives
+- Taps stay non-destructive outside the mode
+
+**Cons:**
+- A modal interaction mode needs its own escape/cancel path and an in-progress indicator (which of the four corners is next)
+- More UI in a screen the design already wanted kept simple
+
+**Context:**
+- Start: `frontend/src/components/scanner/CaptureReview.tsx` — the mode gates `handlePointerDown`; `onCornersCommit(orderQuadByAngle(...))` already exists and should be reused for the commit
+- Note `orderQuadByAngle` relabels corners by angle around the centroid, so tap ORDER need not be trusted — a user who taps them out of order still gets a sane quad
+- May become rarer once E3 (the scanner-miss vs hard-reject split, shipped 2026-09-05) shows whether hard rejects are discarding good quads, but is worth having as a safety net regardless
+
+**Effort:** M
+**Priority:** P1
+**Depends on:** None. Own branch — it is review-screen UI and unrelated to the detection-resolution work.
+
+### Reduce per-detection allocation in `preprocess()`
+
+**What:** Reuse module-scoped scratch buffers and canvases (keyed on frame dimensions) instead of allocating fresh ones every detection. Today each `preprocess()` call allocates two canvases in `canvasBlur` (`classical-detector.ts:172,178`), a third in `imageDataToCanvas` (`:52`), and five full-frame `Uint8ClampedArray`s across `grayscaleAsRgba`, `shadowNormalize`, `saturationMask` and `composeWeighted`.
+
+**Why:** At the `MIN_DETECT_INTERVAL_MS = 80` floor that is roughly 37 canvas allocations per second. A multi-hundred-millisecond GC pause produces exactly the symptom under investigation on 2026-09-05 — a bounding box that vanishes for a visible stretch — whereas a merely slow detector only produces a flicker (after `TemporalSmoother.reset()` the buffer is empty, so the next `push` skips the drift gate and the box returns within one cycle, `smoother.ts:81`). Shrinking the detection frame to 800px cuts the bytes per allocation 4x but leaves the allocation *rate* unchanged.
+
+**Pros:**
+- Removes a plausible mechanism for sustained box absence that the resolution fix does not address
+- Scratch-buffer reuse is mechanical and unit-testable
+
+**Cons:**
+- Introduces mutable module state into a detector that is currently pure per call
+- May be entirely moot — see Depends on
+
+**Context:**
+- Source: outside voice, `/plan-eng-review` 2026-09-05, branch `fix/scanner-detection-resolution`
+- Start: `frontend/src/lib/scanner/classical-detector.ts:97-156`
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** The Lab A/B of `{shadowNorm: false, saturationPrior: false}` over the stored corpus. If preprocessing does not improve median IoU, **delete it rather than optimise it** — Scanic grayscales and downsamples the result anyway (`prepareScaleAndGrayscale`), and this TODO evaporates.
+
 ### Web Worker for live detection
 
 **What:** Move the detection pipeline (preprocess + inference + parse) to a Web Worker using OffscreenCanvas + transferable ImageData, so the main thread never blocks during live detection.

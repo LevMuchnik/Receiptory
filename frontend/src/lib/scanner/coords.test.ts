@@ -40,7 +40,11 @@ function expectQuadClose(a: Quad, b: Quad, digits = 9) {
 describe("detection <-> video round trip", () => {
   // The live loop detects on a downscale of the video frame and reports the
   // ratio it actually used. ScannerPage converts with 1 / detectionScale.
-  const DETECTION_SCALE = 0.4;           // 1080x1920 video -> 432x768 detection
+  // An arbitrary ratio fixture, NOT the production value — the live loop now
+  // derives its ratio from detectionSizeFor(video, DETECTION_MAX_EDGE), which
+  // varies with what the camera ladder negotiated. What is under test here is
+  // that scaleQuad round-trips through ANY ratio, so a fixed one is the point.
+  const DETECTION_SCALE = 0.4;
   const inDetectionSpace = quad([50, 80], [380, 70], [390, 700], [40, 690]);
 
   it("is an identity round trip", () => {
