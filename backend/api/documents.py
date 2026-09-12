@@ -225,6 +225,12 @@ def edit_document(doc_id: int, update: DocumentUpdate, username: str = Depends(r
     # behind would keep "totals disagree" on a document the owner just approved.
     if changes.get("status") and changes["status"] != "needs_review":
         set_clauses.append("review_reason = NULL")
+    elif {"total_amount", "subtotal", "tax_amount"} & changes.keys():
+        # Editing the numbers the reason quotes answers it, even when the status
+        # stays put — which is the natural flow, since saving the metadata form
+        # and approving are separate buttons. Leaving the banner up would have it
+        # quoting a total the document no longer has.
+        set_clauses.append("review_reason = NULL")
     values = list(changes.values()) + [json.dumps(history), now, doc_id]
 
     with get_connection() as conn:

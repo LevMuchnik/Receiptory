@@ -114,6 +114,10 @@ Return ONLY the JSON object, no markdown fences or explanation."""
 
 
 TOTALS_TOLERANCE = 0.02
+# Per-line VAT rounding grows with the invoice, so the tolerance has to as well.
+# 0.1% sits in the middle of a stable range: 0.05% still flags a 435 receipt for
+# a 30-agora rounding, and 0.2% changes nothing versus 0.1% on the real corpus.
+ROUNDING_FRACTION = 0.001
 
 
 def totals_mismatch(
@@ -134,9 +138,17 @@ def totals_mismatch(
     2026-09-12), all three carrying subtotal 623.73 and tax 112.27.
 
     Returns the signed difference so the caller can say which way it is off.
-    A tolerance covers currency rounding; anything larger is a real disagreement,
-    including a legitimate one (shipping, a discount), which is still worth a
-    human glance before it lands in an expense total.
+    Anything past the tolerance is a real disagreement, including a legitimate
+    one (shipping, a discount), which is still worth a human glance before it
+    lands in an expense total.
+
+    The tolerance is absolute OR relative, whichever is larger, because printed
+    VAT is rounded per line: a 4-agora gap is noise on a 93,135 invoice and a
+    wrong number on a 20 one. Measured over the owner's 244 documents, the flat
+    2-agora tolerance alone flagged three invoices for their own rounding
+    (-0.04 on 93,135, +0.32 on 21,448, +0.30 on 435); the 0.1% floor drops
+    exactly those three and keeps all fifteen genuine disagreements, including
+    the 88.00 tip that prompted this.
 
     Pure, so the test suite can cover it without a database or an LLM.
     """
@@ -146,7 +158,8 @@ def totals_mismatch(
     if any(not math.isfinite(v) for v in values):  # type: ignore[arg-type]
         return None
     diff = total_amount - (subtotal + tax_amount)  # type: ignore[operator]
-    return diff if abs(diff) > tolerance else None
+    allowed = max(tolerance, ROUNDING_FRACTION * abs(total_amount))  # type: ignore[arg-type]
+    return diff if abs(diff) > allowed else None
 
 
 _JSON_DECODER = json.JSONDecoder()

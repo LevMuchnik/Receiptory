@@ -681,10 +681,12 @@ def test_totals_mismatch_reports_the_sign_so_the_caller_can_say_which_way():
 
 
 def test_totals_mismatch_tolerates_currency_rounding():
-    # Half an agora out is the receipt rounding, not a wrong line.
+    # Half an agora out is the receipt rounding, not a wrong line. On small
+    # amounts the flat 2-agora tolerance is the binding one: 0.1% of 20 is a
+    # fifth of an agora, so `max()` keeps the absolute floor in charge there.
     assert totals_mismatch(10.005, 0.0, 10.01) is None
-    assert totals_mismatch(100.00, 18.00, 118.02) is None
-    assert totals_mismatch(100.00, 18.00, 118.03) is not None
+    assert totals_mismatch(10.00, 10.00, 20.02) is None
+    assert totals_mismatch(10.00, 10.00, 20.03) is not None
 
 
 def test_totals_mismatch_silent_when_any_number_is_missing():
@@ -716,3 +718,17 @@ def test_prompt_defines_total_amount_as_the_billed_total():
     assert "subtotal + tax_amount" in prompt
     assert "total_charged" in prompt
     assert "tip" in prompt.lower()
+
+
+def test_totals_mismatch_scales_the_tolerance_with_the_invoice():
+    # Real invoices from the owner's corpus that the flat 2-agora tolerance
+    # flagged for their own per-line VAT rounding. A 4-agora gap on 93,135 is
+    # noise; the same gap on a 20 receipt is not.
+    assert totals_mismatch(78928.00, 14207.04, 93135.00) is None   # -0.04 on 93,135
+    assert totals_mismatch(18176.00, 3271.68, 21448.00) is None    # +0.32 on 21,448
+    assert totals_mismatch(368.40, 66.30, 435.00) is None          # +0.30 on 435
+    # ...and the genuine ones still flag, at every size.
+    assert totals_mismatch(623.73, 112.27, 824.00) is not None     # +88.00 tip
+    assert totals_mismatch(145.76, 26.24, 198.00) is not None      # +26.00 tip
+    assert totals_mismatch(143.57, 0.0, 163.52) is not None        # +19.95 shipping
+    assert totals_mismatch(10.00, 0.0, 10.05) is not None          # 5 agorot on a 10 receipt
