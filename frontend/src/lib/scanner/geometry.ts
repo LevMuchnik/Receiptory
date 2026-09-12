@@ -223,6 +223,94 @@ export function scaleDetectionResult(result: DetectionResult, k: number): Detect
   };
 }
 
+/**
+ * The fallback crop when detection found nothing: a symmetric inset of the frame.
+ *
+ * Lives here rather than in `CaptureReview` so it is reachable from the node-env
+ * suite — it is pure arithmetic, and the review screen leans on it for every
+ * harsh capture, which is exactly the case that gets the least manual testing.
+ */
+export function insetQuad(w: number, h: number, f = 0.1): Quad {
+  const x0 = w * f;
+  const x1 = w * (1 - f);
+  const y0 = h * f;
+  const y1 = h * (1 - f);
+  return {
+    topLeft: { x: x0, y: y0 },
+    topRight: { x: x1, y: y0 },
+    bottomRight: { x: x1, y: y1 },
+    bottomLeft: { x: x0, y: y1 },
+  };
+}
+
+/**
+ * How close two placement taps may be before the second is ignored, as a
+ * fraction of the frame's SHORTER edge.
+ *
+ * Coincident points are the failure this guards. `orderQuadByAngle` sorts by
+ * `atan2` around the centroid, and two identical points tie; the sort keeps
+ * their input order and the quad folds into a triangle with one doubled corner.
+ * A folded quad still measures ~27% of the frame, which clears
+ * `MIN_AREA_FRACTION`, so the review screen's "that crop is almost empty" escape
+ * never fires and the user gets a silently wrong crop. A double-tap at rest
+ * produces exactly this: two taps with identical clientX/clientY.
+ */
+export const MIN_TAP_SEPARATION_FRACTION = 0.02;
+
+export interface PlacementStep {
+  /** Points placed so far, after this tap. Unchanged if the tap was ignored. */
+  placed: Pt[];
+  /** Set only on the tap that completes the quad. */
+  commit: Quad | null;
+}
+
+/**
+ * Apply one placement tap.
+ *
+ * Pure, and extracted from the pointer handler for that reason: it is the only
+ * place the coincident-tap guard can live where a test can reach it.
+ *
+ * Contract:
+ * - a tap closer than `MIN_TAP_SEPARATION_FRACTION` to an already-placed point
+ *   is IGNORED, returning `placed` unchanged so the caller renders no change
+ * - taps 1-3 accumulate and commit nothing
+ * - tap 4 commits and resets `placed` to empty, so `placed.length` is never 4
+ *   (the prompt indexes on that length and would run off the end otherwise)
+ */
+export function advancePlacement(
+  placed: Pt[],
+  tap: Pt,
+  frameW: number,
+  frameH: number,
+): PlacementStep {
+  const p = clampPtToFrame(tap, frameW, frameH);
+  const minGap = Math.min(frameW, frameH) * MIN_TAP_SEPARATION_FRACTION;
+  if (placed.some((q) => dist(q, p) < minGap)) return { placed, commit: null };
+
+  const next = [...placed, p];
+  if (next.length < 4) return { placed: next, commit: null };
+  return { placed: [], commit: quadFromPlacedPoints(next, frameW, frameH) };
+}
+
+/**
+ * Turn four tapped points into a crop quad, or null if there are not four.
+ *
+ * Two guarantees the caller depends on, both delegated to code that already
+ * exists and is already property-tested:
+ *
+ * - **Tap ORDER does not matter.** `orderQuadByAngle` sorts by angle around the
+ *   centroid and relabels TL/TR/BR/BL, so a user who taps the corners in any
+ *   sequence still gets a sane, non-self-intersecting quad. The on-screen
+ *   prompts are guidance, not a constraint the user can violate.
+ * - **Taps outside the image cannot escape the frame.** The review overlay
+ *   letterboxes with `xMidYMid meet`, so there is margin around the picture that
+ *   maps to coordinates outside it; every point is clamped before use.
+ */
+export function quadFromPlacedPoints(pts: Pt[], frameW: number, frameH: number): Quad | null {
+  if (pts.length !== 4) return null;
+  return orderQuadByAngle(pts.map((p) => clampPtToFrame(p, frameW, frameH)));
+}
+
 /** Clamp all four corners into the frame. */
 export function clampQuad(q: Quad, frameW: number, frameH: number): Quad {
   return {
