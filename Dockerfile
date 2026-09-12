@@ -9,10 +9,13 @@ RUN npm run build
 # Stage 2: Python runtime
 FROM python:3.12-slim
 
-# Install system dependencies for weasyprint
+# Install system dependencies for weasyprint.
+# libharfbuzz-subset0: weasyprint 70 warns that HarfBuzz-Subset "will be required
+# by future versions" and renders fine without it; the next major will not. With
+# no CI, that would surface as a broken deploy, so take the one-word fix now.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 \
-    libffi-dev libcairo2 libglib2.0-0 \
+    libffi-dev libcairo2 libglib2.0-0 libharfbuzz-subset0 \
     curl unzip \
     && rm -rf /var/lib/apt/lists/*
 
