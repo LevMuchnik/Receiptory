@@ -4,12 +4,90 @@ import {
   classifyScanResult,
   firstHardReject,
   outcomeForNoQuad,
+  mergeDetectionPasses,
   scanicDetectOptions,
   scanThrowMessage,
   toQuad,
   type Metrics,
 } from "./classical-detector";
 import { REJECT_OUTCOMES, isRejectOutcome } from "./detector";
+import type { DetectionResult, Quad } from "./detector";
+
+describe("mergeDetectionPasses — which pass gets reported", () => {
+  const q: Quad = {
+    topLeft: { x: 0, y: 0 },
+    topRight: { x: 10, y: 0 },
+    bottomRight: { x: 10, y: 20 },
+    bottomLeft: { x: 0, y: 20 },
+  };
+  const res = (o: Partial<DetectionResult>): DetectionResult => ({
+    corners: null, score: 0, candidates: [], timingMs: 1, outcome: "no-contour", ...o,
+  });
+
+  it("reports the configured pass when it accepted", () => {
+    const out = mergeDetectionPasses(res({ outcome: "rejected-area", candidates: [{ quad: q, score: 0.2 }] }), res({ corners: q, outcome: "accepted" }));
+    expect(out.outcome).toBe("accepted");
+    expect(out.corners).toBe(q);
+  });
+
+  it("reports the CONFIGURED pass's reject reason, not the raw pass's", () => {
+    // The Lab tallies `outcome` to tell a too-tight threshold from a blind
+    // scanner. Attributing the raw pass's reject to a preprocessed panel would
+    // answer a question about the other arm.
+    const out = mergeDetectionPasses(
+      res({ outcome: "rejected-area", candidates: [{ quad: q, score: 0.2 }] }),
+      res({ outcome: "rejected-angle", candidates: [{ quad: q, score: 0.3 }] }),
+    );
+    expect(out.outcome).toBe("rejected-angle");
+  });
+
+  it("keeps the raw pass's evidence when the configured pass saw nothing at all", () => {
+    // A rejected quad is the only proof scanic found SOMETHING here. Throwing it
+    // away would make a too-tight gate look identical to a blind frame.
+    const out = mergeDetectionPasses(
+      res({ outcome: "rejected-area", candidates: [{ quad: q, score: 0.2 }] }),
+      res({ outcome: "no-contour" }),
+    );
+    expect(out.outcome).toBe("rejected-area");
+    expect(out.candidates).toHaveLength(1);
+  });
+
+  it("carries a detector FAILURE across even when the other pass merely came back empty", () => {
+    // `error` is the one signal meaning "the detector is broken" rather than
+    // "this frame is empty". If the raw pass throws and the preprocessed pass
+    // finds nothing, the viewfinder badge must still light.
+    const out = mergeDetectionPasses(
+      res({ outcome: "error", error: "Scanner error: wasm boom" }),
+      res({ outcome: "no-contour" }),
+    );
+    expect(out.error).toMatch(/wasm boom/);
+    expect(out.outcome).toBe("error");
+  });
+
+  it("carries a failure from the configured pass too", () => {
+    const out = mergeDetectionPasses(
+      res({ outcome: "no-contour" }),
+      res({ outcome: "error", error: "Scanner error: later boom" }),
+    );
+    expect(out.error).toMatch(/later boom/);
+    expect(out.outcome).toBe("error");
+  });
+
+  it("does NOT invent an error for two honestly empty frames", () => {
+    const out = mergeDetectionPasses(res({ outcome: "no-contour" }), res({ outcome: "no-contour" }));
+    expect(out.error).toBeUndefined();
+    expect(out.outcome).toBe("no-contour");
+  });
+
+  it("keeps a usable quad's own outcome even when a pass errored", () => {
+    const out = mergeDetectionPasses(
+      res({ outcome: "error", error: "Scanner error: boom" }),
+      res({ corners: q, outcome: "accepted" }),
+    );
+    expect(out.outcome).toBe("accepted");
+    expect(out.error).toMatch(/boom/);
+  });
+});
 
 describe("scanicDetectOptions — scanic's aspect cap follows ours", () => {
   it("passes our maxAspect through, so scanic 1.6's 8:1 default never binds first", () => {
@@ -148,6 +226,7 @@ describe("firstHardReject — which gate threw the quad away", () => {
   const passing: Metrics = {
     area: 100_000,
     areaFraction: 0.4,
+    spanFraction: 0.7,
     convexity: 1,
     aspect: 2,
     minAngle: 85,
@@ -169,6 +248,63 @@ describe("firstHardReject — which gate threw the quad away", () => {
 
   it("rejects a quad longer than maxAspect", () => {
     expect(firstHardReject({ ...passing, aspect: 20 }, p)).toBe("rejected-aspect");
+  });
+
+  describe("the long-document exemption from minAreaFraction", () => {
+    /**
+     * The 2026-09-12 capture that would not lock: a till slip covering 11.9% of
+     * the frame against a 12% floor, while spanning 56% of its height. Area
+     * alone cannot see the difference between that and a scrap of noise, so the
+     * exemption asks for length as well — and all three conditions together, or
+     * it would readmit exactly the small junk the floor exists to reject.
+     */
+    const slip: Metrics = { ...passing, areaFraction: 0.119, spanFraction: 0.56, aspect: 4.4 };
+
+    it("accepts a long thin slip that the area floor alone would reject", () => {
+      expect(firstHardReject({ ...passing, areaFraction: 0.119 }, p)).toBe("rejected-area");
+      expect(firstHardReject(slip, p)).toBeNull();
+    });
+
+    it("still rejects it when it is not long enough across the frame", () => {
+      expect(firstHardReject({ ...slip, spanFraction: p.minSpanFraction - 0.01 }, p)).toBe("rejected-area");
+    });
+
+    it("still rejects it when it is not thin enough to be a receipt", () => {
+      expect(firstHardReject({ ...slip, aspect: p.minSpanAspect - 0.1 }, p)).toBe("rejected-area");
+    });
+
+    it("REFUSES the long thin strip a table edge produces", () => {
+      // The shape an adversarial review found at the original floor: in an
+      // 800x450 detection frame, a 500x45 strip is 6% of the area, spans 64% of
+      // the width, and clears convexity (1.0) and the 90-degree corner band
+      // effortlessly. A table edge, a keyboard row, a strip light. It does not
+      // move, so the smoother would lock onto it, the badge would go green, and
+      // the "shoot anyway" escape hatch would never appear — a silent bad
+      // capture, not a visible one. Both the aspect ceiling and the area floor
+      // refuse it independently.
+      const strip: Metrics = { ...passing, areaFraction: 0.06, spanFraction: 0.64, aspect: 12 };
+      expect(firstHardReject(strip, p)).toBe("rejected-area");
+      expect(firstHardReject({ ...strip, aspect: 8 }, p)).toBe("rejected-area");
+      expect(firstHardReject({ ...strip, areaFraction: 0.1 }, p)).toBe("rejected-area");
+    });
+
+    it("rejects anything longer than maxSpanAspect even at a healthy area", () => {
+      expect(firstHardReject({ ...slip, aspect: p.maxSpanAspect + 0.1 }, p)).toBe("rejected-area");
+    });
+
+    it("still rejects it when it has all but vanished", () => {
+      expect(firstHardReject({ ...slip, areaFraction: p.minSpanAreaFraction - 0.001 }, p)).toBe("rejected-area");
+    });
+
+    it("never exempts a quad from the UPPER bound — a near-full-frame quad still fails", () => {
+      // maxAreaFraction guards against locking onto the whole photo. Length must
+      // not buy a way past it.
+      expect(firstHardReject({ ...slip, areaFraction: 0.99, spanFraction: 0.99 }, p)).toBe("rejected-area");
+    });
+
+    it("rejects a quad whose span is not a number", () => {
+      expect(firstHardReject({ ...passing, spanFraction: NaN }, p)).toBe("rejected-area");
+    });
   });
 
   // The reason minAspect is NOT dead code. computeMetrics falls back to

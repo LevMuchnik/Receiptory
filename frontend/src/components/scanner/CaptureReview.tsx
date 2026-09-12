@@ -574,14 +574,24 @@ export default function CaptureReview({
             fallback signal: ScannerPage passes the detection through verbatim,
             and this component substitutes the inset.
           */}
+          {/*
+            `pointer-events-none` on the panel, `pointer-events-auto` on its
+            button. Both bottom panels sit over the image, and the inset quad's
+            bottom corners sit at 90% of image height — with a portrait capture
+            filling the pane, their 44px grab radius lands underneath this panel.
+            An opaque panel therefore ate the drags its own sentence asks for.
+            Same idiom as the placement prompt, which was moved to the top for
+            this exact reason; here the panel has a button, so the taps have to
+            pass through the panel but not through the button.
+          */}
           {!placing && !corners && (
-            <div className="absolute inset-x-3 bottom-3 rounded-xl bg-black/80 p-3 text-center backdrop-blur-sm">
+            <div className="pointer-events-none absolute inset-x-3 bottom-3 rounded-xl bg-black/80 p-3 text-center backdrop-blur-sm">
               <p className="text-xs font-medium text-white/85">
                 No document found. Drag the corners to fit, or set them yourself.
               </p>
               <button
                 onClick={startPlacing}
-                className="mt-2 w-full py-2 rounded-lg bg-white/20 text-white font-bold text-xs"
+                className="pointer-events-auto mt-2 w-full py-2 rounded-lg bg-white/20 text-white font-bold text-xs"
               >
                 Set corners
               </button>
@@ -589,20 +599,20 @@ export default function CaptureReview({
           )}
 
           {!placing && degenerate && (
-            <div className="absolute inset-x-3 bottom-3 rounded-xl bg-black/80 p-3 text-center backdrop-blur-sm">
+            <div className="pointer-events-none absolute inset-x-3 bottom-3 rounded-xl bg-black/80 p-3 text-center backdrop-blur-sm">
               <p className="text-xs text-[#ffdad6] font-medium">
                 That crop is almost empty. Drag the corners back out, or keep the whole frame.
               </p>
               <div className="mt-2 flex gap-2">
                 <button
                   onClick={onUseFullFrame}
-                  className="flex-1 py-2 rounded-lg bg-white/15 text-white font-bold text-xs"
+                  className="pointer-events-auto flex-1 py-2 rounded-lg bg-white/15 text-white font-bold text-xs"
                 >
                   Use full frame
                 </button>
                 <button
                   onClick={startPlacing}
-                  className="flex-1 py-2 rounded-lg bg-white/15 text-white font-bold text-xs"
+                  className="pointer-events-auto flex-1 py-2 rounded-lg bg-white/15 text-white font-bold text-xs"
                 >
                   Set corners
                 </button>
@@ -639,6 +649,13 @@ export default function CaptureReview({
               <button
                 key={t}
                 onClick={() => {
+                  // Tapping the tab you are already on is a no-op, not a cancel.
+                  // Both pills render this handler, and "get me back to the
+                  // image" is a reflex tap on the highlighted one — which used
+                  // to discard every placed corner without confirmation, and on
+                  // the no-warp path burn a full-res extract of the quad being
+                  // discarded.
+                  if (t === tab) return;
                   // Leaving the crop pane hides the placement overlay AND its
                   // only visible controls while `placing` stays live, so the
                   // mode must end here. If it began before the review-entry warp

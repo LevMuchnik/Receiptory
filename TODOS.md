@@ -100,6 +100,107 @@ Deferred items captured during planning and review. Organized by component, sort
 
 ## Scanner
 
+### Full-resolution frame copies pile up during review
+
+**What:** At 4K a single capture is held as roughly three ~33MB copies — the capture canvas plus the `raw` ImageData in reducer state (`CameraViewfinder`), the review display canvas (`CaptureReview.tsx:157`, sized to `raw.width`), and `extractAndEnhance`'s `fullCanvas` (`opencv-loader.ts`) — and the last one is reallocated on EVERY corner commit, so four drags cost four more.
+
+**Why:** Android Chrome kills the tab under memory pressure and the scan is lost. The design's step 2.3 called for downscaling the review display copy; the corpus upload path got its downscale, this one did not.
+
+**Context:**
+- Source: PR #34 review 2026-09-12, P2 (confidence 7)
+- Also flagged by the PR #37 performance pass: scanic 1.6's extract itself copies the source frame, so the peak grew again (~66MB more per crop)
+- Start: cache `fullCanvas` for the life of one review session; blit `raw` into the display canvas at a device-sized cap
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** None
+
+### A lost pointerup can latch the review drag and disable Submit
+
+**What:** `CaptureReview` binds `pointerup` only on the SVG and calls `setPointerCapture` inside a `try/catch` that swallows failure (`:219`). If capture genuinely fails and the finger lifts outside the SVG, `dragRef.current` stays set, `dragging` stays true, and because `ScannerPage` skipped the review-entry extract on the assumption pointerup would run one, `extracted` stays null — so Submit and Add Page are disabled permanently.
+
+**Why:** The scan cannot be filed at all; the only escape is Retake, which costs the capture.
+
+**Context:**
+- Source: PR #34 review 2026-09-12, P2 (confidence 6). Narrow: needs a real `setPointerCapture` failure.
+- Start: add a `lostpointercapture` handler, or a window-level `pointerup`/`pointercancel` while `dragRef.current` is set, running the same commit path
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+### An extract failure throws away the capture
+
+**What:** `ScannerPage.runExtract`'s catch dispatches `{type:"error"}`, which replaces the whole reducer state and drops `raw`; the error screen's only action returns to the viewfinder. `handleSubmit` is careful to restore the review payload on upload failure — this path is not.
+
+**Why:** Violates the branch's own "no scan is ever lost" criterion. Reachable when `getScanner()` throws mid-review.
+
+**Context:**
+- Source: PR #34 review 2026-09-12, P2 (confidence 6)
+- Start: dispatch `extracted: imageDataToCanvas(raw), enhanced: null` and surface the message as a toast instead of transitioning to `"error"`
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+### page_render_dpi is clamped when writing but not when rendering
+
+**What:** `normalize._resolve_render_dpi` clamps into 72-600, but `pipeline.py` reads `get_setting("page_render_dpi")` raw. At 800 the page is written at 600 and rastered at 800 — a silent 1.33x upscale, the exact failure the docstring says the shared DPI prevents.
+
+**Why:** Breaks the documented one-source-pixel-in-one-pixel-out round trip. Low reach: the setting is not exposed in the UI.
+
+**Context:**
+- Source: PR #34 review 2026-09-12, P2 (confidence 5)
+- Start: clamp at the `get_setting` call in `pipeline.py` too, or correct the docstring
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+### Stale coordinate-space comments in the scanner
+
+**What:** `detector.ts`'s header diagram still says corners cross `onCapture` in VIDEO space and the viewfinder viewBox is video space; both are detection space today. `canvas-utils.ts`'s scratch-canvas docblock justifies reuse with a claim about the Lab's eval loop not yielding — it does yield, and the two call sites alternate sizes so the reuse buys nothing there (and leaves a 4K backing store alive). `CameraViewfinder`'s `diagnostics` docblock says it is keyed on the detection size; the write site is keyed on the video size, deliberately.
+
+**Why:** This subsystem's recurring bug class is coordinate-space confusion, and the header diagram is the canonical reference people check.
+
+**Context:**
+- Source: PR #34 review (P2, confidence 9) and PR #35 review (P2, confidence 8-9), 2026-09-12
+- Start: `frontend/src/lib/scanner/detector.ts` header, `canvas-utils.ts:70-83`, `CameraViewfinder.tsx:96`
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+### Live downscale runs at the canvas default smoothing quality
+
+**What:** The live loop now resamples 3840 to 800 in one `drawImage` (4.8x) with `imageSmoothingQuality` left at the `"low"` default, in both `CameraViewfinder` and `canvas-utils.downscaleImageData`. Scanic sets `"medium"` before its own downsample.
+
+**Why:** A low-quality 4.8x reduction can alias exactly the edges the Canny pass needs, partly offsetting the stability win the fixed-edge change was made for.
+
+**Context:**
+- Source: PR #35 review 2026-09-12, P2 (confidence 6)
+- Needs an on-device A/B rather than a blind change — the verdict here is on-device by design
+- Start: `ctx.imageSmoothingQuality = "medium"` at both sites
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+### Rejected placement taps give no feedback
+
+**What:** When `advancePlacement` rejects a tap for being too close to an existing one, it returns the caller's own array by reference, so React bails out of the re-render and nothing changes on screen — indistinguishable from a touch the app never received.
+
+**Why:** The separation threshold is ~7 CSS px on a 4K capture, so deliberate taps get rejected, not just double-taps.
+
+**Context:**
+- Source: PR #36 review 2026-09-12, P2 (confidence 7)
+- Start: fire `navigator.vibrate?.(10)` or flash the last-placed dot in the rejected branch of the pointer handler
+- Related: the `MIN_TAP_SEPARATION_FRACTION` docblock claims the guard closes the silently-wrong-crop hole; it closes only the exactly-coincident case, and the comment should say so
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
 ### Expand test corpus + per-bucket tagging
 
 **What:** Add a bucket field to the Scanner Lab (cluttered desk / dark background / harsh shadow / crumpled-long thermal), tag frames, and grow the corpus toward ~40+ per bucket for a statistically meaningful per-bucket eval.
