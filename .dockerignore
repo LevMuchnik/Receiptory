@@ -1,0 +1,30 @@
+# Keep the build context out of the image, and the host's state out of the build.
+#
+# The frontend stage does `COPY frontend/package*.json` + `npm ci` and only THEN
+# `COPY frontend/ ./`, so without this file the host's frontend/node_modules
+# overwrites the clean install and the bundle depends on whatever happens to be
+# installed on the machine that runs `docker compose build`. That is not
+# hypothetical: a build on 2026-09-12 produced two scanic-1.6 chunks from a tree
+# whose lockfile pins scanic 1.0.6.
+node_modules
+**/node_modules
+
+# Built by the image itself; copying it in wastes context and can shadow the
+# fresh build.
+frontend/dist
+
+# Runtime state. `data/` is a mounted volume — never bake a copy of the
+# database, the documents or the rclone credentials into an image layer.
+data
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+
+# Local-only
+.env
+.git
+.gstack
+.claude
+test_documents
+docs/screenshots

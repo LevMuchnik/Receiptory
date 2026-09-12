@@ -17,7 +17,7 @@ frontend from `package-lock.json` (`npm ci`).
 
 | Component | Now | Target | Why |
 |---|---|---|---|
-| Node (Docker frontend build stage only) | `node:20-slim` | `node:24-slim` | Node 20 end-of-life 2026-04-30. 24 is the active LTS and already runs in the claude-dev sidecar (24.21.0), where every build and test runs. Vite 8 needs `^20.19 \|\| >=22.12`; scanic 1.6 declares `>=22`. |
+| Node (Docker frontend build stage only) | `node:20-slim` | `node:24-slim` | Node 20 end-of-life 2026-04-30. 24 is the active LTS and already runs in the claude-dev sidecar (24.21.0), where every build and test runs. The only `engines` floor in this tree is vite 8's `^20.19 \|\| >=22.12`; scanic on master is 1.0.6 and declares none (1.6.0, which declares `>=22`, arrives with the scanner stack). |
 
 Node is not in the runtime image. The Python image serves the built `frontend/dist`.
 
