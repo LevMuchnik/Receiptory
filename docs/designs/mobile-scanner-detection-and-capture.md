@@ -7,6 +7,16 @@ Status: APPROVED
 Mode: Builder
 Supersedes: `~/.gstack/projects/LevMuchnik-Receiptory/root-master-design-20260703-134251.md` (not in-repo; the ML-detector design whose gate failed)
 
+> **Scanic version note (added 2026-09-12).** Every Scanic citation below — `scanic.js` line
+> numbers, `detectDocumentContour`, `prepareScaleAndGrayscale`, `scanic.extract` — describes
+> **scanic 1.0.6**, the version in the tree when this was written. The app has run **1.6.0**
+> since 2026-09-11, whose minified dist ships no source and carries none of those names or line
+> numbers. The observable behaviour each citation stands on was re-checked against 1.6.0 (the
+> single `success: false` "No document detected" path, the 800px downsample, the warp), with two
+> changes: the crop calls the exported `extractDocument` rather than `Scanner#extract`, and
+> detection is held to the 1.0.6 edge map by pinned options. The record below is left as written.
+> See `docs/designs/scanic-1.6-upgrade.md`.
+
 ## Problem Statement
 
 The mobile-browser scanner is virtually unusable. The owner wants dynamic auto-detection with a live bounding box that holds up across real conditions (cluttered desk, dark leather, harsh shadow, crumpled long thermal receipts) plus a capture that actually delivers a usable image. Reference device is a Galaxy S26 Ultra. Everything stays self-hosted and offline-capable.

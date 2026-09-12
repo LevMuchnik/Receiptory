@@ -88,8 +88,11 @@ either (0 correct / 2 wrong / 29 no box); it loses #4.
   detects. Verified: a no-box 4K capture crops 1728×3072, the on-screen box.
 - **No black pages.** 1.6.0's extract returns a solid black page with `success: true` for
   collinear or coincident corners (its singular homography becomes NaN, and every pixel truncates to 0).
-  `isWarpableQuad` (geometry.ts) rejects non-convex, flat-cornered or sub-8px-sided quads first,
-  and the whole frame is returned, the existing failed-warp policy. Verified for collinear,
+  `isWarpableQuad` (geometry.ts) rejects non-finite, flat-cornered, sub-8px-sided and bow-tie
+  quads first, and the whole frame is returned, the existing failed-warp policy. A merely
+  CONCAVE quad (one handle dragged past the opposite diagonal) is accepted: the warp honours it
+  and review is drawing that same dented box, so refusing it would re-open the shown-vs-filed
+  split this branch closed. Verified for collinear,
   three-on-an-edge and coincident corners.
 - **Real types.** The hand-written `src/types/scanic.d.ts` from the first scanner commit
   shadowed scanic's shipped types, so the pinned options were never type-checked (a

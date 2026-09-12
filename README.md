@@ -206,6 +206,7 @@ Unread emails with PDF/image attachments are ingested automatically. HTML-only e
 
 On Android devices, the app opens directly to a camera-based document scanner with:
 - Live document boundary detection and perspective correction, with draggable corners to fix a bad crop
+- What the review screen draws is what gets filed — when nothing is detected, the capture crops the box shown on screen instead of guessing at one
 - Image enhancement (contrast, brightness optimization)
 - Multi-page scanning with PDF assembly — each page is sized from its own pixels at 200 DPI, so a high-resolution capture reaches the LLM at full resolution
 - Requires HTTPS or a Chrome flag for camera access on LAN
