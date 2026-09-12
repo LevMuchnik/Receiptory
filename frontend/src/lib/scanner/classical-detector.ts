@@ -19,6 +19,22 @@ export interface ClassicalParams {
   saturationWeight: number;
   minAreaFraction: number;
   maxAreaFraction: number;
+  /**
+   * The long-document exemption from `minAreaFraction`, all four required
+   * together: the quad reaches this fraction of a frame dimension...
+   */
+  minSpanFraction: number;
+  /** ...is at least this many times longer than wide... */
+  minSpanAspect: number;
+  /** ...but no longer than this, which is a strip, not a document... */
+  maxSpanAspect: number;
+  /** ...and still covers this much of the frame. */
+  minSpanAreaFraction: number;
+  /**
+   * Detect on the raw frame before the preprocessed one. Exposed so the Lab can
+   * turn it off and measure preprocessing on its own; production leaves it true.
+   */
+  rawPassFirst: boolean;
   minAspect: number;
   maxAspect: number;
   minAngleDeg: number;
@@ -36,6 +52,19 @@ export const CLASSICAL_DEFAULTS: ClassicalParams = {
   saturationWeight: 0.35,
   minAreaFraction: 0.12,
   maxAreaFraction: 0.95,
+  // A receipt held far enough away to fit in frame covers very little of it:
+  // the 2026-09-12 capture that would not lock measured 11.9% against a 12%
+  // floor, while spanning 56% of the frame's height. Area alone cannot tell a
+  // long till slip from a scrap of noise, so the exemption asks for length too.
+  minSpanFraction: 0.5,
+  minSpanAspect: 2.5,
+  // A receipt is a few times longer than it is wide; past this it is a table
+  // edge, a keyboard row, a strip light or a floorboard gap — all of which clear
+  // convexity and the 90-degree corner band effortlessly. The owner's own
+  // captures run 4.4-4.5:1.
+  maxSpanAspect: 8,
+  minSpanAreaFraction: 0.09,
+  rawPassFirst: true,
   minAspect: 0.4,
   maxAspect: 12,
   minAngleDeg: 50,
@@ -53,10 +82,51 @@ export class ClassicalDetector implements Detector {
     return { ...CLASSICAL_DEFAULTS };
   }
 
+  /**
+   * Two passes: raw frame first, preprocessed frame only if the raw one found
+   * nothing we accept.
+   *
+   * `preprocess` (shadow-normalize + saturation prior) exists to rescue shadowed
+   * and coloured-background captures, and it does — but it also destroys the
+   * edge scanic needs on an ordinary well-lit receipt. Measured over the corpus,
+   * preprocessing ON gives 1 correct box / 2 wrong / 29 none and OFF gives
+   * 6 / 3 / 23, and neither dominates: frame #47 needs it ON, #50 needs it OFF.
+   *
+   * COST, stated plainly: the early return fires only on an accepted quad, so
+   * every empty or rejected frame pays BOTH scanic passes — and an empty frame
+   * is the live viewfinder's steady state while the user is still hunting for
+   * the receipt. Median detect went 92 -> 112ms and p90 118 -> 155ms over the
+   * corpus. `staleMs` (smoother.ts) is 250ms against MIN_DETECT_INTERVAL_MS 80,
+   * so that p90 leaves ~15ms of headroom: if the box goes jumpy on device, this
+   * is the first thing to look at, and `rawPassFirst: false` turns it off.
+   *
+   * `rawPassFirst` also keeps the Lab's A/B honest. Without it both panels would
+   * share this identical raw pass and agree on every frame it accepts, which is
+   * precisely the comparison the Lab exists to make.
+   */
   async detect(image: ImageData, params: Partial<ClassicalParams> = {}): Promise<DetectionResult> {
     const p: ClassicalParams = { ...CLASSICAL_DEFAULTS, ...params };
     const start = performance.now();
 
+    // Nothing to gain from a second pass when the configured pass IS the raw one.
+    const preprocesses = p.shadowNorm || p.saturationPrior;
+    if (!p.rawPassFirst || !preprocesses) {
+      const only = await this.detectPass(image, p, start);
+      return { ...only, timingMs: performance.now() - start };
+    }
+
+    const first = await this.detectPass(image, { ...p, shadowNorm: false, saturationPrior: false }, start);
+    if (first.outcome === "accepted") return { ...first, timingMs: performance.now() - start };
+
+    const second = await this.detectPass(image, p, start);
+    return { ...mergeDetectionPasses(first, second), timingMs: performance.now() - start };
+  }
+
+  private async detectPass(
+    image: ImageData,
+    p: ClassicalParams,
+    start: number,
+  ): Promise<DetectionResult> {
     const preprocessed = preprocess(image, p);
     const canvas = imageDataToCanvas(preprocessed);
 
@@ -207,6 +277,43 @@ export function scanicDetectOptions(p: Pick<ClassicalParams, "maxAspect">) {
   return { mode: "detect" as const, maxDocumentAspectRatio: p.maxAspect } satisfies DetectionOptions;
 }
 
+/**
+ * Pick the result to report when the raw pass did not accept a quad.
+ *
+ * `second` is the CONFIGURED pass, so its verdict is the one that describes the
+ * caller's params — the Lab tallies `outcome` to tell a too-tight threshold from
+ * a blind scanner, and attributing the raw pass's reject to a preprocessed panel
+ * would answer a question nobody asked. It wins whenever it saw anything.
+ *
+ * A detector FAILURE must survive either way. `error` is the one signal meaning
+ * "the detector is broken" rather than "this frame is empty" (see
+ * `classifyScanResult`), and a pass that threw while the other merely came back
+ * empty would otherwise clear the viewfinder's error badge. So the error is
+ * carried across, and the frame only counts as an honest empty one when BOTH
+ * passes agree it is.
+ *
+ * Exported and pure so the node-env suite can cover it; `detect` itself needs a
+ * canvas.
+ */
+export function mergeDetectionPasses(
+  first: DetectionResult,
+  second: DetectionResult,
+): DetectionResult {
+  const chosen =
+    second.outcome === "accepted" || (second.candidates?.length ?? 0) > 0 || !(first.candidates?.length ?? 0)
+      ? second
+      : first;
+  const error = chosen.error ?? first.error ?? second.error;
+  if (!error) return chosen;
+  return {
+    ...chosen,
+    error,
+    // Both passes broke and neither produced a quad: report the failure, not an
+    // empty frame. A quad in hand still describes the frame, so keep its outcome.
+    outcome: chosen.corners || (chosen.candidates?.length ?? 0) > 0 ? chosen.outcome : "error",
+  };
+}
+
 /** Scanic's default "nothing in this frame" message. Not a failure. */
 const SCANIC_EMPTY_MESSAGE = "No document detected";
 
@@ -309,6 +416,8 @@ export function toQuad(raw: any): Quad | null {
 export interface Metrics {
   area: number;
   areaFraction: number;
+  /** Longest side of the quad's bounding box, as a fraction of that frame edge. */
+  spanFraction: number;
   convexity: number;
   aspect: number;
   minAngle: number;
@@ -323,6 +432,10 @@ function computeMetrics(quad: Quad, image: ImageData): Metrics {
   const area = polygonArea(pts);
   const imageArea = image.width * image.height;
   const areaFraction = area / Math.max(imageArea, 1);
+  const spanFraction = Math.max(
+    (Math.max(...pts.map((q) => q.x)) - Math.min(...pts.map((q) => q.x))) / Math.max(image.width, 1),
+    (Math.max(...pts.map((q) => q.y)) - Math.min(...pts.map((q) => q.y))) / Math.max(image.height, 1),
+  );
   const hullArea = convexHullArea(pts);
   const convexity = hullArea > 0 ? Math.min(1, area / hullArea) : 0;
 
@@ -345,6 +458,7 @@ function computeMetrics(quad: Quad, image: ImageData): Metrics {
   return {
     area,
     areaFraction,
+    spanFraction,
     convexity,
     aspect,
     minAngle,
@@ -391,12 +505,22 @@ export function firstHardReject(m: Metrics, p: ClassicalParams): HardReject | nu
   // through all four and be reported as accepted. `toQuad` blocks NaN corner
   // coordinates, but `areaFraction = area / max(imageArea, 1)` is NaN for a
   // NaN-dimensioned ImageData, which is a different way in.
-  if (!Number.isFinite(m.areaFraction)) return "rejected-area";
+  if (!Number.isFinite(m.areaFraction) || !Number.isFinite(m.spanFraction)) return "rejected-area";
   if (!Number.isFinite(m.aspect)) return "rejected-aspect";
   if (!Number.isFinite(m.minAngle) || !Number.isFinite(m.maxAngle)) return "rejected-angle";
   if (!Number.isFinite(m.convexity)) return "rejected-convexity";
 
-  if (m.areaFraction < p.minAreaFraction || m.areaFraction > p.maxAreaFraction) return "rejected-area";
+  // Area OR length. A till slip photographed far enough away to fit in frame is
+  // mostly background by area, which is why the floor alone kept rejecting the
+  // one thing this scanner exists for. The exemption is deliberately narrow:
+  // long AND thin AND not vanishing, so it cannot readmit small square noise.
+  const longDocument =
+    m.spanFraction >= p.minSpanFraction &&
+    m.aspect >= p.minSpanAspect &&
+    m.aspect <= p.maxSpanAspect &&
+    m.areaFraction >= p.minSpanAreaFraction;
+  if (m.areaFraction > p.maxAreaFraction) return "rejected-area";
+  if (m.areaFraction < p.minAreaFraction && !longDocument) return "rejected-area";
   if (m.aspect < p.minAspect || m.aspect > p.maxAspect) return "rejected-aspect";
   if (m.minAngle < p.minAngleDeg || m.maxAngle > p.maxAngleDeg) return "rejected-angle";
   if (m.convexity < MIN_CONVEXITY) return "rejected-convexity";

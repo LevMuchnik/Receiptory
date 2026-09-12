@@ -124,7 +124,14 @@ export default function ScannerLabPage() {
   const detectorFor = useCallback((kind: DetectorKind): Detector => (kind === "ml" ? ml : classical), [classical, ml]);
 
   const [panelA, setPanelA] = useState<PanelState>(() => makePanel());
-  const [panelB, setPanelB] = useState<PanelState>(() => ({ ...makePanel(), classical: { ...CLASSICAL_DEFAULTS, shadowNorm: false } }));
+  // Panel B seeds the preprocessing arm: both preprocessing steps off, and the
+  // raw-first pass off too. Leaving `rawPassFirst` on would make both panels run
+  // the SAME raw pass and agree on every frame it accepts, which is exactly the
+  // comparison this tool exists to make.
+  const [panelB, setPanelB] = useState<PanelState>(() => ({
+    ...makePanel(),
+    classical: { ...CLASSICAL_DEFAULTS, rawPassFirst: false, shadowNorm: false, saturationPrior: false },
+  }));
 
   useEffect(() => {
     initScanner().then(() => setScannerReady(true)).catch(() => setScannerReady(false));
@@ -694,9 +701,11 @@ function Stat({ label, value }: { label: string; value: string }) {
 type AnyParamValue = number | boolean | string;
 
 const CLASSICAL_PARAM_ORDER: string[] = [
+  "rawPassFirst",
   "shadowNorm", "shadowBlurFraction",
   "saturationPrior", "saturationWeight",
   "minAreaFraction", "maxAreaFraction",
+  "minSpanFraction", "minSpanAspect", "maxSpanAspect", "minSpanAreaFraction",
   "minAspect", "maxAspect",
   "minAngleDeg", "maxAngleDeg",
   "wArea", "wConvex", "wUniform", "wText",
