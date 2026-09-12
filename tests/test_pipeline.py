@@ -82,6 +82,53 @@ def test_process_document_missing_confidence_needs_review(mock_extract, pending_
 
 
 @patch("backend.processing.pipeline.extract_document")
+def test_process_document_flags_a_total_that_disagrees_with_subtotal_plus_tax(mock_extract, pending_doc, setup_db):
+    # Doc #314 (2026-09-12): the Naya receipt filed at 824.00 -- the card charge
+    # including an 88.00 tip -- while reporting subtotal 623.73 and tax 112.27,
+    # which add to 736.00. Confidence was 0.98, so nothing stopped it. The same
+    # receipt scanned twice more came in at 736.00.
+    mismatched = LLMExtractionResult(
+        extraction=ExtractionResult(**{**MOCK_EXTRACTION.__dict__, "subtotal": 623.73, "tax_amount": 112.27, "total_amount": 824.00, "extraction_confidence": 0.98}),
+        tokens_in=1000, tokens_out=500, model="gemini/gemini-3-flash-preview")
+    mock_extract.return_value = mismatched
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT status, review_reason, total_amount FROM documents WHERE id = ?", (pending_doc,)).fetchone()
+    assert doc["status"] == "needs_review"
+    # The number is filed as extracted; the flag is what makes it visible.
+    assert doc["total_amount"] == 824.00
+    assert "736.00" in doc["review_reason"] and "824.00" in doc["review_reason"]
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_process_document_leaves_consistent_totals_alone(mock_extract, pending_doc, setup_db):
+    consistent = LLMExtractionResult(
+        extraction=ExtractionResult(**{**MOCK_EXTRACTION.__dict__, "subtotal": 623.73, "tax_amount": 112.27, "total_amount": 736.00, "extraction_confidence": 0.98}),
+        tokens_in=1000, tokens_out=500, model="gemini/gemini-3-flash-preview")
+    mock_extract.return_value = consistent
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT status, review_reason FROM documents WHERE id = ?", (pending_doc,)).fetchone()
+    assert doc["status"] == "processed"
+    assert doc["review_reason"] is None
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_process_document_records_why_a_low_confidence_doc_needs_review(mock_extract, pending_doc, setup_db):
+    # The reason field serves BOTH gates; a low-confidence document was equally
+    # unexplained before it existed.
+    low = LLMExtractionResult(
+        extraction=ExtractionResult(**{**MOCK_EXTRACTION.__dict__, "extraction_confidence": 0.10}),
+        tokens_in=1000, tokens_out=500, model="gemini/gemini-3-flash-preview")
+    mock_extract.return_value = low
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT status, review_reason FROM documents WHERE id = ?", (pending_doc,)).fetchone()
+    assert doc["status"] == "needs_review"
+    assert "confidence" in doc["review_reason"].lower()
+
+
+@patch("backend.processing.pipeline.extract_document")
 def test_process_document_threads_json_mode_setting(mock_extract, pending_doc, setup_db):
     set_setting("llm_json_mode", False)
     mock_extract.return_value = MOCK_LLM_RESULT

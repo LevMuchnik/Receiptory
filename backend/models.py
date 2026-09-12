@@ -113,6 +113,7 @@ class DocumentResponse(BaseModel):
     processing_date: str | None
     processing_attempts: int
     processing_error: str | None
+    review_reason: str | None = None
 
     manually_edited: bool
     is_deleted: bool

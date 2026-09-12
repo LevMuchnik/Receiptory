@@ -220,6 +220,11 @@ def edit_document(doc_id: int, update: DocumentUpdate, username: str = Depends(r
 
     set_clauses = [f"{k} = ?" for k in changes]
     set_clauses.extend(["manually_edited = 1", "edit_history = ?", "updated_at = ?"])
+    # Approving (or otherwise moving a document out of needs_review) settles the
+    # question the reason was asking, so the reason goes with it. Leaving it
+    # behind would keep "totals disagree" on a document the owner just approved.
+    if changes.get("status") and changes["status"] != "needs_review":
+        set_clauses.append("review_reason = NULL")
     values = list(changes.values()) + [json.dumps(history), now, doc_id]
 
     with get_connection() as conn:
@@ -251,7 +256,7 @@ def reprocess_document(doc_id: int, request: Request, username: str = Depends(re
     with get_connection() as conn:
         conn.execute(
             """UPDATE documents SET
-                status = 'pending', processing_error = NULL,
+                status = 'pending', processing_error = NULL, review_reason = NULL,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
             WHERE id = ?""",
             (doc_id,),
@@ -270,7 +275,7 @@ def batch_reprocess(body: BatchReprocessRequest, request: Request, username: str
         placeholders = ",".join("?" * len(body.document_ids))
         with get_connection() as conn:
             conn.execute(
-                f"UPDATE documents SET status = 'pending', processing_error = NULL WHERE id IN ({placeholders})",
+                f"UPDATE documents SET status = 'pending', processing_error = NULL, review_reason = NULL WHERE id IN ({placeholders})",
                 body.document_ids,
             )
         for did in body.document_ids:
@@ -289,7 +294,7 @@ def batch_reprocess(body: BatchReprocessRequest, request: Request, username: str
     where = " AND ".join(conditions)
     with get_connection() as conn:
         conn.execute(
-            f"UPDATE documents SET status = 'pending', processing_error = NULL WHERE {where}",
+            f"UPDATE documents SET status = 'pending', processing_error = NULL, review_reason = NULL WHERE {where}",
             params,
         )
         count = conn.execute("SELECT changes()").fetchone()[0]

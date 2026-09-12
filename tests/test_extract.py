@@ -2,7 +2,7 @@ import json
 import logging
 import pytest
 from unittest.mock import patch
-from backend.processing.extract import (build_extraction_prompt, parse_llm_response, extract_document, ParseFailure, _MAX_PARSE_RETRIES)
+from backend.processing.extract import (build_extraction_prompt, parse_llm_response, extract_document, totals_mismatch, ParseFailure, _MAX_PARSE_RETRIES)
 from tests.conftest import SAMPLE_LLM_RESPONSE, mock_llm_response
 
 EXTRACT_LOGGER = "backend.processing.extract"
@@ -656,3 +656,63 @@ def test_build_prompt_separates_expense_and_issued_categories():
     office_pos = prompt.index("Office Supplies")
     tax_inv_pos = prompt.index("Tax Invoice")
     assert expense_pos < office_pos < issued_pos < tax_inv_pos
+
+
+# --- totals_mismatch: the document's own arithmetic ---------------------------
+#
+# The bug this guards: the same Naya receipt was filed twice as 736.00 and once
+# as 824.00 (doc #314, 2026-09-12), every time carrying subtotal 623.73 and tax
+# 112.27. The 824 is the card charge including an 88.00 tip printed below the
+# billed total. Nothing caught it, because the extraction was 0.98 confident.
+
+def test_totals_mismatch_none_when_the_arithmetic_holds():
+    assert totals_mismatch(623.73, 112.27, 736.00) is None
+
+
+def test_totals_mismatch_catches_a_tip_folded_into_the_total():
+    diff = totals_mismatch(623.73, 112.27, 824.00)
+    assert diff == pytest.approx(88.00, abs=0.01)
+
+
+def test_totals_mismatch_reports_the_sign_so_the_caller_can_say_which_way():
+    # AliExpress-shaped: a discount makes the total SMALLER than subtotal + tax.
+    diff = totals_mismatch(79.19, 0.0, 66.81)
+    assert diff is not None and diff < 0
+
+
+def test_totals_mismatch_tolerates_currency_rounding():
+    # Half an agora out is the receipt rounding, not a wrong line.
+    assert totals_mismatch(10.005, 0.0, 10.01) is None
+    assert totals_mismatch(100.00, 18.00, 118.02) is None
+    assert totals_mismatch(100.00, 18.00, 118.03) is not None
+
+
+def test_totals_mismatch_silent_when_any_number_is_missing():
+    # A receipt that states no VAT line is not a contradiction, and neither is a
+    # non-financial document with no numbers at all.
+    assert totals_mismatch(None, None, None) is None
+    assert totals_mismatch(100.0, None, 118.0) is None
+    assert totals_mismatch(None, 18.0, 118.0) is None
+    assert totals_mismatch(100.0, 18.0, None) is None
+
+
+def test_totals_mismatch_silent_on_non_finite_numbers():
+    # A salvaged parse can yield inf/nan; comparing those would flag every
+    # document forever, and the guard has to fail open, not shut.
+    assert totals_mismatch(float("nan"), 0.0, 100.0) is None
+    assert totals_mismatch(float("inf"), 0.0, 100.0) is None
+    assert totals_mismatch(100.0, 0.0, float("nan")) is None
+
+
+def test_totals_mismatch_honours_a_caller_tolerance():
+    assert totals_mismatch(100.0, 0.0, 100.5, tolerance=1.0) is None
+    assert totals_mismatch(100.0, 0.0, 100.5, tolerance=0.1) is not None
+
+
+def test_prompt_defines_total_amount_as_the_billed_total():
+    # The prompt is the only thing standing between a tip line and an expense
+    # total, so pin the instruction rather than trusting it stays written.
+    prompt = build_extraction_prompt(business_names=[], business_addresses=[], business_tax_ids=[], expense_categories=[], issued_categories=[])
+    assert "subtotal + tax_amount" in prompt
+    assert "total_charged" in prompt
+    assert "tip" in prompt.lower()
