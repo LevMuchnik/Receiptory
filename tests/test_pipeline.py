@@ -97,7 +97,30 @@ def test_process_document_flags_a_total_that_disagrees_with_subtotal_plus_tax(mo
     assert doc["status"] == "needs_review"
     # The number is filed as extracted; the flag is what makes it visible.
     assert doc["total_amount"] == 824.00
-    assert "736.00" in doc["review_reason"] and "824.00" in doc["review_reason"]
+    # Structure, not membership: swapping the sum and the stated total in the
+    # f-string, or dropping the signed gap and the actionable half, would keep a
+    # membership-only assertion green.
+    reason = doc["review_reason"]
+    assert "subtotal 623.73 + tax 112.27 = 736.00" in reason
+    assert "total reads 824.00" in reason
+    assert "+88.00" in reason
+    assert "tip" in reason.lower()
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_process_document_joins_both_review_reasons(mock_extract, pending_doc, setup_db):
+    # Both gates can fire on one document, and the concatenation branch was
+    # otherwise dead in test: the mismatch case runs at 0.98 confidence and the
+    # low-confidence case uses consistent totals.
+    both = LLMExtractionResult(
+        extraction=ExtractionResult(**{**MOCK_EXTRACTION.__dict__, "subtotal": 623.73, "tax_amount": 112.27, "total_amount": 824.00, "extraction_confidence": 0.10}),
+        tokens_in=1000, tokens_out=500, model="gemini/gemini-3-flash-preview")
+    mock_extract.return_value = both
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        reason = conn.execute("SELECT review_reason FROM documents WHERE id = ?", (pending_doc,)).fetchone()["review_reason"]
+    assert "confidence" in reason.lower()
+    assert "Totals disagree" in reason
 
 
 @patch("backend.processing.pipeline.extract_document")

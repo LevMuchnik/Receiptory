@@ -162,6 +162,22 @@ def totals_mismatch(
     return diff if abs(diff) > allowed else None
 
 
+def format_totals_reason(
+    subtotal: float, tax_amount: float, total_amount: float, diff: float
+) -> str:
+    """The sentence shown to the owner for a totals disagreement.
+
+    Shared by the pipeline (which writes it at extraction time) and the document
+    PATCH endpoint (which rewrites it when the numbers are edited), so the two
+    cannot drift into describing the same condition differently.
+    """
+    return (
+        f"Totals disagree: subtotal {subtotal:.2f} + tax {tax_amount:.2f} "
+        f"= {subtotal + tax_amount:.2f}, but total reads {total_amount:.2f} "
+        f"({diff:+.2f}). Check for a tip, shipping or discount line."
+    )
+
+
 _JSON_DECODER = json.JSONDecoder()
 _FENCE_OPEN_RE = re.compile(r"```(?:json)?", re.IGNORECASE)
 # Shape gate: a decoded dict must share at least TWO keys with the extraction

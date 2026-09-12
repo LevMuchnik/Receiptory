@@ -1,5 +1,7 @@
 """Notification content templates for all event types."""
 
+from html import escape as html_escape
+
 
 def _doc_link(base_url: str, doc_id: int) -> str:
     if base_url and doc_id:
@@ -127,6 +129,7 @@ def format_needs_review(doc: dict, base_url: str) -> dict:
     total = doc.get("total_amount")
     currency = doc.get("currency") or ""
     confidence = doc.get("extraction_confidence")
+    reason = doc.get("review_reason")
     link = _doc_link(base_url, doc_id)
 
     amount_str = f"{currency}{total:.2f}" if total is not None else "0.00"
@@ -140,6 +143,12 @@ def format_needs_review(doc: dict, base_url: str) -> dict:
         f"Vendor: {vendor} | Amount: {amount_str}",
         f"Confidence: {conf_str}",
     ]
+    # WHY it needs review. Without it the message reads "Review needed, 98%
+    # confidence", which invites the reader to dismiss it, and a totals
+    # mismatch is exactly the case where the confidence is high and the number
+    # is still wrong.
+    if reason:
+        caption_parts.append(f"Reason: {html_escape(str(reason))}")
     if link:
         caption_parts.append(f"\U0001f517 {link}")
     caption = "\n".join(caption_parts)
@@ -152,6 +161,8 @@ def format_needs_review(doc: dict, base_url: str) -> dict:
         f"<b>Confidence:</b> {conf_str}",
         "</p>",
     ]
+    if reason:
+        html_parts.append(f"<p><b>Reason:</b> {html_escape(str(reason))}</p>")
     if link:
         html_parts.append(f'<p><a href="{link}">View document</a></p>')
     html = "\n".join(html_parts)

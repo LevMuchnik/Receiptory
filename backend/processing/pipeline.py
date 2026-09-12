@@ -7,7 +7,7 @@ from backend.database import get_connection
 from backend.config import get_setting, resolve_llm_api_key
 from backend.storage import (get_file_path, save_filed, render_all_pages_to_memory, get_pdf_page_count)
 from backend.processing.normalize import normalize_file
-from backend.processing.extract import extract_document, totals_mismatch, ExtractionResult
+from backend.processing.extract import extract_document, totals_mismatch, format_totals_reason, ExtractionResult
 from backend.processing.filing import generate_stored_filename
 
 logger = logging.getLogger(__name__)
@@ -92,11 +92,7 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
     diff = totals_mismatch(ext.subtotal, ext.tax_amount, ext.total_amount)
     if diff is not None:
         status = "needs_review"
-        detail = (
-            f"Totals disagree: subtotal {ext.subtotal:.2f} + tax {ext.tax_amount:.2f} "
-            f"= {ext.subtotal + ext.tax_amount:.2f}, but total reads {ext.total_amount:.2f} "
-            f"({diff:+.2f}). Check for a tip, shipping or discount line."
-        )
+        detail = format_totals_reason(ext.subtotal, ext.tax_amount, ext.total_amount, diff)
         review_reason = f"{review_reason}. {detail}" if review_reason else detail
         logger.warning(f"Document {doc_id}: {detail}")
     stored_filename = generate_stored_filename(receipt_date=ext.receipt_date, vendor_receipt_id=ext.vendor_receipt_id, file_hash=file_hash)
@@ -133,6 +129,7 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
             "currency": ext.currency,
             "category_name": ext.category_name,
             "extraction_confidence": ext.extraction_confidence,
+            "review_reason": review_reason,
             "submission_channel": doc["submission_channel"],
             "sender_identifier": doc["sender_identifier"],
         })

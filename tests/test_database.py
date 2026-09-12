@@ -118,4 +118,9 @@ def test_migration_008_applies_through_runner_on_upgrade(tmp_path):
 
     assert db.execute("SELECT value FROM settings WHERE key='llm_temperature'").fetchone()["value"] == "1.0"
     assert db.execute("SELECT COUNT(*) AS c FROM schema_version WHERE version=8").fetchone()["c"] == 1
+    # 009 rides along on the same upgrade. Pin its effect rather than only
+    # shaping the fixture so it does not explode: a no-op 009 would otherwise
+    # pass every assertion here.
+    assert db.execute("SELECT COUNT(*) AS c FROM schema_version WHERE version=9").fetchone()["c"] == 1
+    assert "review_reason" in [r[1] for r in db.execute("PRAGMA table_info(documents)")]
     db.close()

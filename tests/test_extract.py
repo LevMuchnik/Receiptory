@@ -680,6 +680,15 @@ def test_totals_mismatch_reports_the_sign_so_the_caller_can_say_which_way():
     assert diff is not None and diff < 0
 
 
+def test_totals_mismatch_pins_the_absolute_tolerance_tightly():
+    # A mutation test caught this suite napping: raising TOTALS_TOLERANCE from
+    # 0.02 to 0.029 left every other assertion here passing. On a 10.00 total the
+    # relative floor is only 0.01, so the absolute tolerance is what decides --
+    # which makes these two lines the ones that actually pin the constant.
+    assert totals_mismatch(5.00, 5.00, 10.019) is None      # just inside 0.02
+    assert totals_mismatch(5.00, 5.00, 10.021) is not None  # just outside it
+
+
 def test_totals_mismatch_tolerates_currency_rounding():
     # Half an agora out is the receipt rounding, not a wrong line. On small
     # amounts the flat 2-agora tolerance is the binding one: 0.1% of 20 is a
@@ -716,7 +725,9 @@ def test_prompt_defines_total_amount_as_the_billed_total():
     # total, so pin the instruction rather than trusting it stays written.
     prompt = build_extraction_prompt(business_names=[], business_addresses=[], business_tax_ids=[], expense_categories=[], issued_categories=[])
     assert "subtotal + tax_amount" in prompt
-    assert "total_charged" in prompt
+    # Where the card charge is supposed to GO, rather than the example key's
+              # name, which a benign reword can rename without weakening anything.
+    assert "additional_fields" in prompt
     assert "tip" in prompt.lower()
 
 

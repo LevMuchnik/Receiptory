@@ -134,6 +134,13 @@ class DocumentUpdate(BaseModel):
     client_name: str | None = None
     client_tax_id: str | None = None
     description: str | None = None
+    # The metadata form has always rendered Subtotal and Tax inputs and sent
+    # them on save, but they were missing here — so Pydantic's default
+    # extra='ignore' dropped both silently and the owner's correction never
+    # reached the database, with a 200 and the old value echoed back. Found
+    # while wiring the totals check, whose whole subject is these two numbers.
+    subtotal: float | None = None
+    tax_amount: float | None = None
     total_amount: float | None = None
     currency: str | None = None
     category_id: int | None = None
