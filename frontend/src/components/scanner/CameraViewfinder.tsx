@@ -229,7 +229,13 @@ export default function CameraViewfinder({
 
       if (
         ctx &&
+        // BOTH axes, matching `handleCapture`. Since `detectionSizeFor` started
+        // returning a partially-zero frame untouched (rather than clamping it to
+        // a 1px sliver), a `videoHeight === 0` frame reaches `getImageData` with
+        // a zero height, which throws IndexSizeError. See the catch below for
+        // why a throw here used to be unrecoverable.
         video.videoWidth > 0 &&
+        video.videoHeight > 0 &&
         !detecting.current &&
         now - lastDetectAt >= MIN_DETECT_INTERVAL_MS
       ) {
@@ -271,8 +277,24 @@ export default function CameraViewfinder({
         // original overlay bug. Still never a constant.
         detectionScaleRef.current = size.scale;
 
-        ctx.drawImage(video, 0, 0, w, h);
-        const imageData = ctx.getImageData(0, 0, w, h);
+        // Everything from here to the promise is synchronous, and a throw in it
+        // is FATAL to the loop, not to the frame: `detecting.current` is already
+        // true and only the promise's `.finally` clears it, and `schedule()` is
+        // the last statement of `tick()`, so an escaping error means no further
+        // rVFC/rAF is ever queued. The viewfinder then sits there with no box,
+        // no error badge, and a working shutter. The guard above closes the one
+        // known way in; this closes the shape.
+        let imageData: ImageData;
+        try {
+          ctx.drawImage(video, 0, 0, w, h);
+          imageData = ctx.getImageData(0, 0, w, h);
+        } catch (err: unknown) {
+          detecting.current = false;
+          setDetectorError(err instanceof Error ? err.message : "frame grab failed");
+          drawOverlay();
+          schedule();
+          return;
+        }
         const diag = Math.hypot(w, h);
 
         detector
