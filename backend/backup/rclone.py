@@ -67,10 +67,17 @@ def apply_retention(destination: str, data_dir: str) -> None:
 
         if should_delete:
             logger.info(f"Deleting expired backup: {dirname}")
-            subprocess.run(
+            purge = subprocess.run(
                 ["rclone", "purge", f"{destination}/{dirname}"],
-                capture_output=True, env=_rclone_env(),
+                capture_output=True, text=True, env=_rclone_env(),
             )
+            if purge.returncode != 0:
+                # Not fatal: the backup itself already uploaded. But a silent
+                # purge failure means expired backups pile up on the remote
+                # forever while the logs claim they were deleted.
+                raise RuntimeError(
+                    f"rclone purge failed for {dirname}: {purge.stderr.strip()}"
+                )
 
 
 def _sync_tokens_if_cloud(destination: str) -> None:

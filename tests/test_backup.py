@@ -11,9 +11,9 @@ from backend.backup.runner import (
     snapshot_database,
     SNAPSHOT_TIMEOUT_S,
 )
-from backend.backup.scheduler import determine_backup_type
+from backend.backup.scheduler import determine_backup_type, run_backup, _upload_status
 from backend.database import get_connection
-from backend.config import init_settings
+from backend.config import init_settings, set_setting
 from datetime import date
 
 
@@ -438,3 +438,239 @@ def test_snapshot_raises_when_the_copy_fails_integrity_check(db_path, tmp_data_d
 
     # The unusable file must not be left sitting in the backup directory.
     assert not os.path.exists(dest)
+
+
+# --- run_backup upload reporting (issue #43) -------------------------------
+#
+# Before this, every upload exception was caught per destination, logged, and
+# then fall-through marked the row 'completed' and fired backup_ok. With
+# notify_*_backup_ok off by default, a backup that reached no cloud at all was
+# not just green in the UI -- it was completely silent.
+
+
+def _backup_row(backup_id):
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT status, error, size_bytes, local_path FROM backups WHERE id = ?",
+            (backup_id,),
+        ).fetchone()
+    return dict(row)
+
+
+@pytest.fixture
+def backup_env(db_path, tmp_data_dir, monkeypatch):
+    """Stub build_backup and capture notifications; no real files, no rclone."""
+    init_settings()
+    sent = []
+
+    fake_dir = str(tmp_data_dir / "assembled")
+    os.makedirs(fake_dir, exist_ok=True)
+    with open(os.path.join(fake_dir, "receiptory.db"), "wb") as f:
+        f.write(b"x" * 2048)
+
+    monkeypatch.setattr("backend.backup.scheduler.build_backup", lambda d: fake_dir)
+    monkeypatch.setattr(
+        "backend.notifications.notifier.notify",
+        lambda event, payload: sent.append((event, payload)),
+    )
+    return sent, fake_dir
+
+
+def test_upload_status_maps_destination_counts():
+    assert _upload_status(0, 0) == "completed"   # nothing configured, local by choice
+    assert _upload_status(2, 2) == "completed"
+    assert _upload_status(2, 1) == "partial"
+    assert _upload_status(2, 0) == "failed"
+    assert _upload_status(1, 0) == "failed"
+
+
+async def test_backup_that_reached_no_destination_is_not_reported_as_success(
+    backup_env, tmp_data_dir, monkeypatch
+):
+    sent, _ = backup_env
+    set_setting("backup_destination", "gdrive:receipts")
+
+    def boom(*a, **kw):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr("backend.backup.scheduler.upload_backup", boom)
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    row = _backup_row(backup_id)
+
+    assert row["status"] == "failed"
+    assert "connection refused" in row["error"]
+    assert [e for e, _ in sent] == ["backup_failed"], sent
+    assert "gdrive:receipts" in sent[0][1]["error"]
+
+
+async def test_partial_upload_is_neither_completed_nor_silent(
+    backup_env, tmp_data_dir, monkeypatch
+):
+    sent, _ = backup_env
+    set_setting("backup_destination", "gdrive:receipts, onedrive:receipts")
+
+    def upload(backup_dir, dest, backup_type, backup_date):
+        if dest.startswith("onedrive"):
+            raise RuntimeError("quota exceeded")
+
+    monkeypatch.setattr("backend.backup.scheduler.upload_backup", upload)
+    monkeypatch.setattr("backend.backup.scheduler.apply_retention", lambda *a, **kw: None)
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    row = _backup_row(backup_id)
+
+    assert row["status"] == "partial"
+    assert "onedrive:receipts: quota exceeded" in row["error"]
+    assert "gdrive" not in row["error"]  # the one that worked is not blamed
+    # backup_ok is off by default, so a partial routed there would say nothing.
+    assert [e for e, _ in sent] == ["backup_failed"], sent
+    assert "only 1 of 2" in sent[0][1]["error"]
+
+
+async def test_all_uploads_succeeding_still_reports_completed(
+    backup_env, tmp_data_dir, monkeypatch
+):
+    sent, fake_dir = backup_env
+    set_setting("backup_destination", "gdrive:receipts")
+    monkeypatch.setattr("backend.backup.scheduler.upload_backup", lambda *a, **kw: None)
+    monkeypatch.setattr("backend.backup.scheduler.apply_retention", lambda *a, **kw: None)
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    row = _backup_row(backup_id)
+
+    assert row["status"] == "completed"
+    assert row["error"] is None
+    assert row["local_path"] == fake_dir
+    assert row["size_bytes"] > 0
+    assert [e for e, _ in sent] == ["backup_ok"], sent
+
+
+async def test_no_destination_configured_is_a_completed_local_backup(
+    backup_env, tmp_data_dir
+):
+    sent, _ = backup_env
+    set_setting("backup_destination", "")
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    row = _backup_row(backup_id)
+
+    assert row["status"] == "completed"
+    assert row["error"] is None
+    assert [e for e, _ in sent] == ["backup_ok"], sent
+
+
+async def test_retention_failure_does_not_demote_a_successful_upload(
+    backup_env, tmp_data_dir, monkeypatch
+):
+    """The copy is off-site, which is what matters. Stale remote copies are
+    untidy, not a data risk -- but they are still reported."""
+    sent, _ = backup_env
+    set_setting("backup_destination", "gdrive:receipts")
+    monkeypatch.setattr("backend.backup.scheduler.upload_backup", lambda *a, **kw: None)
+
+    def purge_fails(*a, **kw):
+        raise RuntimeError("rclone purge failed for 2026-01-01-daily")
+
+    monkeypatch.setattr("backend.backup.scheduler.apply_retention", purge_fails)
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    row = _backup_row(backup_id)
+
+    assert row["status"] == "completed"
+    assert "retention" in row["error"]
+    assert [e for e, _ in sent] == ["backup_ok"], sent
+
+
+async def test_retention_never_runs_for_a_destination_that_failed_to_upload(
+    backup_env, tmp_data_dir, monkeypatch
+):
+    """Retention purges old backups by date. Running it after a failed upload
+    would delete good history and replace it with nothing."""
+    sent, _ = backup_env
+    set_setting("backup_destination", "gdrive:receipts")
+    retention_calls = []
+
+    monkeypatch.setattr(
+        "backend.backup.scheduler.upload_backup",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("network down")),
+    )
+    monkeypatch.setattr(
+        "backend.backup.scheduler.apply_retention",
+        lambda *a, **kw: retention_calls.append(a),
+    )
+
+    await run_backup(str(tmp_data_dir), trigger="scheduled")
+    assert retention_calls == []
+
+
+async def test_a_failure_building_the_backup_still_reports_failed(
+    backup_env, tmp_data_dir, monkeypatch
+):
+    sent, _ = backup_env
+    monkeypatch.setattr(
+        "backend.backup.scheduler.build_backup",
+        lambda d: (_ for _ in ()).throw(RuntimeError("snapshot integrity check failed")),
+    )
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    row = _backup_row(backup_id)
+
+    assert row["status"] == "failed"
+    assert "integrity check" in row["error"]
+    assert [e for e, _ in sent] == ["backup_failed"], sent
+
+
+# --- rclone purge return code (issue #43) ----------------------------------
+
+
+def _fake_run(listing, purge_rc, purge_stderr="", calls=None):
+    """Stand in for subprocess.run over the two rclone calls apply_retention makes."""
+    class _R:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    def run(cmd, **kwargs):
+        if calls is not None:
+            calls.append(cmd)
+        if cmd[1] == "lsf":
+            return _R(0, stdout=listing)
+        return _R(purge_rc, stderr=purge_stderr)
+
+    return run
+
+
+def test_retention_raises_when_rclone_purge_fails(db_path, monkeypatch):
+    """A purge that silently fails leaves expired backups on the remote forever
+    while the log line above it claims they were deleted."""
+    init_settings()
+    monkeypatch.setattr(
+        "backend.backup.rclone.subprocess.run",
+        _fake_run("2020-01-01-daily/\n", purge_rc=1, purge_stderr="directory not found"),
+    )
+    from backend.backup.rclone import apply_retention
+
+    with pytest.raises(RuntimeError, match="purge failed for 2020-01-01-daily"):
+        apply_retention("gdrive:receipts", "/tmp")
+
+
+def test_retention_purges_only_what_is_past_its_policy(db_path, monkeypatch):
+    """Quarterly is never auto-deleted, and a recent daily is left alone."""
+    init_settings()
+    calls = []
+    listing = "\n".join([
+        "2020-01-01-daily/",       # long expired
+        "2020-01-01-quarterly/",   # never auto-deleted
+        f"{date.today().isoformat()}-daily/",  # today, keep
+        "not-a-backup-dir/",       # unparseable, skip
+    ])
+    monkeypatch.setattr(
+        "backend.backup.rclone.subprocess.run",
+        _fake_run(listing, purge_rc=0, calls=calls),
+    )
+    from backend.backup.rclone import apply_retention
+
+    apply_retention("gdrive:receipts", "/tmp")
+
+    purged = [c[2] for c in calls if c[1] == "purge"]
+    assert purged == ["gdrive:receipts/2020-01-01-daily"]

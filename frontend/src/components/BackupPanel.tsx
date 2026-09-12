@@ -31,15 +31,20 @@ export default function BackupPanel() {
     }
   };
 
+  // "partial" means the backup was written locally but reached only some of its
+  // destinations. Without its own branch it falls through to the blue "pending"
+  // style, which reads as still-running -- the opposite of what it is.
   const statusColor = (status: string) => {
     if (status === "completed") return "text-[#007239] font-bold";
     if (status === "failed")    return "text-[#93000a] font-bold";
+    if (status === "partial")   return "text-[#8a5200] font-bold";
     return "text-[#3323cc] font-bold";
   };
 
   const statusIcon = (status: string) => {
     if (status === "completed") return "check_circle";
     if (status === "failed") return "error";
+    if (status === "partial") return "warning";
     return "pending";
   };
 

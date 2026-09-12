@@ -54,6 +54,17 @@ async def run_backup_scheduler(data_dir: str) -> None:
             await asyncio.sleep(300)
 
 
+def _upload_status(configured: int, uploaded: int) -> str:
+    """Backup status from how many destinations took the upload.
+
+    'completed' with no destinations configured is not a lie: an unconfigured
+    backup is local by choice, and there is nothing to have failed.
+    """
+    if configured == 0 or uploaded == configured:
+        return "completed"
+    return "failed" if uploaded == 0 else "partial"
+
+
 async def run_backup(data_dir: str, trigger: str = "manual") -> int:
     """Execute a backup. Returns the backup record ID."""
     today = date.today()
@@ -71,34 +82,70 @@ async def run_backup(data_dir: str, trigger: str = "manual") -> int:
         loop = asyncio.get_event_loop()
         backup_dir = await loop.run_in_executor(None, build_backup, data_dir)
 
-        if destination:
-            destinations = [d.strip() for d in destination.split(",") if d.strip()]
-            for dest in destinations:
-                try:
-                    await loop.run_in_executor(None, upload_backup, backup_dir, dest, backup_type, today)
-                    await loop.run_in_executor(None, apply_retention, dest, data_dir)
-                except Exception as upload_err:
-                    logger.error(f"Failed to upload to {dest}: {upload_err}")
+        destinations = [d.strip() for d in (destination or "").split(",") if d.strip()]
+        uploaded = 0
+        errors: list[str] = []
+
+        for dest in destinations:
+            try:
+                await loop.run_in_executor(None, upload_backup, backup_dir, dest, backup_type, today)
+                uploaded += 1
+            except Exception as upload_err:
+                logger.error(f"Failed to upload to {dest}: {upload_err}")
+                errors.append(f"{dest}: {upload_err}")
+                continue
+            # Retention runs only after that destination's upload succeeded, so a
+            # failed run never purges older good backups. A retention failure
+            # leaves stale copies on the remote, which is untidy rather than
+            # dangerous, so it is reported without demoting the upload.
+            try:
+                await loop.run_in_executor(None, apply_retention, dest, data_dir)
+            except Exception as retention_err:
+                logger.error(f"Retention failed for {dest}: {retention_err}")
+                errors.append(f"{dest} (retention): {retention_err}")
 
         size = _dir_size(backup_dir)
+        status = _upload_status(len(destinations), uploaded)
+        error_text = "; ".join(errors) or None
+
         with get_connection() as conn:
             conn.execute(
                 """UPDATE backups SET
-                    status = 'completed',
+                    status = ?,
                     completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
                     size_bytes = ?,
-                    local_path = ?
+                    local_path = ?,
+                    error = ?
                 WHERE id = ?""",
-                (size, backup_dir, backup_id),
+                (status, size, backup_dir, error_text, backup_id),
             )
-        logger.info(f"Backup {backup_id} completed ({size} bytes)")
+
+        if status == "completed":
+            logger.info(f"Backup {backup_id} completed ({size} bytes)")
+        else:
+            logger.error(f"Backup {backup_id} {status}: {error_text}")
+
         try:
             from backend.notifications.notifier import notify
-            notify("backup_ok", {
-                "backup_type": backup_type,
-                "size_bytes": size,
-                "destination": destination,
-            })
+            if status == "completed":
+                notify("backup_ok", {
+                    "backup_type": backup_type,
+                    "size_bytes": size,
+                    "destination": destination,
+                })
+            else:
+                # Deliberately backup_failed and not backup_ok. A backup that
+                # reached none of its destinations, or only some, is not a
+                # success, and notify_*_backup_ok is off by default -- routing a
+                # degraded run through the success event would tell the owner
+                # nothing at all.
+                notify("backup_failed", {
+                    "error": (
+                        f"Backup was written locally but "
+                        f"{'no destination' if uploaded == 0 else f'only {uploaded} of {len(destinations)} destinations'}"
+                        f" accepted the upload. {error_text}"
+                    ),
+                })
         except Exception:
             pass
 
