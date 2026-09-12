@@ -2,7 +2,9 @@
 
 Written 2026-09-11 after a /investigate on the Naya receipt (document #296)
 Branch: fix/scanner-scanic-1.6 (stacked on feat/scanner-manual-corners, PR #36)
-Status: IMPLEMENTED, awaiting on-device verdict (S26 Ultra)
+Status: IMPLEMENTED. On-device (S26 Ultra, 2026-09-11): two Naya captures, seam depth −0.3,
+both boxes on the receipt. The /review changes below (no-box crop, degenerate-quad guard) came
+after that test.
 Rollback point: git tag `rollback/pre-scanic-1.6` (133afea), image `receiptory-receiptory:rollback-pre-scanic-1.6` (fa097624a56e)
 
 ## Problem
@@ -68,6 +70,46 @@ that edge map restores parity:
 `maxDocumentAspectRatio` follows our own gate because 1.6.0 ranks every valid candidate above
 an invalid one, and 8:1 would mark a long restaurant slip invalid.
 
+This fixes the edge map and the single pass. It does not make selection identical: 1.6.0 still
+scores up to 12 contours (valid first, then confidence) and refines corners its own way, where
+1.0.6 took the largest contour. Accepted frames over the corpus: 1.0.6 {4, 9, 10, 26, 37, 42,
+43, 44, 46, 47}, pinned 1.6.0 {4, 9, 10, 37, 42, 43, 44, 47}. #46 is a recent 4K capture whose
+1.0.6 box was a near-triangle (two corners ~10px apart) and was hand-corrected at capture, so
+losing it is likely no loss. Forcing `maxCandidateContours: 1` does not restore the 1.0.6 set
+either (0 correct / 2 wrong / 29 no box); it loses #4.
+
+## Changes from /review (2026-09-11)
+
+- **No box, no guess.** With no corners, `extractAndEnhance` used to run scanic's own
+  full-frame detect-and-crop: unpreprocessed, ungated, and filed while review showed a
+  different quad. Under 1.6.0 that crop collapsed to a speck (0.1% of the frame on #1, #12 and
+  #46; 17 → 23 of 46 frames under 5%). It was already unreliable on 1.0.6. Now
+  `ScannerPage.handleCapture` crops the inset quad review draws, and `extractAndEnhance` never
+  detects. Verified: a no-box 4K capture crops 1728×3072, the on-screen box.
+- **No black pages.** 1.6.0's extract returns a solid black page with `success: true` for
+  collinear or coincident corners (its singular homography becomes NaN, and every pixel truncates to 0).
+  `isWarpableQuad` (geometry.ts) rejects non-convex, flat-cornered or sub-8px-sided quads first,
+  and the whole frame is returned, the existing failed-warp policy. Verified for collinear,
+  three-on-an-edge and coincident corners.
+- **Real types.** The hand-written `src/types/scanic.d.ts` from the first scanner commit
+  shadowed scanic's shipped types, so the pinned options were never type-checked (a
+  misspelling compiled). Removed. The pinned options use `satisfies DetectionOptions` (a typo is
+  now TS2561), and the crop calls the exported `extractDocument`, which is what
+  `Scanner#extract` wraps and which 1.6.0's typings do declare.
+- **Init semantics.** 1.6.0's `initialize()` swallows a WASM load failure and runs its JS
+  pipeline, so a WASM failure is a slowdown rather than an error badge. The init-latch handling
+  stays for anything else that throws.
+- **TODO closed.** "Scanic WASM instance leaks on every scanner close" assumed one WASM heap
+  per `Scanner`. Both versions hold a single module-level instance (1.0.6
+  `if (wasm !== void 0) return wasm`; 1.6.0 caches its init promise), so nothing leaks.
+
+Measured by the /review performance pass (headless Chromium, no GPU): crop of a narrow receipt
+306 → 116ms and of a full page 654 → 324ms; live detect on a 450×800 frame 36.7 → 26.2ms;
+main bundle +5.8kB gzip. The crop does allocate about 66MB more transient memory at 4K (a
+full-frame pixel copy plus the output buffer). That is not a problem on the S26 Ultra so far;
+if multi-page sessions show pressure, pass the ImageData straight to `extractDocument` and
+build the full-frame canvas only on fallback.
+
 ## Evidence
 
 Measured in headless Chromium with the app's own `ClassicalDetector` and `extractAndEnhance`
@@ -102,8 +144,12 @@ decides.
 
 ## Guard rails
 
-- `opencv-loader.test.ts` fails if the pinned options leave the Scanner constructor.
+- `opencv-loader.test.ts` fails if the pinned options leave the Scanner constructor, and fails
+  if the installed scanic is not 1.6.0 (a tripwire for re-measuring before any bump).
 - `classical-detector.test.ts` pins `maxDocumentAspectRatio` to `maxAspect`.
+- `geometry.test.ts` covers `isWarpableQuad` on the three black-page shapes, a bow-tie, a tiny
+  side, non-finite corners and real crops.
+- The pinned options are type-checked against scanic's `DetectionOptions`.
 - `package.json` pins `scanic` to exactly `1.6.0`. Before any bump, repeat the Evidence
   measurement: the harness was a throwaway (a Vite IIFE build of `ClassicalDetector` per
   scanic version, driven by Playwright over `data/scanner_test_set`) and is not in the repo.

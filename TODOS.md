@@ -167,26 +167,6 @@ Deferred items captured during planning and review. Organized by component, sort
 **Priority:** P1
 **Depends on:** Increment 0's measurement (it sets how much resolution a page actually needs)
 
-### Scanic WASM instance leaks on every scanner close
-
-**What:** `terminateScanner()` sets `scanner = null; initPromise = null` with no disposal call on the scanic instance.
-
-**Why:** `ScannerPage.handleClose` calls it on every scanner exit, so each open/close cycle instantiates a fresh `Scanner` and orphans the previous WASM heap. Monotonic memory growth across a phone session, on top of the multi-page pressure above.
-
-**Pros:**
-- Likely a one-line fix or a one-line deletion
-
-**Cons:**
-- Needs an API check first: if `scanic@1.0.6` exposes no dispose/terminate, the correct fix is to STOP nulling the instance and drop the `terminateScanner()` call from `handleClose` entirely, which changes teardown semantics
-
-**Context:**
-- Source: adversarial review 2026-09-04, finding 13
-- Start: `frontend/src/lib/opencv-loader.ts` `terminateScanner`, and `frontend/node_modules/scanic/src/scanic.d.ts` for the disposal API
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** None
-
 ### Harden the detector-to-viewfinder coordinate handoff across orientation changes
 
 **What:** Capture `{detW, detH, detectionScale}` as one immutable object alongside the corners inside the detect `.then()`, and run `orderQuadByAngle` on detector output at the boundary.
