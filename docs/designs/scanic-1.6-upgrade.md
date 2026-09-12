@@ -156,9 +156,12 @@ decides.
 - `package.json` pins `scanic` to exactly `1.6.0`. Before any bump, repeat the Evidence
   measurement: the harness was a throwaway (a Vite IIFE build of `ClassicalDetector` per
   scanic version, driven by Playwright over `data/scanner_test_set`) and is not in the repo.
-- scanic 1.6.0 declares `engines.node >= 22`; the Docker frontend stage is `node:20-slim`.
-  The image builds (verified 2026-09-11, image e1417efa5e37). npm does not enforce
-  `engines` without `engine-strict`, and scanic runs in the browser, not in Node.
+- scanic 1.6.0 declares `engines.node >= 22`. The Docker frontend stage was `node:20-slim`
+  when this was written and built anyway (npm does not enforce `engines` without
+  `engine-strict`, and scanic runs in the browser, not in Node). It is `node:24-slim`
+  since #39, which also added the `.dockerignore` that stops the host's `node_modules`
+  overwriting the image's `npm ci` — without it, a build could bake in a scanic version
+  the lockfile does not pin.
 - Canary for a built image: `minCascadeTriggerConfidence` exists only in scanic 1.6 and
   `should be lower than highThreshold` only in 1.0.6
   (`docker run --rm --entrypoint sh <image> -c 'grep -l <string> /app/frontend/dist/assets/*.js'`).
