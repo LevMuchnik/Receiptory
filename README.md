@@ -258,7 +258,7 @@ Configurable in Administration > Resilience > Backup Schedule.
 ### Prerequisites
 
 - Python 3.12+, [uv](https://docs.astral.sh/uv/)
-- Node.js 20+
+- Node.js 22+ (the Docker frontend build stage uses Node 24; `scanic` declares `engines.node >= 22`)
 
 ### Backend
 
