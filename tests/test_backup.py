@@ -1121,6 +1121,10 @@ def test_restore_refuses_a_non_empty_target_without_force(db_path, tmp_data_dir,
 
     restore(backup_dir, str(target), force=True)
     assert (target / "receiptory.db").read_bytes() != b"precious"
+    # Replaced, not merged: the old directory is kept beside it, not destroyed.
+    kept = [p for p in tmp_path.iterdir() if ".pre-restore-" in p.name]
+    assert len(kept) == 1
+    assert (kept[0] / "receiptory.db").read_bytes() == b"precious"
 
 
 def test_restore_refuses_a_backup_that_would_not_restore(db_path, tmp_data_dir, tmp_path):
@@ -1313,29 +1317,26 @@ def test_verify_rejects_a_backup_containing_symlinks(db_path, tmp_data_dir, tmp_
 # --- gaps the review mutation-proved -----------------------------------------
 
 
-def test_restore_clears_stale_sidecars_before_opening_the_database(
+def test_restore_runs_migrations_on_the_assembled_copy(
     db_path, tmp_data_dir, tmp_path, monkeypatch
 ):
-    """A stale -wal from the install being overwritten would be replayed into
-    the freshly restored database.
+    """Bringing an older snapshot forward is the stated reason the step exists,
+    and a round trip of an already-current backup cannot tell whether it ran.
 
-    Asserted from inside a spy on init_db, not afterwards: init_db opens the
-    database and checkpoints the sidecars away on close, so a post-hoc
-    existence check passes even when the removal is deleted. Mutation-proven --
-    dropping the removal loop left the whole file green.
+    (The stale-sidecar hazard this used to guard is gone: the restore is
+    assembled in a directory created moments earlier, so there is nothing for
+    SQLite to replay.)
     """
     import backend.database as db_mod
     from scripts.restore_backup import restore
 
     init_settings()
-    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 sidecar")
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 migrate")
     backup_dir, _ = build_backup(str(tmp_data_dir))
 
     target = tmp_path / "occupied"
     target.mkdir()
     (target / "receiptory.db").write_bytes(b"old install")
-    (target / "receiptory.db-wal").write_bytes(b"another install's tail")
-    (target / "receiptory.db-shm").write_bytes(b"stale shm")
 
     seen = {}
     real_init = db_mod.init_db
@@ -1343,16 +1344,14 @@ def test_restore_clears_stale_sidecars_before_opening_the_database(
     def spy(path):
         seen["path"] = path
         seen["wal"] = os.path.exists(path + "-wal")
-        seen["shm"] = os.path.exists(path + "-shm")
         return real_init(path)
 
     monkeypatch.setattr("scripts.restore_backup.init_db", spy)
     restore(backup_dir, str(target), force=True)
 
-    # Also pins that migrations ran at all: without this the migration step can
-    # be deleted with every test still passing.
-    assert seen["path"] == str(target / "receiptory.db"), "migrations never ran"
-    assert seen["wal"] is False and seen["shm"] is False, "stale sidecar survived"
+    assert seen.get("path"), "migrations never ran"
+    assert ".restoring-" in seen["path"], "migrations ran somewhere other than the staging copy"
+    assert seen["wal"] is False
 
 
 def test_verify_reports_a_missing_filed_copy(db_path, tmp_data_dir):
@@ -1458,3 +1457,126 @@ def test_cli_refuses_a_full_target_with_exit_code_two(db_path, tmp_data_dir, tmp
     hint = [ln for ln in err.splitlines() if ln.strip().endswith(".restored")]
     assert hint and hint[0].strip().startswith("scripts/restore_backup.py"), err
     assert (target / "receiptory.db").read_bytes() == b"precious"
+
+
+# --- restore replaces rather than merges (issue #50) --------------------------
+
+
+def test_force_replaces_the_target_instead_of_merging_into_it(
+    db_path, tmp_data_dir, tmp_path
+):
+    """Merging left rows from the backup beside files from the newer install:
+    documents ingested since the backup lost their rows but kept their bytes as
+    unreachable orphans, and the post-restore check could not notice because it
+    only asserts that referenced files exist."""
+    from scripts.restore_backup import restore
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 in-backup")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    target = tmp_path / "live"
+    (target / "storage" / "originals").mkdir(parents=True)
+    (target / "receiptory.db").write_bytes(b"older install")
+    orphan = target / "storage" / "originals" / "newer-document.pdf"
+    orphan.write_bytes(b"ingested after the backup")
+
+    restore(backup_dir, str(target), force=True)
+
+    # The newer file is NOT left lying in the restored tree.
+    assert not orphan.exists(), "restore merged instead of replacing"
+    # It is not destroyed either -- it moved aside with the rest.
+    kept = [p for p in tmp_path.iterdir() if ".pre-restore-" in p.name]
+    assert len(kept) == 1
+    assert (kept[0] / "storage" / "originals" / "newer-document.pdf").exists()
+
+
+def test_restore_refuses_while_the_app_has_the_database_open(
+    db_path, tmp_data_dir, tmp_path
+):
+    """Restoring under a running app lets it flush cached pages into the
+    freshly restored file and destroy both copies.
+
+    Keyed on -shm, which exists while any connection is open: measured, a
+    BEGIN EXCLUSIVE probe SUCCEEDS against a connected idle app and would have
+    detected nothing.
+    """
+    from scripts.restore_backup import restore, RestoreRefused
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 inuse")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    target = tmp_path / "running"
+    target.mkdir()
+    live = sqlite3.connect(str(target / "receiptory.db"))
+    live.execute("PRAGMA journal_mode=WAL")
+    live.execute("CREATE TABLE t(a)")
+    live.commit()
+    try:
+        assert (target / "receiptory.db-shm").exists()  # precondition
+        with pytest.raises(RestoreRefused, match="in use"):
+            restore(backup_dir, str(target), force=True)
+    finally:
+        live.close()
+
+    # Nothing was staged or swapped.
+    assert not any(".pre-restore-" in p.name for p in tmp_path.iterdir())
+    assert not any(".restoring-" in p.name for p in tmp_path.iterdir())
+
+
+def test_a_restore_that_fails_verification_leaves_the_target_untouched(
+    db_path, tmp_data_dir, tmp_path, monkeypatch
+):
+    """Assembled beside the target, so a failure is contained. Previously the
+    target was written first and the operator was told nothing had been."""
+    from scripts.restore_backup import restore, RestoreRefused
+    from backend.backup.verify import BackupVerificationError
+    import scripts.restore_backup as rb
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 fail")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    target = tmp_path / "live"
+    target.mkdir()
+    (target / "receiptory.db").write_bytes(b"do not touch me")
+
+    real_verify = rb.verify_backup
+    calls = []
+
+    def verify_then_fail(path):
+        calls.append(path)
+        if len(calls) == 1:          # the pre-flight check on the backup
+            return real_verify(path)
+        raise BackupVerificationError("pretend the assembled copy is bad")
+
+    monkeypatch.setattr(rb, "verify_backup", verify_then_fail)
+
+    with pytest.raises(RestoreRefused, match="left untouched"):
+        restore(backup_dir, str(target), force=True)
+
+    assert (target / "receiptory.db").read_bytes() == b"do not touch me"
+    assert not any(".pre-restore-" in p.name for p in tmp_path.iterdir())
+    # The second check must be of the ASSEMBLED copy, not the source again --
+    # its whole purpose is catching a copy that went wrong in transit.
+    assert calls[0] == backup_dir
+    assert ".restoring-" in calls[1], f"post-assembly verify read {calls[1]}"
+
+
+def test_restore_refuses_when_there_is_not_enough_space(
+    db_path, tmp_data_dir, tmp_path, monkeypatch
+):
+    """The old directory is kept, so both copies have to fit. Running out
+    halfway would leave neither install whole."""
+    from scripts.restore_backup import restore, RestoreRefused
+    import scripts.restore_backup as rb
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 space")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    monkeypatch.setattr(rb, "_free_bytes", lambda p: 1)
+
+    with pytest.raises(RestoreRefused, match="not enough space"):
+        restore(backup_dir, str(tmp_path / "nope"))

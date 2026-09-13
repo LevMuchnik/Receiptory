@@ -28,7 +28,9 @@ import argparse
 import json
 import os
 import shutil
+import sqlite3
 import sys
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -59,8 +61,55 @@ def _is_occupied(path: str) -> bool:
     return os.path.isdir(path) and any(os.scandir(path))
 
 
+def _in_use(target: str) -> bool:
+    """True if something has the target's database open.
+
+    The -shm file exists for as long as any connection is open and SQLite
+    deletes it on the last close, which makes it the reliable signal. Measured:
+    BEGIN EXCLUSIVE from a second connection SUCCEEDS while the application is
+    connected and idle, so a lock probe would have detected nothing.
+    """
+    return os.path.exists(os.path.join(target, "receiptory.db-shm"))
+
+
+def _document_count(db_path: str) -> int | None:
+    if not os.path.exists(db_path):
+        return None
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def _free_bytes(path: str) -> int:
+    while not os.path.exists(path):
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent == path:
+            break
+        path = parent
+    return shutil.disk_usage(path).free
+
+
+def _dir_bytes(path: str) -> int:
+    return sum(
+        os.path.getsize(os.path.join(root, f))
+        for root, _, files in os.walk(path)
+        for f in files
+        if not os.path.islink(os.path.join(root, f))
+    )
+
+
 def restore(backup_dir: str, target: str, *, force: bool = False) -> dict:
-    """Rebuild `target` from `backup_dir`. Returns the verification report."""
+    """Rebuild `target` from `backup_dir`. Returns the verification report.
+
+    The target is replaced, never merged, and never left half-written: the
+    restore is assembled in a sibling directory, verified there, and only then
+    swapped into place with two renames. Whatever was in the target is moved
+    aside rather than deleted, so the whole operation is undone by a rename.
+    """
     if not os.path.isdir(backup_dir):
         raise RestoreRefused(f"no such backup directory: {backup_dir}")
 
@@ -75,7 +124,8 @@ def restore(backup_dir: str, target: str, *, force: bool = False) -> dict:
         for p in report["problems"][:10]:
             print(f"    - {p}")
 
-    if _is_occupied(target) and not force:
+    occupied = _is_occupied(target)
+    if occupied and not force:
         # A literal path, not sys.argv[0]: restore() is also called in-process,
         # where argv[0] is pytest, and this is the one message an operator reads
         # under pressure.
@@ -84,30 +134,64 @@ def restore(backup_dir: str, target: str, *, force: bool = False) -> dict:
             f"Restore beside it and swap, which is reversible:\n"
             f"  scripts/restore_backup.py {backup_dir} {target}.restored\n"
             f"  mv {target} {target}.old && mv {target}.restored {target}\n"
-            f"Or pass --force to overwrite it in place. --force MERGES: files the\n"
-            f"backup does not contain are left where they are, and any documents\n"
-            f"ingested since the backup lose their rows."
+            f"Or pass --force, which moves the current {target} aside and replaces it."
         )
 
-    os.makedirs(target, exist_ok=True)
+    if occupied and _in_use(target):
+        raise RestoreRefused(
+            f"{target} is in use -- something has receiptory.db open.\n"
+            f"Stop Receiptory first (docker compose stop receiptory), then re-run.\n"
+            f"Restoring under a running app would let it flush cached pages into "
+            f"the freshly restored database and destroy both copies.\n"
+            f"If Receiptory is already stopped, this is a stale file left by a "
+            f"crash -- remove {os.path.join(target, 'receiptory.db-shm')} and re-run."
+        )
 
-    db_src = os.path.join(backup_dir, "receiptory.db")
-    db_dst = os.path.join(target, "receiptory.db")
-    print(f"Restoring database -> {db_dst}")
-    shutil.copy2(db_src, db_dst)
-    # The snapshot carries no -wal/-shm and must not inherit stale ones from a
-    # directory being overwritten, or SQLite would replay another install's tail.
-    for sidecar in (db_dst + "-wal", db_dst + "-shm"):
-        if os.path.exists(sidecar):
-            os.remove(sidecar)
+    # Say what replacing this target costs, before doing it. The old directory
+    # is kept, so the peak requirement is the backup plus what is already there.
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    staging = f"{target}.restoring-{stamp}"
+    kept = f"{target}.pre-restore-{stamp}"
+
+    needed = _dir_bytes(backup_dir)
+    free = _free_bytes(os.path.dirname(os.path.abspath(target)) or ".")
+    if free < needed:
+        raise RestoreRefused(
+            f"not enough space: the restore needs {needed // (1 << 20)} MB and "
+            f"{free // (1 << 20)} MB is free. The current data directory is kept "
+            f"until you delete it, so both copies must fit."
+        )
+
+    if occupied:
+        before = _document_count(os.path.join(target, "receiptory.db"))
+        if before is not None and before > report["documents"]:
+            print(
+                f"\n  NOTE: {target} currently holds {before} documents and this "
+                f"backup holds {report['documents']}. {before - report['documents']} "
+                f"document(s) ingested since the backup will not be in the restored\n"
+                f"  system. They are not destroyed -- the current directory is kept "
+                f"at {kept}."
+            )
+
+    # Assemble beside the target, so an interruption leaves the live directory
+    # untouched instead of a hybrid of two installs.
+    if os.path.exists(staging):
+        shutil.rmtree(staging)
+    os.makedirs(staging)
+
+    db_dst = os.path.join(staging, "receiptory.db")
+    print(f"Assembling restore in {staging} ...")
+    # No sidecar handling needed: the staging directory was created moments ago,
+    # so there is nothing stale for SQLite to replay. Assembling beside the
+    # target rather than into it is what removed that hazard.
+    shutil.copy2(os.path.join(backup_dir, "receiptory.db"), db_dst)
 
     for tree in BACKUP_TREES:
         src = os.path.join(backup_dir, tree)
         if not os.path.isdir(src):
             continue
-        dst = os.path.join(target, tree)
-        print(f"Restoring {tree}/ -> {dst}")
-        shutil.copytree(src, dst, dirs_exist_ok=True)
+        print(f"  {tree}/")
+        shutil.copytree(src, os.path.join(staging, tree))
 
     # Bring an older snapshot forward. A backup taken before a schema change
     # restores at its own version, and the app expects the current one.
@@ -116,18 +200,34 @@ def restore(backup_dir: str, target: str, *, force: bool = False) -> dict:
     print("Applying migrations ...")
     init_db(db_dst)
 
-    print("Verifying the restored directory ...")
+    print("Verifying the assembled restore ...")
     try:
-        restored = verify_backup(target)
+        restored = verify_backup(staging)
     except BackupVerificationError as e:
-        # Past this point the target HAS been overwritten. Reporting this the
-        # same way as a pre-flight failure would tell an operator mid-recovery
-        # that nothing was written while their data directory is a hybrid.
-        raise TargetWritten(
-            f"{e}\nThe target {target} HAS been written and is NOT usable. "
-            f"Re-run against a good backup with --force."
+        # Still nothing has touched the target: the failure is contained to the
+        # staging directory, which is left in place for inspection.
+        raise RestoreRefused(
+            f"{e}\nThe restore was assembled but did not verify, so {target} was "
+            f"left untouched. The failed attempt is at {staging}."
         ) from e
     print(f"  ok: {format_report(restored)}")
+
+    # Two renames on the same filesystem, both atomic. Between them the target
+    # briefly does not exist; it is never a mixture of two installs.
+    if occupied:
+        os.rename(target, kept)
+    elif os.path.isdir(target):
+        os.rmdir(target)  # empty dir created by an earlier run or by the user
+    try:
+        os.rename(staging, target)
+    except OSError:
+        if occupied:
+            os.rename(kept, target)  # put it back rather than leave nothing
+        raise
+
+    if occupied:
+        print(f"\nThe previous data directory is kept at {kept}")
+        print("Delete it once you are satisfied with the restore.")
     return restored
 
 
@@ -174,7 +274,9 @@ def main() -> int:
     parser.add_argument("target", nargs="?", help="data directory to create or overwrite")
     parser.add_argument(
         "--force", action="store_true",
-        help="overwrite the target in place even if it already holds data",
+        help=("replace the target even if it already holds data. The current "
+              "directory is moved to <target>.pre-restore-<timestamp>, not deleted; "
+              "documents ingested since the backup will not be in the restored system"),
     )
     parser.add_argument(
         "--verify-only", action="store_true",
