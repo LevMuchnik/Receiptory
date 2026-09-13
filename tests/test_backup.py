@@ -1338,20 +1338,22 @@ def test_restore_runs_migrations_on_the_assembled_copy(
     target.mkdir()
     (target / "receiptory.db").write_bytes(b"old install")
 
-    seen = {}
+    seen = []
     real_init = db_mod.init_db
 
     def spy(path):
-        seen["path"] = path
-        seen["wal"] = os.path.exists(path + "-wal")
+        seen.append({"path": path, "wal": os.path.exists(path + "-wal")})
         return real_init(path)
 
     monkeypatch.setattr("scripts.restore_backup.init_db", spy)
     restore(backup_dir, str(target), force=True)
 
-    assert seen.get("path"), "migrations never ran"
-    assert ".restoring-" in seen["path"], "migrations ran somewhere other than the staging copy"
-    assert seen["wal"] is False
+    assert seen, "migrations never ran"
+    # Migrations run on the assembled copy, before it is swapped in.
+    assert ".restoring-" in seen[0]["path"], f"migrations ran on {seen[0]['path']}"
+    assert seen[0]["wal"] is False
+    # And the process global is left pointing somewhere that still exists.
+    assert seen[-1]["path"] == os.path.join(str(target), "receiptory.db")
 
 
 def test_verify_reports_a_missing_filed_copy(db_path, tmp_data_dir):
@@ -1580,3 +1582,224 @@ def test_restore_refuses_when_there_is_not_enough_space(
 
     with pytest.raises(RestoreRefused, match="not enough space"):
         restore(backup_dir, str(tmp_path / "nope"))
+
+
+def test_local_state_the_backup_never_held_survives_a_replace(
+    db_path, tmp_data_dir, tmp_path
+):
+    """rclone.conf and scanner_test_set are deliberately not in a backup.
+
+    The old merge behaviour left them in place by accident. Replacing the
+    target would have taken them away, so the restored system would stop
+    backing up to the cloud immediately after a disaster recovery -- and the
+    scanner_test_frames rows, which DO come across in the database, would point
+    at files that no longer exist.
+    """
+    from scripts.restore_backup import restore
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 carry")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    target = tmp_path / "live"
+    (target / "scanner_test_set").mkdir(parents=True)
+    (target / "receiptory.db").write_bytes(b"older install")
+    (target / "rclone.conf").write_text("[receiptory_onedrive]\ntype = onedrive\n")
+    (target / "scanner_test_set" / "frame1.jpg").write_bytes(b"frame")
+
+    restore(backup_dir, str(target), force=True)
+
+    assert (target / "rclone.conf").read_text().startswith("[receiptory_onedrive]")
+    assert (target / "scanner_test_set" / "frame1.jpg").read_bytes() == b"frame"
+    # Still a replace, not a merge: the backup's own content is what landed.
+    assert (target / "receiptory.db").read_bytes() != b"older install"
+
+
+def test_a_failed_swap_puts_the_original_back(db_path, tmp_data_dir, tmp_path, monkeypatch):
+    """The window between the two renames is the only moment the data directory
+    does not exist. If the second fails, the first must be undone rather than
+    leaving the owner with nothing where their data used to be."""
+    from scripts.restore_backup import restore, RestoreRefused
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 swapfail")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    target = tmp_path / "live"
+    target.mkdir()
+    (target / "receiptory.db").write_bytes(b"the only copy")
+
+    real_rename = os.rename
+    calls = []
+
+    def rename_failing_on_the_second(src, dst):
+        calls.append((src, dst))
+        if len(calls) == 2:
+            raise OSError("pretend the second rename failed")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(os, "rename", rename_failing_on_the_second)
+
+    with pytest.raises(RestoreRefused, match="put back unchanged"):
+        restore(backup_dir, str(target), force=True)
+
+    # The rollback ran: the data is where it started, not stranded under a name
+    # nobody printed.
+    assert (target / "receiptory.db").read_bytes() == b"the only copy"
+    assert not any(".pre-restore-" in p.name for p in tmp_path.iterdir())
+
+
+def test_restore_refuses_a_symlinked_target_by_resolving_it(
+    db_path, tmp_data_dir, tmp_path
+):
+    """os.rename does not follow symlinks: renaming a symlinked target moves the
+    LINK, so the kept path would point at the live data and "delete it once you
+    are satisfied" would destroy the real install."""
+    from scripts.restore_backup import restore
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 symtarget")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    real = tmp_path / "real_data"
+    real.mkdir()
+    (real / "receiptory.db").write_bytes(b"older install")
+    link = tmp_path / "data_link"
+    os.symlink(str(real), str(link))
+
+    restore(backup_dir, str(link), force=True)
+
+    # The link still points at a real directory holding the restored install,
+    # and the kept copy is a real directory, not a dangling link.
+    assert os.path.isdir(str(link))
+    kept = [p for p in tmp_path.iterdir() if ".pre-restore-" in p.name]
+    assert len(kept) == 1 and not kept[0].is_symlink()
+    assert (kept[0] / "receiptory.db").read_bytes() == b"older install"
+
+
+def test_restore_warns_that_the_restored_system_has_no_password(
+    db_path, tmp_data_dir, tmp_path, capsys
+):
+    """The snapshot strips auth_password_hash, so config.init_settings finds no
+    row and seeds bcrypt("admin") at the next start. The restored install is
+    reachable with admin/admin and the secret checklist only says "was set"."""
+    from scripts.restore_backup import restore
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 pw")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    restore(backup_dir, str(tmp_path / "restored"))
+
+    out = capsys.readouterr().out
+    assert "NO PASSWORD SET" in out
+    assert "admin / admin" in out
+
+
+def test_restore_refuses_a_target_that_is_a_file(db_path, tmp_data_dir, tmp_path):
+    """Neither branch of the swap handles it, and the rename would fail ENOTDIR
+    after the whole backup had already been copied."""
+    from scripts.restore_backup import restore, RestoreRefused
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 file")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    target = tmp_path / "not_a_dir"
+    target.write_text("i am a file")
+
+    with pytest.raises(RestoreRefused, match="not a directory"):
+        restore(backup_dir, str(target))
+
+
+def test_restore_into_an_existing_empty_directory(db_path, tmp_data_dir, tmp_path):
+    """The unoccupied-but-present branch: rename onto an existing empty dir."""
+    from scripts.restore_backup import restore
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 empty")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    target = tmp_path / "empty"
+    target.mkdir()
+
+    report = restore(backup_dir, str(target))
+    assert report["documents"] == 1
+    assert (target / "receiptory.db").exists()
+    assert not any(".pre-restore-" in p.name for p in tmp_path.iterdir())
+
+
+def test_counting_the_targets_documents_does_not_write_to_it(
+    db_path, tmp_data_dir, tmp_path
+):
+    """The count is a courtesy message, and it reads the copy being kept as the
+    owner's undo. Opening read-write would recover and checkpoint a hot WAL."""
+    import scripts.restore_backup as rb
+
+    init_settings()
+    target = tmp_path / "live"
+    target.mkdir()
+    db = target / "receiptory.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE documents (id INTEGER PRIMARY KEY)")
+    conn.execute("INSERT INTO documents DEFAULT VALUES")
+    conn.commit()
+    conn.close()
+
+    # A HOT wal: copy the files out mid-transaction so the copy has an
+    # unreplayed -wal and no open connection, the shape a crash leaves behind.
+    # Without one, a read-write open looks harmless and the test proves nothing.
+    live = sqlite3.connect(str(db))
+    live.execute("INSERT INTO documents DEFAULT VALUES")
+    live.commit()
+    crashed = tmp_path / "crashed"
+    crashed.mkdir()
+    for suffix in ("", "-wal", "-shm"):
+        src = str(db) + suffix
+        if os.path.exists(src):
+            shutil.copy2(src, str(crashed / ("receiptory.db" + suffix)))
+    live.close()
+
+    hot = crashed / "receiptory.db"
+    assert (crashed / "receiptory.db-wal").stat().st_size > 0  # precondition
+    before = (hot.stat().st_size, (crashed / "receiptory.db-wal").stat().st_size)
+
+    rb._document_count(str(hot))
+
+    after = (hot.stat().st_size, (crashed / "receiptory.db-wal").stat().st_size)
+    assert after == before, "counting recovered the hot WAL and mutated the kept copy"
+
+
+def test_the_swap_rechecks_that_the_target_is_still_idle(
+    db_path, tmp_data_dir, tmp_path, monkeypatch
+):
+    """The first check happens minutes before the swap, on the far side of a
+    full copy of the storage tree. Docker's restart policy can start the app in
+    that window; renaming a directory whose files are open succeeds, so the app
+    would carry on writing into the directory the owner is told to delete."""
+    from scripts.restore_backup import restore, RestoreRefused
+    import scripts.restore_backup as rb
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 racy")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    target = tmp_path / "live"
+    target.mkdir()
+    (target / "receiptory.db").write_bytes(b"the only copy")
+
+    checks = []
+
+    def busy_the_second_time(path):
+        checks.append(path)
+        return len(checks) > 1  # idle at the pre-flight check, busy at the swap
+
+    monkeypatch.setattr(rb, "_in_use", busy_the_second_time)
+
+    with pytest.raises(RestoreRefused, match="became busy"):
+        restore(backup_dir, str(target), force=True)
+
+    assert len(checks) == 2, "the swap did not re-check"
+    assert (target / "receiptory.db").read_bytes() == b"the only copy"
+    assert not any(".pre-restore-" in p.name for p in tmp_path.iterdir())
