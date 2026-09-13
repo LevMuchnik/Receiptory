@@ -245,7 +245,11 @@ mv data data.old && mv data.restored data
 uv run python scripts/restore_backup.py /path/to/backup data --force
 ```
 
-The script verifies the backup before writing anything, restores the database plus the trees the backup carries, runs migrations so an older snapshot is brought up to the current schema, verifies the result, and prints which secrets to re-enter.
+The script verifies the backup, assembles the restore in a sibling directory, verifies that too, and only then swaps it into place with two renames. The target is never a mixture of two installs, and the directory it replaces is kept as `<target>.pre-restore-<timestamp>` rather than deleted, so the whole operation is undone by a `mv`. `rclone.conf` and `scanner_test_set/` are carried across from the install being replaced, since neither is in a backup.
+
+**The restored system has no password until you set one.** `auth_password_hash` is stripped from the backup, so on first start it accepts the default `admin` / `admin`. The script says so loudly. Set a real password immediately, or pin `RECEIPTORY_AUTH_PASSWORD` in `.env` before starting it.
+
+Restore to a sibling path if your data directory is a mount point — a mount cannot be renamed, and the script refuses up front rather than failing after the copy.
 
 Not in a backup, so not restored: `rclone.conf` (reconnect the cloud remotes in Administration > Resilience) and `scanner_test_set/`. Anything pinned in `.env` keeps working from `.env`.
 
