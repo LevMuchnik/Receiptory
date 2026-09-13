@@ -6,6 +6,8 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 
+from backend.atomic import atomic_copy, atomic_write_bytes
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,8 +23,12 @@ def save_original(src_path: str, file_hash: str, ext: str, data_dir: str) -> str
     dest_dir = os.path.join(data_dir, "storage", "originals")
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, f"{file_hash}{ext}")
+    # The guard is only trustworthy because the write is atomic. A crashed
+    # copy2 used to leave a partial file here that this check then treated as
+    # complete forever; atomic_copy leaves a .rcpt-tmp-* instead, so a
+    # destination that exists is a destination that finished.
     if not os.path.exists(dest):
-        shutil.copy2(src_path, dest)
+        atomic_copy(src_path, dest)
     return dest
 
 
@@ -30,8 +36,13 @@ def save_converted(src_path: str, file_hash: str, data_dir: str) -> str:
     dest_dir = os.path.join(data_dir, "storage", "converted")
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, f"{file_hash}.pdf")
+    # Note the consequence of this guard, which is not obvious: normalize.py
+    # rewrites <hash>_converted.pdf on every reprocess while this refuses to
+    # overwrite <hash>.pdf, so <hash>.pdf is the OLDEST conversion and the
+    # scratch file beside it is the NEWEST. backup/runner.py's exclusion rule
+    # depends on knowing that.
     if not os.path.exists(dest):
-        shutil.copy2(src_path, dest)
+        atomic_copy(src_path, dest)
     return dest
 
 
@@ -39,7 +50,11 @@ def save_filed(src_path: str, stored_filename: str, data_dir: str) -> str:
     dest_dir = os.path.join(data_dir, "storage", "filed")
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, stored_filename)
-    shutil.copy2(src_path, dest)
+    # The only save_* helper with no existence guard, so this is the one that
+    # genuinely overwrites in place -- pipeline.py re-runs it on every
+    # reprocess. That makes it the single writer a backup's copytree can catch
+    # mid-write, which is why it has to be atomic.
+    atomic_copy(src_path, dest)
     return dest
 
 
@@ -119,10 +134,29 @@ def save_scanner_test_frame(jpeg_bytes: bytes, data_dir: str) -> str:
     os.makedirs(abs_dir, exist_ok=True)
     rel_path = os.path.join(rel_dir, f"{timestamp}-{short_id}.jpg")
     abs_path = os.path.join(data_dir, rel_path)
-    with open(abs_path, "wb") as f:
-        f.write(jpeg_bytes)
+    # scanner_test_set is in the backup now (see backup/runner.py BACKUP_TREES),
+    # so this is no longer a tree only the Lab reads. A frame caught mid-write
+    # by the backup copy would ship torn, and nothing hashes these the way
+    # verify.py hashes originals, so it would never be reported.
+    atomic_write_bytes(abs_path, jpeg_bytes)
     return rel_path.replace(os.sep, "/")
 
 
 def get_scanner_test_frame_path(rel_path: str, data_dir: str) -> str:
-    return os.path.join(data_dir, rel_path)
+    """Resolve a scanner_test_frames.frame_path, refusing to leave data_dir.
+
+    Defence in depth, and not theoretical. api/scanner.py hands the result of
+    this to FileResponse and to os.unlink, as root. frame_path comes out of the
+    database, and since scanner_test_set became a backup tree a restored
+    database is untrusted input -- os.path.join(data_dir, "/etc/shadow")
+    returns "/etc/shadow", which is an arbitrary read and an arbitrary delete.
+
+    backup/verify.py rejects such a row before a restore ever lands it, but that
+    guard only runs on the restore path. This one runs on every request, so the
+    invariant does not depend on how the row got into the database.
+    """
+    full = os.path.realpath(os.path.join(data_dir, rel_path))
+    root = os.path.realpath(data_dir)
+    if full != root and not full.startswith(root + os.sep):
+        raise ValueError(f"scanner frame path escapes the data directory: {rel_path!r}")
+    return full

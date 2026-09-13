@@ -1,5 +1,6 @@
 """OAuth flow for Google Drive and OneDrive, creating rclone remotes."""
 
+import io
 import json
 import logging
 import os
@@ -8,9 +9,38 @@ import subprocess
 
 import httpx
 
+from backend.atomic import atomic_write_text
 from backend.config import get_setting, set_setting
 
 logger = logging.getLogger(__name__)
+
+
+def _write_rclone_config(config, conf_path: str) -> None:
+    """Serialise the rclone config and replace the file in one step.
+
+    Both callers used to `open(conf_path, "w")`, which truncates before it
+    writes. A crash or a power cut in that window leaves an EMPTY file holding
+    every remote the install had.
+
+    How bad that is depends on the remote. `restore_rclone_config` rebuilds the
+    gdrive and onedrive sections from database settings on every startup, so an
+    OAuth remote heals itself on the next boot. A hand-added remote (sftp, S3, a
+    local path) is in this file and nowhere else -- rclone.conf is deliberately
+    excluded from backups, because the archive travels unencrypted to the very
+    service these credentials unlock. For that remote, the truncation is
+    permanent.
+
+    Mode 0600 is passed explicitly: the file holds OAuth refresh tokens, and
+    tempfile.mkstemp would otherwise decide the permissions.
+
+    Not fixed here, and worth knowing: this whole function is the write half of
+    a read-modify-write against a file rclone itself rewrites when it refreshes
+    a token (which is why `sync_token_from_rclone` exists). Making the write
+    atomic makes that clobber indivisible, not absent. See issue #55.
+    """
+    buf = io.StringIO()
+    config.write(buf)
+    atomic_write_text(conf_path, buf.getvalue(), mode=0o600)
 
 PROVIDERS = {
     "gdrive": {
@@ -173,8 +203,7 @@ def create_rclone_remote(provider: str, token: dict, drive_id: str = "") -> None
         raise ValueError(f"Unknown provider: {provider}")
 
     os.makedirs(os.path.dirname(conf_path), exist_ok=True)
-    with open(conf_path, "w") as f:
-        config.write(f)
+    _write_rclone_config(config, conf_path)
 
     logger.info(f"Created rclone remote: {remote_name}")
 
@@ -188,8 +217,7 @@ def remove_rclone_remote(provider: str) -> None:
         config.read(conf_path)
         if remote_name in config:
             config.remove_section(remote_name)
-            with open(conf_path, "w") as f:
-                config.write(f)
+            _write_rclone_config(config, conf_path)
     prefix = PROVIDERS[provider]["setting_prefix"]
     set_setting(f"cloud_auth_{prefix}_token", "")
     set_setting(f"cloud_auth_{prefix}_email", "")

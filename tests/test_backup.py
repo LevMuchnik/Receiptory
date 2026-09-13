@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 import stat
 import threading
 import time
@@ -410,7 +411,9 @@ def test_metadata_jsonl_is_exported_from_the_snapshot_not_the_live_db(
 
     def copytree_then_write(*args, **kwargs):
         # Runs after the snapshot, before the JSONL export. build_backup calls
-        # copytree once for storage and once for logs; write on the first only.
+        # copytree once per entry in BACKUP_TREES; write on the first only,
+        # which is the storage tree (BACKUP_TREES keeps it first for exactly
+        # this reason).
         if not written:
             written.append(True)
             during.append(_insert_doc(writer, "during", "During Vendor", data_dir=str(tmp_data_dir)))
@@ -1587,13 +1590,18 @@ def test_restore_refuses_when_there_is_not_enough_space(
 def test_local_state_the_backup_never_held_survives_a_replace(
     db_path, tmp_data_dir, tmp_path
 ):
-    """rclone.conf and scanner_test_set are deliberately not in a backup.
+    """Two different policies happen to have the same outcome here.
 
-    The old merge behaviour left them in place by accident. Replacing the
-    target would have taken them away, so the restored system would stop
-    backing up to the cloud immediately after a disaster recovery -- and the
-    scanner_test_frames rows, which DO come across in the database, would point
-    at files that no longer exist.
+    rclone.conf is FROM_TARGET: never in a backup at all, because the archive
+    travels unencrypted to the very service its credentials unlock. Replacing
+    the target would take it away, so the restored system would stop backing up
+    immediately after a disaster recovery.
+
+    scanner_test_set is BACKUP_THEN_TARGET, and this is the critical case for
+    it: the backup here predates the change that started including frames, so
+    the fallback is what keeps them. Without it, restoring any backup made
+    before that change would delete the 57 labelled frames off a machine that
+    still had them, while the scanner_test_frames rows went on pointing at them.
     """
     from scripts.restore_backup import restore
 
@@ -1803,3 +1811,621 @@ def test_the_swap_rechecks_that_the_target_is_still_idle(
     assert len(checks) == 2, "the swap did not re-check"
     assert (target / "receiptory.db").read_bytes() == b"the only copy"
     assert not any(".pre-restore-" in p.name for p in tmp_path.iterdir())
+
+
+# --- issue #45: what a backup contains, and what it must not -----------------
+
+
+def _backup_names(backup_dir, *parts):
+    path = os.path.join(backup_dir, *parts)
+    return set(os.listdir(path)) if os.path.isdir(path) else set()
+
+
+def test_page_cache_and_tmp_are_not_in_the_backup(db_path, tmp_data_dir):
+    """131MB of the 296MB live tree is regenerable page renders, and tmp is
+    ingestion scratch. Both rebuild on demand -- render_page mkdirs its own
+    cache directory, and url_fetcher.fetch_url (the only public entry point
+    that writes to tmp) mkdirs before every download."""
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 excl")
+    cache = tmp_data_dir / "storage" / "page_cache" / "7"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "page_0.png").write_bytes(b"\x89PNG regenerable")
+    tmp = tmp_data_dir / "storage" / "tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    (tmp / "half-download.pdf").write_bytes(b"transient")
+
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    assert "page_cache" not in _backup_names(backup_dir, "storage")
+    assert "tmp" not in _backup_names(backup_dir, "storage")
+    assert "originals" in _backup_names(backup_dir, "storage")
+
+
+def test_a_nested_directory_named_page_cache_is_kept(db_path, tmp_data_dir):
+    """Only the two at the ROOT of storage/ are regenerable. shutil.ignore_patterns
+    would match the name at every level, and a hash-named directory could in
+    principle be called page_cache."""
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 nested")
+    nested = tmp_data_dir / "storage" / "originals" / "page_cache"
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "real.pdf").write_bytes(b"%PDF-1.4 not regenerable")
+
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    assert "page_cache" in _backup_names(backup_dir, "storage", "originals")
+    assert _backup_names(backup_dir, "storage", "originals", "page_cache") == {"real.pdf"}
+
+
+def test_paired_converted_scratch_of_the_same_size_is_dropped(db_path, tmp_data_dir):
+    """normalize.py leaves <stem>_converted.pdf behind after pipeline.py copies
+    it to <hash>.pdf. Nothing ever deletes it, so converted/ is roughly twice
+    the size it needs to be."""
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 conv")
+    conv = tmp_data_dir / "storage" / "converted"
+    (conv / "abc123.pdf").write_bytes(b"%PDF-1.4 the real one")
+    (conv / "abc123_converted.pdf").write_bytes(b"%PDF-1.4 the real one")
+
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    assert _backup_names(backup_dir, "storage", "converted") == {"abc123.pdf"}
+
+
+def test_converted_scratch_is_dropped_even_when_its_partner_differs(
+    db_path, tmp_data_dir
+):
+    """Pairing is the whole rule; the two files are never compared.
+
+    An earlier version kept the scratch when the sizes differed, on the theory
+    that a <hash>.pdf truncated by a crashed copy made the scratch the only
+    intact conversion. Nothing ever READS <stem>_converted.pdf -- get_file_path
+    and serve_page resolve <hash>.pdf and nothing else -- so carrying it would
+    have rescued nothing while costing a stat per file. Detecting a truncated
+    conversion is verification's job (issue #51).
+    """
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 trunc")
+    conv = tmp_data_dir / "storage" / "converted"
+    (conv / "abc123.pdf").write_bytes(b"%PDF-1.4 trun")          # crashed copy
+    (conv / "abc123_converted.pdf").write_bytes(b"%PDF-1.4 the whole thing")
+
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    assert _backup_names(backup_dir, "storage", "converted") == {"abc123.pdf"}
+
+
+def test_unpaired_converted_scratch_is_kept(db_path, tmp_data_dir):
+    """gmail.py:175 normalizes a system tempfile, so a failure before its unlink
+    leaks converted/tmpXXXXXXXX_converted.pdf -- a name nothing will ever match.
+    Keep it rather than guess."""
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 orphan")
+    conv = tmp_data_dir / "storage" / "converted"
+    (conv / "tmpq7x1_converted.pdf").write_bytes(b"%PDF-1.4 no partner")
+
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    assert "tmpq7x1_converted.pdf" in _backup_names(backup_dir, "storage", "converted")
+
+
+def test_in_flight_temp_files_never_enter_a_backup(db_path, tmp_data_dir):
+    """atomic.py writes to .rcpt-tmp-* before renaming. A backup that caught one
+    mid-write would ship a partial file under a name nothing references."""
+    from backend.atomic import TMP_PREFIX
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 inflight")
+    originals = tmp_data_dir / "storage" / "originals"
+    (originals / f"{TMP_PREFIX}abcd").write_bytes(b"half a file")
+
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    assert not [
+        n for n in _backup_names(backup_dir, "storage", "originals")
+        if n.startswith(TMP_PREFIX)
+    ]
+
+
+def test_scanner_test_set_is_backed_up(db_path, tmp_data_dir):
+    """scanner_test_frames rows come across in the database and point at these
+    files by path, so leaving the frames behind restored a Lab full of dangling
+    references. 14MB of labelled frames that cannot be re-shot."""
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 frames")
+    frames = tmp_data_dir / "scanner_test_set" / "2026-09-01"
+    frames.mkdir(parents=True)
+    (frames / "shot.jpg").write_bytes(b"\xff\xd8 labelled frame")
+
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    assert (
+        open(os.path.join(backup_dir, "scanner_test_set", "2026-09-01", "shot.jpg"), "rb").read()
+        == b"\xff\xd8 labelled frame"
+    )
+
+
+def test_a_missing_scanner_test_set_is_not_an_error(db_path, tmp_data_dir):
+    """A fresh install has never opened the Lab."""
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 nolab")
+    assert not (tmp_data_dir / "scanner_test_set").exists()
+
+    backup_dir, report = build_backup(str(tmp_data_dir))
+
+    assert report["problems"] == []
+    assert not os.path.exists(os.path.join(backup_dir, "scanner_test_set"))
+
+
+def test_the_database_is_snapshotted_before_the_files_are_copied(
+    db_path, tmp_data_dir, monkeypatch
+):
+    """Issue #45 proposed reversing this. It must not be.
+
+    Every ingestion path writes the file before inserting the row, so DB-first
+    means every row in the snapshot already had its bytes on disk. Files-first
+    inverts that into a row whose file was written after the copy walked past
+    its directory -- a dangling row, which is not recoverable.
+
+    Asserted at the CALL SITE: swapping the two statements in build_backup makes
+    this fail, which a docstring or a helper-level test would not.
+    """
+    import backend.backup.runner as runner_mod
+
+    order = []
+    real_snapshot = runner_mod.snapshot_database
+    real_copytree = shutil.copytree
+
+    def tracking_snapshot(*a, **k):
+        order.append("snapshot")
+        return real_snapshot(*a, **k)
+
+    def tracking_copytree(*a, **k):
+        order.append("copytree")
+        return real_copytree(*a, **k)
+
+    monkeypatch.setattr(runner_mod, "snapshot_database", tracking_snapshot)
+    monkeypatch.setattr(shutil, "copytree", tracking_copytree)
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 order")
+    build_backup(str(tmp_data_dir))
+
+    assert "copytree" in order, "the storage tree was never copied"
+    assert order[0] == "snapshot", (
+        f"the database must be snapshotted before the files are copied; got {order}"
+    )
+
+
+def test_a_file_that_vanishes_mid_copy_is_retried(db_path, tmp_data_dir, monkeypatch):
+    """os.replace is not atomic for EXISTENCE on the fuse mount that holds the
+    data directory: measured 118 ENOENT in 46,337 reads racing 3,174 replaces,
+    against 0 in 172,022 on btrfs. copytree turns one such miss into a
+    shutil.Error that fails the ENTIRE backup, so a document being reprocessed
+    during a backup would take the whole run down."""
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 vanish")
+
+    real_copy2 = shutil.copy2
+    failed_once = []
+
+    def vanishing_copy2(src, dst, **kwargs):
+        if not failed_once and str(src).endswith(".pdf"):
+            failed_once.append(src)
+            raise FileNotFoundError(src)
+        return real_copy2(src, dst, **kwargs)
+
+    monkeypatch.setattr(shutil, "copy2", vanishing_copy2)
+
+    backup_dir, report = build_backup(str(tmp_data_dir))
+
+    assert failed_once, "the test never exercised the ENOENT path"
+    assert report["problems"] == [], "the retry should have landed the file"
+
+
+def test_a_symlink_anywhere_in_the_backup_is_fatal(db_path, tmp_data_dir, tmp_path):
+    """The symlink scan used to root at backup_dir/storage, which quietly made
+    'a well-formed backup contains regular files only' true of one tree out of
+    three once scanner_test_set joined the backup -- and restore copytrees that
+    one with symlinks followed too."""
+    from backend.backup.verify import verify_backup, BackupVerificationError
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 symlab")
+    frames = tmp_data_dir / "scanner_test_set" / "2026-09-01"
+    frames.mkdir(parents=True)
+    (frames / "shot.jpg").write_bytes(b"\xff\xd8 frame")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("content from outside the backup")
+    os.symlink(
+        str(outside),
+        os.path.join(backup_dir, "scanner_test_set", "2026-09-01", "sneaky.jpg"),
+    )
+
+    with pytest.raises(BackupVerificationError, match="symlink"):
+        verify_backup(backup_dir)
+
+
+def test_scanner_frames_come_from_the_backup_when_it_has_them(
+    db_path, tmp_data_dir, tmp_path
+):
+    """The other half of BACKUP_THEN_TARGET. A restore reproduces the backup, so
+    once backups carry the frames the backup's copy is authoritative and the
+    target's is replaced -- otherwise a restore quietly becomes a merge again,
+    which is what #50 removed."""
+    from scripts.restore_backup import restore
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 framesrc")
+    backed_up = tmp_data_dir / "scanner_test_set" / "2026-09-01"
+    backed_up.mkdir(parents=True)
+    (backed_up / "from-backup.jpg").write_bytes(b"\xff\xd8 backup copy")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    target = tmp_path / "live"
+    (target / "scanner_test_set" / "2026-01-01").mkdir(parents=True)
+    (target / "receiptory.db").write_bytes(b"older install")
+    (target / "scanner_test_set" / "2026-01-01" / "stale.jpg").write_bytes(b"old")
+
+    restore(backup_dir, str(target), force=True)
+
+    assert (
+        target / "scanner_test_set" / "2026-09-01" / "from-backup.jpg"
+    ).read_bytes() == b"\xff\xd8 backup copy"
+    assert not (target / "scanner_test_set" / "2026-01-01").exists(), (
+        "the backup is authoritative when it has the tree; a restore is a "
+        "replace, not a merge"
+    )
+
+
+def test_restoring_an_old_backup_onto_a_fresh_target_does_not_crash(
+    db_path, tmp_data_dir, tmp_path
+):
+    """Disaster recovery: nothing on the machine, and a backup that predates
+    frames being included. There is nothing to fall back to and that is fine --
+    the restore must complete rather than trip over the missing tree."""
+    from scripts.restore_backup import restore
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 freshdr")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    target = tmp_path / "brand-new"
+
+    restore(backup_dir, str(target), force=True)
+
+    assert (target / "receiptory.db").exists()
+    assert not (target / "scanner_test_set").exists()
+
+
+def test_every_restore_source_is_something_the_backup_writes_or_target_holds(db_path):
+    """The two-tuple shape this replaced promised disjointness that nothing
+    enforced, and could not express 'from the backup, else from the machine'
+    without breaking its own promise. Pin that every FROM_BACKUP entry is
+    actually a tree build_backup writes, so the reader cannot drift from the
+    writer."""
+    from backend.backup.runner import BACKUP_TREES
+    from scripts.restore_backup import RESTORE_SOURCES, FROM_BACKUP, FROM_TARGET
+
+    for tree in BACKUP_TREES:
+        assert tree in RESTORE_SOURCES, f"{tree} is backed up but never restored"
+        assert RESTORE_SOURCES[tree] != FROM_TARGET
+
+    from_backup_only = {n for n, p in RESTORE_SOURCES.items() if p == FROM_BACKUP}
+    assert from_backup_only <= set(BACKUP_TREES), (
+        "a FROM_BACKUP entry that build_backup never writes would restore as "
+        "silently absent"
+    )
+
+
+# --- issue #45: rclone.conf is rewritten, not truncated ----------------------
+
+
+def test_rclone_config_is_written_atomically_and_stays_private(tmp_path, monkeypatch):
+    """The file holds OAuth refresh tokens. mkstemp would decide the mode, so it
+    is passed explicitly."""
+    import configparser
+    from backend.backup.cloud_auth import _write_rclone_config
+
+    conf = tmp_path / "rclone.conf"
+    # Start at 0644 on purpose. Writing to a path that does not exist lands at
+    # mkstemp's own 0600, so a "== 0o600" assertion on a fresh file is true by
+    # construction and passes even if the mode argument is ignored entirely.
+    # From 0644, only an explicitly requested 0600 can produce 0600 -- the
+    # inherit-from-destination branch would keep 0644.
+    conf.write_text("[stale]\ntype = drive\n")
+    os.chmod(conf, 0o644)
+
+    config = configparser.ConfigParser()
+    config.add_section("receiptory_onedrive")
+    config.set("receiptory_onedrive", "type", "onedrive")
+
+    seen = []
+    real_replace = os.replace
+    monkeypatch.setattr(
+        os, "replace", lambda a, b: (seen.append(a), real_replace(a, b))[1]
+    )
+
+    _write_rclone_config(config, str(conf))
+
+    assert "[receiptory_onedrive]" in conf.read_text()
+    assert stat.S_IMODE(os.stat(conf).st_mode) == 0o600, (
+        "the OAuth token file must be 0600 because the code asked for it"
+    )
+    assert len(seen) == 1 and os.path.basename(seen[0]).startswith(".rcpt-tmp-")
+
+
+def test_a_failed_rclone_config_write_leaves_every_remote_intact(tmp_path, monkeypatch):
+    """open(conf,"w") truncates first, so a crash in that window empties the file
+    and takes every configured remote with it. An OAuth remote heals on the next
+    startup via restore_rclone_config; a hand-added sftp/S3/local remote lives
+    here and nowhere else, because rclone.conf is deliberately not in a backup."""
+    import configparser
+    from backend.backup.cloud_auth import _write_rclone_config
+
+    conf = tmp_path / "rclone.conf"
+    conf.write_text("[my_sftp]\ntype = sftp\nhost = offsite\n")
+
+    config = configparser.ConfigParser()
+    config.add_section("receiptory_gdrive")
+    config.set("receiptory_gdrive", "type", "drive")
+
+    def die(*a, **k):
+        raise OSError("power cut")
+
+    monkeypatch.setattr(os, "replace", die)
+
+    with pytest.raises(OSError):
+        _write_rclone_config(config, str(conf))
+
+    assert conf.read_text() == "[my_sftp]\ntype = sftp\nhost = offsite\n"
+    assert not [n for n in os.listdir(tmp_path) if n.startswith(".rcpt-tmp-")]
+
+
+def test_removing_a_remote_goes_through_the_atomic_writer(db_path, tmp_path, monkeypatch):
+    """Call-site test. Testing the helper alone would pass while the two real
+    writers still used open(conf,"w")."""
+    import backend.backup.cloud_auth as cloud_auth
+
+    init_settings()
+    conf = tmp_path / "rclone.conf"
+    conf.write_text("[receiptory_gdrive]\ntype = drive\n")
+    monkeypatch.setattr(cloud_auth, "rclone_config_path", lambda: str(conf))
+
+    calls = []
+    real = cloud_auth._write_rclone_config
+    monkeypatch.setattr(
+        cloud_auth,
+        "_write_rclone_config",
+        lambda cfg, path: (calls.append(path), real(cfg, path))[1],
+    )
+
+    cloud_auth.remove_rclone_remote("gdrive")
+
+    assert calls == [str(conf)], "remove_rclone_remote bypassed the atomic writer"
+    assert "receiptory_gdrive" not in conf.read_text()
+
+
+# --- issue #45: gaps the second review found ---------------------------------
+
+
+def test_creating_a_remote_goes_through_the_atomic_writer(db_path, tmp_path, monkeypatch):
+    """The mirror of the remove_rclone_remote test, and the more dangerous half:
+    create is the writer that runs while OAuth tokens are being stored, and it
+    is the truncate-then-write window the helper exists to close. Restoring
+    `open(conf_path,"w")` here left the whole suite green."""
+    import backend.backup.cloud_auth as cloud_auth
+
+    init_settings()
+    conf = tmp_path / "rclone.conf"
+    conf.write_text("[my_sftp]\ntype = sftp\nhost = offsite\n")
+    monkeypatch.setattr(cloud_auth, "rclone_config_path", lambda: str(conf))
+
+    calls = []
+    real = cloud_auth._write_rclone_config
+    monkeypatch.setattr(
+        cloud_auth, "_write_rclone_config",
+        lambda cfg, path: (calls.append(path), real(cfg, path))[1],
+    )
+
+    cloud_auth.create_rclone_remote("gdrive", {"access_token": "t", "refresh_token": "r"})
+
+    assert calls == [str(conf)], "create_rclone_remote bypassed the atomic writer"
+    assert "my_sftp" in conf.read_text(), "the hand-added remote was lost"
+    assert "receiptory_gdrive" in conf.read_text()
+
+
+def test_logs_are_backed_up_and_restored(db_path, tmp_data_dir, tmp_path):
+    """The one BACKUP_TREES entry nothing mentioned. `("storage",
+    "scanner_test_set")` left the suite green, and the pinning test iterates
+    BACKUP_TREES so it shrinks silently with it. Losing logs after a restore is
+    discovered only when you go looking for the log of the failure you are
+    investigating."""
+    from scripts.restore_backup import restore
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 logs")
+    (tmp_data_dir / "logs").mkdir(exist_ok=True)
+    (tmp_data_dir / "logs" / "receiptory.log").write_bytes(b"the run that went wrong")
+
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+    assert "receiptory.log" in _backup_names(backup_dir, "logs")
+
+    target = tmp_path / "restored"
+    restore(backup_dir, str(target), force=True)
+    assert (target / "logs" / "receiptory.log").read_bytes() == b"the run that went wrong"
+
+
+def test_every_backed_up_tree_actually_lands_in_the_target(db_path, tmp_data_dir, tmp_path):
+    """Behavioural replacement for a structural test that could not fail.
+
+    The old version asserted `tree in RESTORE_SOURCES` -- but RESTORE_SOURCES is
+    BUILT from BACKUP_TREES by a dict comprehension, so its expectation moved
+    with any edit to either constant. This runs a real restore instead, so a
+    tree added to BACKUP_TREES without restore support fails here.
+    """
+    from scripts.restore_backup import restore
+    from backend.backup.runner import BACKUP_TREES
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 alltrees")
+    for tree in BACKUP_TREES:
+        probe = tmp_data_dir / tree / "probe"
+        probe.mkdir(parents=True, exist_ok=True)
+        (probe / "marker").write_bytes(tree.encode())
+
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+    target = tmp_path / "restored"
+    restore(backup_dir, str(target), force=True)
+
+    for tree in BACKUP_TREES:
+        assert (target / tree / "probe" / "marker").read_bytes() == tree.encode(), (
+            f"{tree} is backed up but never restored"
+        )
+
+
+def test_two_backups_in_the_same_second_get_their_own_directories(db_path, tmp_data_dir):
+    """The name used to be the UTC timestamp to the SECOND, created with
+    exist_ok=True and filled with dirs_exist_ok=True, so two runs inside one
+    second merged into one directory and each inherited the other's files."""
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 twice")
+
+    first, _ = build_backup(str(tmp_data_dir))
+    second, _ = build_backup(str(tmp_data_dir))
+
+    assert first != second
+
+
+def test_a_file_that_stays_gone_fails_the_backup_without_leaking_the_directory(
+    db_path, tmp_data_dir, monkeypatch
+):
+    """The retry-exhausted half. copytree raises shutil.Error at the END of the
+    walk, which used to happen OUTSIDE the cleanup, leaking a partly-assembled
+    ~160MB copy of the storage tree into /tmp once per run for as long as the
+    fault lasted. Also pins the retry at exactly one: a `while True` would keep
+    every other test green and hang a backup forever."""
+    import glob
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 gone")
+
+    real_copy2 = shutil.copy2
+    attempts = []
+
+    def always_gone(src, dst, **kwargs):
+        if str(src).endswith(".pdf"):
+            attempts.append(str(src))
+            raise FileNotFoundError(src)
+        return real_copy2(src, dst, **kwargs)
+
+    monkeypatch.setattr(shutil, "copy2", always_gone)
+    pattern = os.path.join(tempfile.gettempdir(), "receiptory_backup_*")
+    before = set(glob.glob(pattern))
+
+    with pytest.raises(shutil.Error):
+        build_backup(str(tmp_data_dir))
+
+    assert attempts.count(attempts[0]) == 2, "the copy should be attempted exactly twice"
+    assert set(glob.glob(pattern)) == before, "a failed backup leaked its directory"
+
+
+def _tamper_frame_path(backup_dir, frame_path):
+    """Plant a hostile scanner_test_frames row in an assembled backup."""
+    conn = sqlite3.connect(os.path.join(backup_dir, "receiptory.db"))
+    try:
+        conn.execute(
+            "INSERT INTO scanner_test_frames (frame_path, width, height) VALUES (?, 100, 100)",
+            (frame_path,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_a_frame_path_that_escapes_the_data_directory_is_fatal(db_path, tmp_data_dir):
+    """scanner_test_frames.frame_path is the same untrusted-path class as
+    documents.stored_filename, in the table this change gives files to.
+    api/scanner.py FileResponses and os.unlinks whatever it holds, as root."""
+    from backend.backup.verify import verify_backup, BackupVerificationError
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 frameesc")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    # Tamper with the ASSEMBLED backup. That is the real threat: the database a
+    # restore reads is untrusted input, however it got that way.
+    _tamper_frame_path(backup_dir, "/etc/shadow")
+
+    with pytest.raises(BackupVerificationError, match="escape"):
+        verify_backup(backup_dir)
+
+
+def test_a_relative_frame_path_climbing_out_is_also_fatal(db_path, tmp_data_dir):
+    from backend.backup.verify import verify_backup, BackupVerificationError
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 frameclimb")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    _tamper_frame_path(backup_dir, "scanner_test_set/../../etc/passwd")
+
+    with pytest.raises(BackupVerificationError, match="escape"):
+        verify_backup(backup_dir)
+
+
+def test_a_well_formed_frame_path_verifies_clean(db_path, tmp_data_dir):
+    """The guard must not become its own outage: a real row has to pass."""
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 frameok")
+    frames = tmp_data_dir / "scanner_test_set" / "2026-09-01"
+    frames.mkdir(parents=True)
+    (frames / "shot.jpg").write_bytes(b"\xff\xd8 frame")
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO scanner_test_frames (frame_path, width, height)
+               VALUES ('scanner_test_set/2026-09-01/shot.jpg', 100, 100)"""
+        )
+
+    _, report = build_backup(str(tmp_data_dir))
+    assert report["problems"] == []
+
+
+def test_a_backup_with_no_storage_tree_at_all_is_fatal(db_path, tmp_data_dir):
+    """The floor under 'damage'. Without it a run taken while storage/ was
+    unreadable produces a database with no files, uploads as COMPLETED, and
+    apply_retention then purges the good backups standing behind it.
+
+    Deliberately structural, not statistical: 'every document is damaged' would
+    also be true of a one-document install that lost its one file, and failing
+    there is the denial-of-service the two-grade split exists to prevent.
+    """
+    from backend.backup.verify import verify_backup, BackupVerificationError
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 notree")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    shutil.rmtree(os.path.join(backup_dir, "storage"))
+    with pytest.raises(BackupVerificationError, match="did not arrive"):
+        verify_backup(backup_dir)
+
+
+def test_one_damaged_document_on_a_one_document_install_is_still_only_damage(
+    db_path, tmp_data_dir
+):
+    """The floor must not fire here. This is the exact shape that made an
+    earlier version of the floor turn a single lost file into a fatal error."""
+    init_settings()
+    file_hash, _ = _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 onlyone")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    os.unlink(os.path.join(backup_dir, "storage", "originals", f"{file_hash}.pdf"))
+    from backend.backup.verify import verify_backup
+
+    report = verify_backup(backup_dir)
+    assert len(report["problems"]) == 1
+    assert "original missing" in report["problems"][0]

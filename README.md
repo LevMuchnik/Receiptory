@@ -153,7 +153,8 @@ All data lives in `data/` (mounted as a Docker volume) and survives container re
 | `data/receiptory.db` | SQLite database |
 | `data/storage/` | Document files (originals, converted, filed) |
 | `data/logs/` | Application logs |
-| `data/rclone.conf` | Cloud backup credentials (auto-generated) |
+| `data/rclone.conf` | Cloud backup credentials (auto-generated; never in a backup) |
+| `data/scanner_test_set/` | Labelled scanner test frames, referenced by `scanner_test_frames` rows (backed up and restored) |
 
 ---
 
@@ -221,7 +222,16 @@ Set `RECEIPTORY_WATCHED_FOLDER_PATH` to a directory. Files dropped there are aut
 
 ## Cloud Backup
 
-Receiptory backs up to Google Drive and/or OneDrive via OAuth. Both can be active simultaneously. Backups are scheduled via cron and include the database, all document files, the logs, a `metadata.jsonl` export of every document, and a `settings.json` with sensitive values masked. (CSV and Excel are available from Export in the UI; they are not part of a backup.)
+Receiptory backs up to Google Drive and/or OneDrive via OAuth. Both can be active simultaneously. Backups are scheduled via cron and include the database, all document files, the logs, the scanner Lab's labelled test frames, a `metadata.jsonl` export of every document, and a `settings.json` with sensitive values masked. (CSV and Excel are available from Export in the UI; they are not part of a backup.)
+
+**Deliberately excluded**, to keep every copy to what actually has to survive:
+
+| Excluded | Why |
+|---|---|
+| `storage/page_cache/` | Page renders, rebuilt on demand. The largest thing in the tree by far. |
+| `storage/tmp/` | Ingestion scratch. Recreated by every download. |
+| `storage/converted/*_converted.pdf` | Normalize scratch left beside the real `<hash>.pdf`, and only when that file is present and the same size. Conversions regenerate from the original, which is always in the backup. |
+| `data/rclone.conf` | The credentials for the remote the backup is uploaded to. The archive travels unencrypted to that same service, so shipping the keys inside it would defeat the point. |
 
 The database is captured with SQLite's online backup API, so it is a consistent snapshot rather than a file copy, and it needs no `-wal`/`-shm` sidecar to restore.
 
@@ -245,13 +255,21 @@ mv data data.old && mv data.restored data
 uv run python scripts/restore_backup.py /path/to/backup data --force
 ```
 
-The script verifies the backup, assembles the restore in a sibling directory, verifies that too, and only then swaps it into place with two renames. The target is never a mixture of two installs, and the directory it replaces is kept as `<target>.pre-restore-<timestamp>` rather than deleted, so the whole operation is undone by a `mv`. `rclone.conf` and `scanner_test_set/` are carried across from the install being replaced, since neither is in a backup.
+The script verifies the backup, assembles the restore in a sibling directory, verifies that too, and only then swaps it into place with two renames. The target is never a mixture of two installs, and the directory it replaces is kept as `<target>.pre-restore-<timestamp>` rather than deleted, so the whole operation is undone by a `mv`.
+
+Each item states where it comes from, and the script prints which source it used:
+
+| Item | Source |
+|---|---|
+| database, `storage/`, `logs/` | the backup |
+| `scanner_test_set/` | the backup, falling back to the install being replaced — backups made before frames were included have no copy, and the `scanner_test_frames` rows would otherwise restore pointing at nothing |
+| `rclone.conf` | the install being replaced, since it is never in a backup |
 
 **The restored system has no password until you set one.** `auth_password_hash` is stripped from the backup, so on first start it accepts the default `admin` / `admin`. The script says so loudly. Set a real password immediately, or pin `RECEIPTORY_AUTH_PASSWORD` in `.env` before starting it.
 
 Restore to a sibling path if your data directory is a mount point — a mount cannot be renamed, and the script refuses up front rather than failing after the copy.
 
-Not in a backup, so not restored: `rclone.conf` (reconnect the cloud remotes in Administration > Resilience) and `scanner_test_set/`. Anything pinned in `.env` keeps working from `.env`.
+`rclone.conf` is not in a backup, so it is carried over from the install being replaced whenever there is one. A restore onto fresh hardware, or into a fresh directory, has no copy to carry: the Google Drive and OneDrive remotes rebuild themselves from the stored tokens once you reconnect them in Administration > Resilience, but **a remote you added by hand (sftp, S3, a local path) exists only in that file** and then has to be reconfigured from scratch. Anything pinned in `.env` keeps working from `.env`.
 
 ### Google Drive
 

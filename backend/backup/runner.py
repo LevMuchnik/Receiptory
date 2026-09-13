@@ -10,7 +10,48 @@ from datetime import datetime, timezone
 
 from backend.database import get_connection
 from backend.config import get_all_settings, SENSITIVE_KEYS
+from backend.atomic import TMP_PREFIX
 from backend.backup.verify import verify_backup, format_report, schema_version
+
+# The directories a backup contains, relative to data_dir. Defined here because
+# build_backup writes them, and imported by scripts/restore_backup.py so the
+# writer and the reader cannot disagree about what a backup is. It used to be
+# re-declared over there with a comment promising the two "cannot drift apart",
+# which nothing enforced.
+#
+# storage MUST stay first: tests/test_backup.py writes a row during the first
+# copytree call to prove the snapshot is pinned, and that test means the
+# storage tree.
+#
+# scanner_test_set sits at the data_dir root rather than inside storage/. It is
+# here because scanner_test_frames rows (migration 006) come across in the
+# database and point at those files, so leaving the frames behind restored a
+# Lab full of dangling references. 14MB of labelled camera frames that cannot
+# be re-shot, against the 131MB of page cache this change stops shipping.
+BACKUP_TREES = ("storage", "logs", "scanner_test_set")
+
+# Subtrees of storage/ that never need to leave the machine. page_cache is
+# 131MB of 200-DPI PNG re-renders that storage.render_page rebuilds on demand
+# (and recreates the directory itself, so its absence after a restore is not a
+# failure). tmp is ingestion scratch; url_fetcher.fetch_url is the only public
+# entry point that writes there and it mkdirs first, so that directory is also
+# recreated on demand.
+EXCLUDED_STORAGE_DIRS = frozenset({"page_cache", "tmp"})
+
+# normalize.py writes storage/converted/<stem>_converted.pdf as a scratch file,
+# pipeline.py copies it to <hash>.pdf, and nothing ever deletes the scratch --
+# so converted/ is roughly twice the size it needs to be (5.7MB of duplicate
+# here). Dropping the scratch from the backup is lossless because originals/ is
+# in the backup and the conversion regenerates from it, NOT because the two
+# files are equal: measured, 31 of 33 pairs are byte-identical and 2 differ
+# (same size, different bytes -- PDF /CreationDate), because save_converted's
+# existence guard makes <hash>.pdf the OLDEST conversion while the scratch is
+# rewritten on every reprocess. See _paired_scratch for why comparing them
+# would not buy anything.
+_SCRATCH_SUFFIX = "_converted.pdf"
+
+# Pause before retrying a copy that hit ENOENT. See _copy_tolerating_rename.
+_RENAME_RETRY_DELAY_S = 0.05
 
 # Settings rows stripped from the snapshot before it leaves the machine. The
 # backup is uploaded to cloud storage by rclone with no encryption of its own,
@@ -38,62 +79,168 @@ SNAPSHOT_TIMEOUT_S = 120
 SNAPSHOT_PAGE_STEP = 1024
 
 
-def build_backup(data_dir: str) -> str:
+def _paired_scratch(names: list[str]) -> set[str]:
+    """Scratch conversions whose real <hash>.pdf counterpart is present.
+
+    This deliberately does NOT compare the two files. An earlier version
+    dropped the scratch only when the sizes matched, on the theory that a
+    <hash>.pdf left truncated by a crashed copy made the scratch the only
+    intact conversion. That theory is wrong: nothing ever READS
+    converted/<stem>_converted.pdf. get_file_path (storage.py) and serve_page
+    (api/documents.py) both resolve converted/<hash>.pdf and nothing else, so
+    carrying the scratch into the backup rescues nothing -- the restored system
+    still serves the truncated file.
+
+    The exclusion is lossless for a different reason: originals/ is always in
+    the backup and pipeline.py regenerates the conversion from it. Detecting a
+    truncated <hash>.pdf is verification's job, not this function's (issue #51).
+
+    An UNPAIRED scratch file is kept. gmail.py normalizes a system tempfile, so
+    a failure before its unlink leaks converted/tmpXXXXXXXX_converted.pdf --
+    a name nothing will ever match, and not ours to guess about.
+    """
+    present = set(names)
+    return {
+        name
+        for name in names
+        if name.endswith(_SCRATCH_SUFFIX)
+        and name[: -len(_SCRATCH_SUFFIX)] + ".pdf" in present
+    }
+
+
+def _ignore_regenerable(storage_root: str):
+    """copytree ignore callable: drop regenerable, transient and in-flight files.
+
+    Scoped by exact directory rather than by name pattern. shutil.ignore_patterns
+    matches at every level, and a hash-named directory could in principle be
+    called `tmp` -- only the two at the root of storage/ are meant here.
+    """
+    storage_root = os.path.abspath(storage_root)
+    converted_root = os.path.join(storage_root, "converted")
+
+    def _ignore(directory: str, names: list[str]) -> set[str]:
+        # At any depth: a file another thread is writing right now. Excluding
+        # these also keeps a stale one from a SIGKILL out of every future
+        # backup.
+        drop = {n for n in names if n.startswith(TMP_PREFIX)}
+        here = os.path.abspath(directory)
+        if here == storage_root:
+            drop |= EXCLUDED_STORAGE_DIRS.intersection(names)
+        elif here == converted_root:
+            drop |= _paired_scratch(names)
+        return drop
+
+    return _ignore
+
+
+def _copy_tolerating_rename(src: str, dst: str, **kwargs) -> str:
+    """copy2, retried once when the source vanishes mid-walk.
+
+    os.replace is not atomic for EXISTENCE on the fuse mount that holds the
+    data directory. Measured on this install: racing 3,174 replaces against
+    continuous readers gave 118 ENOENT in 46,337 reads and zero torn reads; the
+    same probe on btrfs gave 0 ENOENT in 172,022. So a reader sees complete-old,
+    complete-new, or nothing.
+
+    copytree collects a per-file failure into shutil.Error and raises at the end
+    of the walk, which would fail the ENTIRE backup because one document was
+    being reprocessed while the copy ran. save_original and save_converted have
+    existence guards and never rewrite, and TMP_PREFIX files are excluded before
+    they are reached, so save_filed during a reprocess is the only writer that
+    opens this window. A retry a moment later reads the settled file.
+    """
+    try:
+        return shutil.copy2(src, dst, **kwargs)
+    except FileNotFoundError:
+        time.sleep(_RENAME_RETRY_DELAY_S)
+        logger.warning("Retrying %s: vanished mid-copy (rename window)", src)
+        return shutil.copy2(src, dst, **kwargs)
+
+
+def build_backup(data_dir: str) -> tuple[str, dict]:
     """Assemble a backup. Returns (directory, verification report).
 
     The report carries `problems`: per-document damage that is reported rather
     than raised, so one lost file cannot stop every future backup.
     """
+    # mkdtemp, not a bare timestamp. The name used to be
+    # receiptory_backup_<UTC to the SECOND> created with exist_ok=True, and the
+    # trees are copied with dirs_exist_ok=True -- so two runs in the same second
+    # assembled into the SAME directory and merged, one inheriting the other's
+    # files. mkdtemp also creates at 0700 rather than 0755, which is the right
+    # mode for a directory holding the whole database.
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup_dir = os.path.join(tempfile.gettempdir(), f"receiptory_backup_{timestamp}")
-    os.makedirs(backup_dir, exist_ok=True)
+    backup_dir = tempfile.mkdtemp(prefix=f"receiptory_backup_{timestamp}_")
 
-    # Snapshot SQLite database
+    # Snapshot the database FIRST, then copy the files. This order is
+    # load-bearing and issue #45 proposed reversing it; do not.
+    #
+    # Every ingestion path writes the file before inserting the row
+    # (api/upload.py:53->58, ingestion/telegram.py:122->140,
+    # ingestion/gmail.py:337->360 and :524->537,
+    # ingestion/watched_folder.py:31->36), and pipeline.py calls save_filed
+    # before recording stored_filename. So every row in the snapshot already
+    # had its bytes on disk when the snapshot was taken, and those bytes are
+    # still there when the copy runs. The worst case is a file that arrives
+    # between the two with no row pointing at it: orphan bytes, recoverable by
+    # hand from originals/<hash><ext>.
+    #
+    # Copying files first inverts that into a row in the snapshot whose file
+    # was written after the copy already walked past its directory -- a
+    # dangling row, which is not recoverable and which verify_backup reports as
+    # damage on every backup that overlaps an upload.
     db_path = os.path.join(data_dir, "receiptory.db")
     snapshot_path = os.path.join(backup_dir, "receiptory.db")
-    if os.path.exists(db_path):
-        snapshot_database(db_path, snapshot_path)
 
-    # Copy storage files
-    storage_dir = os.path.join(data_dir, "storage")
-    if os.path.exists(storage_dir):
-        shutil.copytree(storage_dir, os.path.join(backup_dir, "storage"), dirs_exist_ok=True)
-
-    # Copy logs
-    logs_dir = os.path.join(data_dir, "logs")
-    if os.path.exists(logs_dir):
-        shutil.copytree(logs_dir, os.path.join(backup_dir, "logs"), dirs_exist_ok=True)
-
-    # Export JSONL metadata from the snapshot, not the live database. The
-    # snapshot is a pinned instant; the live database keeps moving while the
-    # backup assembles (build_backup runs in an executor while uploads and the
-    # processing queue carry on). Reading the live database here would put two
-    # sources of truth in one backup directory that disagree about the same
-    # documents, with nothing to tell a restorer which one is right.
-    _export_jsonl(
-        os.path.join(backup_dir, "metadata.jsonl"),
-        snapshot_path if os.path.exists(snapshot_path) else None,
-    )
-
-    # Export settings (with sensitive values masked)
-    from backend.config import get_all_settings_masked
-    settings = get_all_settings_masked()
-    with open(os.path.join(backup_dir, "settings.json"), "w") as f:
-        json.dump(settings, f, indent=2, default=str)
-
-    # Prove the artifact restores before anyone is told it exists. rclone
-    # exiting 0 only means bytes moved; it says nothing about whether the
-    # database has tables in it or whether the files its rows point at came
-    # along. Raising here fails the run, so a backup that would not restore is
-    # reported as failed instead of uploaded and discovered years later.
+    # One try around EVERYTHING that writes into backup_dir, not just the
+    # verification. Nothing downstream would ever remove this directory: on any
+    # failure run_backup never reaches its `backup_dir` assignment, so
+    # local_path is never recorded and no retention knows the directory exists.
+    # shutil.copytree in particular accumulates per-file failures and raises
+    # shutil.Error at the END of the walk, so a copy fault used to leak a
+    # partly-assembled copy of the whole storage tree into /tmp -- ~160MB, once
+    # per run, every night, for as long as the fault persisted.
     try:
+        if os.path.exists(db_path):
+            snapshot_database(db_path, snapshot_path)
+
+        ignore = _ignore_regenerable(os.path.join(data_dir, "storage"))
+        for tree in BACKUP_TREES:
+            src = os.path.join(data_dir, tree)
+            if not os.path.exists(src):
+                continue
+            shutil.copytree(
+                src,
+                os.path.join(backup_dir, tree),
+                dirs_exist_ok=True,
+                ignore=ignore,
+                copy_function=_copy_tolerating_rename,
+            )
+
+        # Export JSONL metadata from the snapshot, not the live database. The
+        # snapshot is a pinned instant; the live database keeps moving while the
+        # backup assembles (build_backup runs in an executor while uploads and
+        # the processing queue carry on). Reading the live database here would
+        # put two sources of truth in one backup directory that disagree about
+        # the same documents, with nothing to tell a restorer which is right.
+        _export_jsonl(
+            os.path.join(backup_dir, "metadata.jsonl"),
+            snapshot_path if os.path.exists(snapshot_path) else None,
+        )
+
+        # Export settings (with sensitive values masked)
+        from backend.config import get_all_settings_masked
+        settings = get_all_settings_masked()
+        with open(os.path.join(backup_dir, "settings.json"), "w") as f:
+            json.dump(settings, f, indent=2, default=str)
+
+        # Prove the artifact restores before anyone is told it exists. rclone
+        # exiting 0 only means bytes moved; it says nothing about whether the
+        # database has tables in it or whether the files its rows point at came
+        # along. Raising here fails the run, so a backup that would not restore
+        # is reported as failed instead of uploaded and found years later.
         report = verify_backup(backup_dir)
-    except Exception:
-        # The directory is fully assembled by now -- a copy of the whole storage
-        # tree. Nothing downstream would ever remove it: run_backup never gets
-        # its `backup_dir` assignment, so local_path is never recorded and no
-        # retention knows about it. Leaking ~300MB into /tmp on every failure
-        # would be worst on the path this verification exists to start taking.
+    except BaseException:
         shutil.rmtree(backup_dir, ignore_errors=True)
         raise
 
