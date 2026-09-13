@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from backend.database import get_connection
 from backend.config import get_all_settings, SENSITIVE_KEYS
+from backend.backup.verify import verify_backup, format_report, schema_version
 
 # Settings rows stripped from the snapshot before it leaves the machine. The
 # backup is uploaded to cloud storage by rclone with no encryption of its own,
@@ -38,7 +39,11 @@ SNAPSHOT_PAGE_STEP = 1024
 
 
 def build_backup(data_dir: str) -> str:
-    """Assemble backup contents into a temporary directory. Returns path."""
+    """Assemble a backup. Returns (directory, verification report).
+
+    The report carries `problems`: per-document damage that is reported rather
+    than raised, so one lost file cannot stop every future backup.
+    """
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup_dir = os.path.join(tempfile.gettempdir(), f"receiptory_backup_{timestamp}")
     os.makedirs(backup_dir, exist_ok=True)
@@ -76,16 +81,32 @@ def build_backup(data_dir: str) -> str:
     with open(os.path.join(backup_dir, "settings.json"), "w") as f:
         json.dump(settings, f, indent=2, default=str)
 
-    logger.info(f"Backup assembled at {backup_dir}")
-    return backup_dir
-
-
-def _schema_version(conn: sqlite3.Connection) -> int | None:
-    """MAX(schema_version.version), or None if the table is not there at all."""
+    # Prove the artifact restores before anyone is told it exists. rclone
+    # exiting 0 only means bytes moved; it says nothing about whether the
+    # database has tables in it or whether the files its rows point at came
+    # along. Raising here fails the run, so a backup that would not restore is
+    # reported as failed instead of uploaded and discovered years later.
     try:
-        return conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-    except sqlite3.Error:
-        return None
+        report = verify_backup(backup_dir)
+    except Exception:
+        # The directory is fully assembled by now -- a copy of the whole storage
+        # tree. Nothing downstream would ever remove it: run_backup never gets
+        # its `backup_dir` assignment, so local_path is never recorded and no
+        # retention knows about it. Leaking ~300MB into /tmp on every failure
+        # would be worst on the path this verification exists to start taking.
+        shutil.rmtree(backup_dir, ignore_errors=True)
+        raise
+
+    logger.info(f"Backup verified: {format_report(report)}")
+    if report["problems"]:
+        # Damage is reported, not fatal. The caller records it against the run.
+        logger.error(
+            f"Backup has {len(report['problems'])} damaged document(s): "
+            + "; ".join(report["problems"][:5])
+        )
+
+    logger.info(f"Backup assembled at {backup_dir}")
+    return backup_dir, report
 
 
 def _redact_secrets(conn: sqlite3.Connection) -> None:
@@ -151,8 +172,8 @@ def snapshot_database(db_path: str, dest_path: str) -> None:
         try:
             source.backup(dest, pages=SNAPSHOT_PAGE_STEP, progress=_abort_if_stuck)
             result = dest.execute("PRAGMA integrity_check").fetchone()[0]
-            expected_version = _schema_version(source)
-            actual_version = _schema_version(dest)
+            expected_version = schema_version(source)
+            actual_version = schema_version(dest)
             if result == "ok" and actual_version == expected_version:
                 _redact_secrets(dest)
         finally:

@@ -186,11 +186,20 @@ async def run_backup(data_dir: str, trigger: str = "manual") -> int:
 
     try:
         loop = asyncio.get_event_loop()
-        backup_dir = await loop.run_in_executor(None, build_backup, data_dir)
+        backup_dir, verification = await loop.run_in_executor(None, build_backup, data_dir)
 
         destinations = [d.strip() for d in (destination or "").split(",") if d.strip()]
         uploaded = 0
         errors: list[str] = []
+
+        # Damaged documents do not stop the backup -- 313 intact documents are
+        # worth keeping when the 314th lost its file -- but the owner is told,
+        # through the same channel a failed upload uses.
+        if verification["problems"]:
+            errors.append(
+                f"{len(verification['problems'])} document(s) could not be verified: "
+                + "; ".join(verification["problems"][:3])
+            )
 
         for dest in destinations:
             try:

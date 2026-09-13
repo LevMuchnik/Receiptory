@@ -49,14 +49,12 @@ def test_build_backup_creates_archive(db_path, tmp_data_dir):
     init_settings()
     data_dir = str(tmp_data_dir)
 
-    # Insert a document
+    # A document row plus the files on disk it points at. Rows without files
+    # are rejected by verification now, correctly: such a backup cannot restore.
     with get_connection() as conn:
-        conn.execute(
-            """INSERT INTO documents (original_filename, file_hash, file_size_bytes, status, submission_channel, vendor_name)
-               VALUES ('test.pdf', 'h1', 100, 'processed', 'web_upload', 'Test Vendor')"""
-        )
+        _insert_doc(conn, "archive", "Test Vendor", data_dir=data_dir)
 
-    backup_dir = build_backup(data_dir)
+    backup_dir, _ = build_backup(data_dir)
     assert os.path.exists(os.path.join(backup_dir, "receiptory.db"))
     assert os.path.exists(os.path.join(backup_dir, "metadata.jsonl"))
     assert os.path.exists(os.path.join(backup_dir, "settings.json"))
@@ -94,14 +92,37 @@ def _open_writer(path):
     return writer, holder
 
 
-def _insert_doc(conn, file_hash, vendor="Vendor"):
+def _insert_doc(conn, label, vendor="Vendor", data_dir=None):
+    """Insert a document row. With data_dir, also write the files it points at.
+
+    The hash is derived from the content rather than being the label, because
+    verify_backup checks that originals/<hash> really hashes to <hash> -- a row
+    naming a file that cannot exist is not a fixture, it is a backup that would
+    not restore.
+    """
+    import hashlib
+    body = f"%PDF-1.4 {label}".encode()
+    file_hash = hashlib.sha256(body).hexdigest()
+    stored = f"2026-01-01-{label}.pdf"
+
+    if data_dir:
+        originals = os.path.join(data_dir, "storage", "originals")
+        filed_dir = os.path.join(data_dir, "storage", "filed")
+        os.makedirs(originals, exist_ok=True)
+        os.makedirs(filed_dir, exist_ok=True)
+        with open(os.path.join(originals, f"{file_hash}.pdf"), "wb") as f:
+            f.write(body)
+        with open(os.path.join(filed_dir, stored), "wb") as f:
+            f.write(body)
+
     conn.execute(
         """INSERT INTO documents (original_filename, file_hash, file_size_bytes,
-                                  status, submission_channel, vendor_name)
-           VALUES ('x.pdf', ?, 10, 'processed', 'web_upload', ?)""",
-        (file_hash, vendor),
+                                  status, submission_channel, vendor_name, stored_filename)
+           VALUES ('x.pdf', ?, ?, 'processed', 'web_upload', ?, ?)""",
+        (file_hash, len(body), vendor, stored if data_dir else None),
     )
     conn.commit()
+    return file_hash
 
 
 def _scalar(path, sql):
@@ -126,9 +147,9 @@ def test_build_backup_snapshots_rows_still_sitting_in_the_wal(db_path, tmp_data_
     init_settings()
     writer, holder = _open_writer(db_path)
     try:
-        _insert_doc(writer, "build-hash", "Build Vendor")
+        build_hash = _insert_doc(writer, "build", "Build Vendor", data_dir=str(tmp_data_dir))
         assert os.path.getsize(db_path + "-wal") > 0
-        backup_dir = build_backup(str(tmp_data_dir))
+        backup_dir, _ = build_backup(str(tmp_data_dir))
     finally:
         writer.close()
         holder.close()
@@ -136,7 +157,7 @@ def test_build_backup_snapshots_rows_still_sitting_in_the_wal(db_path, tmp_data_
     copied = os.path.join(backup_dir, "receiptory.db")
     assert not os.path.exists(copied + "-wal")
     assert _scalar(
-        copied, "SELECT vendor_name FROM documents WHERE file_hash = 'build-hash'"
+        copied, f"SELECT vendor_name FROM documents WHERE file_hash = '{build_hash}'"
     ) == "Build Vendor"
 
 
@@ -149,7 +170,7 @@ def test_snapshot_captures_rows_still_sitting_in_the_wal(db_path, tmp_data_dir):
     """
     writer, holder = _open_writer(db_path)
     try:
-        _insert_doc(writer, "wal-hash", "WAL Vendor")
+        wal_hash = _insert_doc(writer, "wal", "WAL Vendor")
 
         # Precondition: the data really is in the WAL, not the main file. Without
         # this the test could pass against a checkpointed database and prove nothing.
@@ -162,7 +183,7 @@ def test_snapshot_captures_rows_still_sitting_in_the_wal(db_path, tmp_data_dir):
         holder.close()
 
     assert _scalar(
-        dest, "SELECT vendor_name FROM documents WHERE file_hash = 'wal-hash'"
+        dest, f"SELECT vendor_name FROM documents WHERE file_hash = '{wal_hash}'"
     ) == "WAL Vendor"
 
 
@@ -174,7 +195,7 @@ def test_snapshot_is_standalone_without_sidecar_files(db_path, tmp_data_dir):
     """
     writer, holder = _open_writer(db_path)
     try:
-        _insert_doc(writer, "side-hash")
+        side_hash = _insert_doc(writer, "side")
         dest = str(tmp_data_dir / "standalone.db")
         snapshot_database(db_path, dest)
     finally:
@@ -184,7 +205,7 @@ def test_snapshot_is_standalone_without_sidecar_files(db_path, tmp_data_dir):
     assert not os.path.exists(dest + "-wal")
     assert not os.path.exists(dest + "-shm")
     assert _scalar(
-        dest, "SELECT COUNT(*) FROM documents WHERE file_hash = 'side-hash'"
+        dest, f"SELECT COUNT(*) FROM documents WHERE file_hash = '{side_hash}'"
     ) == 1
 
 
@@ -299,7 +320,7 @@ def test_snapshot_waits_out_a_blocking_lock(db_path, tmp_data_dir):
     """
     blocker = sqlite3.connect(db_path, timeout=10)
     blocker.execute("PRAGMA locking_mode=EXCLUSIVE")
-    _insert_doc(blocker, "lock-hash", "Lock Vendor")
+    lock_hash = _insert_doc(blocker, "lock", "Lock Vendor")
 
     dest = str(tmp_data_dir / "contended.db")
     t, result = _run_snapshot_in_thread(db_path, dest)
@@ -311,7 +332,7 @@ def test_snapshot_waits_out_a_blocking_lock(db_path, tmp_data_dir):
     assert not t.is_alive()
     assert result.get("ok") is True, f"snapshot failed under contention: {result.get('error')}"
     assert _scalar(
-        dest, "SELECT COUNT(*) FROM documents WHERE file_hash = 'lock-hash'"
+        dest, f"SELECT COUNT(*) FROM documents WHERE file_hash = '{lock_hash}'"
     ) == 1
 
 
@@ -328,7 +349,7 @@ def test_snapshot_gives_up_on_a_lock_that_is_never_released(db_path, tmp_data_di
 
     blocker = sqlite3.connect(db_path, timeout=10)
     blocker.execute("PRAGMA locking_mode=EXCLUSIVE")
-    _insert_doc(blocker, "stuck-hash", "Stuck Vendor")
+    _insert_doc(blocker, "stuck", "Stuck Vendor")
     try:
         t, result = _run_snapshot_in_thread(db_path, str(tmp_data_dir / "stuck.db"))
         t.join(timeout=30)
@@ -385,21 +406,22 @@ def test_metadata_jsonl_is_exported_from_the_snapshot_not_the_live_db(
     real_copytree = shutil.copytree
 
     written = []
+    during = []
 
     def copytree_then_write(*args, **kwargs):
         # Runs after the snapshot, before the JSONL export. build_backup calls
         # copytree once for storage and once for logs; write on the first only.
         if not written:
             written.append(True)
-            _insert_doc(writer, "during-hash", "During Vendor")
+            during.append(_insert_doc(writer, "during", "During Vendor", data_dir=str(tmp_data_dir)))
         return real_copytree(*args, **kwargs)
 
     # Patches the stdlib symbol for the test; undone at teardown.
     monkeypatch.setattr(shutil, "copytree", copytree_then_write)
 
     try:
-        _insert_doc(writer, "before-hash", "Before Vendor")
-        backup_dir = build_backup(str(tmp_data_dir))
+        before_hash = _insert_doc(writer, "before", "Before Vendor", data_dir=str(tmp_data_dir))
+        backup_dir, _ = build_backup(str(tmp_data_dir))
     finally:
         writer.close()
         holder.close()
@@ -407,11 +429,11 @@ def test_metadata_jsonl_is_exported_from_the_snapshot_not_the_live_db(
     with open(os.path.join(backup_dir, "metadata.jsonl")) as f:
         hashes = {json.loads(line)["file_hash"] for line in f if line.strip()}
 
-    assert "before-hash" in hashes
-    assert "during-hash" not in hashes, "metadata.jsonl read the live DB, not the snapshot"
+    assert before_hash in hashes
+    assert during[0] not in hashes, "metadata.jsonl read the live DB, not the snapshot"
     assert _scalar(
         os.path.join(backup_dir, "receiptory.db"),
-        "SELECT COUNT(*) FROM documents WHERE file_hash = 'during-hash'",
+        f"SELECT COUNT(*) FROM documents WHERE file_hash = '{during[0]}'",
     ) == 0
 
 
@@ -477,7 +499,9 @@ def backup_env(db_path, tmp_data_dir, monkeypatch):
     with open(os.path.join(fake_dir, "receiptory.db"), "wb") as f:
         f.write(b"x" * 2048)
 
-    monkeypatch.setattr("backend.backup.scheduler.build_backup", lambda d: fake_dir)
+    _clean = {"documents": 0, "originals_verified": 0, "filed_verified": 0,
+              "schema_version": 9, "problems": []}
+    monkeypatch.setattr("backend.backup.scheduler.build_backup", lambda d: (fake_dir, _clean))
     monkeypatch.setattr(
         "backend.notifications.notifier.notify",
         lambda event, payload: sent.append((event, payload)),
@@ -1016,3 +1040,421 @@ def test_backup_success_alert_escapes_the_destination():
     for field in ("caption", "html"):
         assert "a&b<c>" not in out[field]
         assert "a&amp;b&lt;c&gt;" in out[field]
+
+
+# --- restore (issue #44) -----------------------------------------------------
+#
+# Nothing ever tried to restore a backup, which is why a database that restored
+# to zero tables shipped green for months. These go through the real
+# build_backup -> restore round trip.
+
+
+def _seed_document(data_dir, file_hash, body=b"%PDF-1.4 fake", vendor="Vendor"):
+    """A document row plus the files on disk it points at, as ingestion does."""
+    originals = os.path.join(data_dir, "storage", "originals")
+    filed_dir = os.path.join(data_dir, "storage", "filed")
+    os.makedirs(originals, exist_ok=True)
+    os.makedirs(filed_dir, exist_ok=True)
+
+    import hashlib
+    real_hash = hashlib.sha256(body).hexdigest() if file_hash is None else file_hash
+    with open(os.path.join(originals, f"{real_hash}.pdf"), "wb") as f:
+        f.write(body)
+    stored = f"2026-01-01-{real_hash[:8]}.pdf"
+    with open(os.path.join(filed_dir, stored), "wb") as f:
+        f.write(body)
+
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO documents (original_filename, file_hash, file_size_bytes,
+                                      status, submission_channel, vendor_name, stored_filename)
+               VALUES ('doc.pdf', ?, ?, 'processed', 'web_upload', ?, ?)""",
+            (real_hash, len(body), vendor, stored),
+        )
+    return real_hash, stored
+
+
+def test_a_backup_restores_into_a_working_data_dir(db_path, tmp_data_dir, tmp_path):
+    """The round trip nobody had ever run."""
+    from scripts.restore_backup import restore
+
+    init_settings()
+    file_hash, stored = _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 restore me")
+
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    target = str(tmp_path / "restored")
+    report = restore(backup_dir, target)
+
+    assert report["documents"] == 1
+    assert report["originals_verified"] == 1
+
+    # The database came back and is queryable standalone.
+    assert _scalar(
+        os.path.join(target, "receiptory.db"),
+        "SELECT vendor_name FROM documents WHERE file_hash = ?" .replace("?", f"'{file_hash}'"),
+    ) == "Vendor"
+    # And the bytes its rows point at came with it.
+    assert os.path.exists(os.path.join(target, "storage", "originals", f"{file_hash}.pdf"))
+    assert os.path.exists(os.path.join(target, "storage", "filed", stored))
+    # No sidecars ride along into the restored directory.
+    assert not os.path.exists(os.path.join(target, "receiptory.db-wal"))
+
+
+def test_restore_refuses_a_non_empty_target_without_force(db_path, tmp_data_dir, tmp_path):
+    """Restoring writes over real documents. The default must not be able to
+    destroy a live install by accident."""
+    from scripts.restore_backup import restore, RestoreRefused
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 a")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    target = tmp_path / "occupied"
+    target.mkdir()
+    (target / "receiptory.db").write_bytes(b"precious")
+
+    with pytest.raises(RestoreRefused, match="refusing to restore"):
+        restore(backup_dir, str(target))
+
+    assert (target / "receiptory.db").read_bytes() == b"precious"
+
+    restore(backup_dir, str(target), force=True)
+    assert (target / "receiptory.db").read_bytes() != b"precious"
+
+
+def test_restore_refuses_a_backup_that_would_not_restore(db_path, tmp_data_dir, tmp_path):
+    """Verification runs before anything is written, so a bad backup cannot
+    half-overwrite a good directory."""
+    from scripts.restore_backup import restore
+    from backend.backup.verify import BackupVerificationError
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 b")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    # A fatal condition: the database has no schema. A merely missing file is
+    # damage now and must not block a restore.
+    os.remove(os.path.join(backup_dir, "receiptory.db"))
+    sqlite3.connect(os.path.join(backup_dir, "receiptory.db")).close()
+
+    target = str(tmp_path / "should_stay_empty")
+    with pytest.raises(BackupVerificationError, match="no schema_version"):
+        restore(backup_dir, target)
+    assert not os.path.exists(os.path.join(target, "receiptory.db"))
+
+
+def test_a_missing_file_is_reported_without_stopping_the_backup(db_path, tmp_data_dir):
+    """A lost file must not become a permanent backup outage.
+
+    Verification used to raise here, which turned one damaged document into
+    zero backups forever -- and api/upload.py can produce an original with no
+    extension at all, so it was reachable from an ordinary upload. 313 intact
+    documents are worth keeping when the 314th lost its file.
+    """
+    init_settings()
+    with get_connection() as conn:
+        file_hash = _insert_doc(conn, "vanish", "Gone Vendor", data_dir=str(tmp_data_dir))
+    os.remove(os.path.join(str(tmp_data_dir), "storage", "originals", f"{file_hash}.pdf"))
+
+    backup_dir, report = build_backup(str(tmp_data_dir))
+
+    assert os.path.exists(os.path.join(backup_dir, "receiptory.db"))
+    assert any("original missing" in p for p in report["problems"])
+
+
+async def test_damaged_documents_reach_the_owner(backup_env, tmp_data_dir, monkeypatch):
+    """Reported, not silent: the damage rides the same channel a failed upload
+    uses, which is on by default."""
+    sent, fake_dir = backup_env
+    set_setting("backup_destination", "")
+    monkeypatch.setattr(
+        "backend.backup.scheduler.build_backup",
+        lambda d: (fake_dir, {"documents": 2, "originals_verified": 1,
+                              "filed_verified": 1, "schema_version": 9,
+                              "problems": ["document 7: original missing"]}),
+    )
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    row = _backup_row(backup_id)
+
+    assert "could not be verified" in row["error"]
+    assert "document 7" in row["error"]
+    assert [e for e, _ in sent] == ["backup_failed"], sent
+
+
+def test_an_original_with_no_extension_is_found(db_path, tmp_data_dir):
+    """api/upload.py's `splitext(filename or ".pdf")` guards a None filename,
+    not a missing extension, so a file uploaded as "receipt" is stored as
+    originals/<hash> with no dot. Globbing "<hash>.*" alone misses it."""
+    import hashlib
+    init_settings()
+    body = b"%PDF-1.4 no extension"
+    file_hash = hashlib.sha256(body).hexdigest()
+    originals = os.path.join(str(tmp_data_dir), "storage", "originals")
+    os.makedirs(originals, exist_ok=True)
+    with open(os.path.join(originals, file_hash), "wb") as f:  # no suffix
+        f.write(body)
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO documents (original_filename, file_hash, file_size_bytes,
+                                      status, submission_channel)
+               VALUES ('receipt', ?, ?, 'processed', 'web_upload')""",
+            (file_hash, len(body)),
+        )
+
+    _, report = build_backup(str(tmp_data_dir))
+    assert report["problems"] == []
+    assert report["originals_verified"] == 1
+
+
+def test_verify_rejects_a_database_whose_paths_escape_the_storage_dir(db_path, tmp_data_dir):
+    """A backup database is untrusted input on the restore path. An absolute
+    stored_filename discards the prefix in os.path.join, and api/export.py joins
+    the same value to build a zip. Verified: without this check a row naming
+    "/etc/hostname" verified clean and counted as a restorable file."""
+    from backend.backup.verify import verify_backup, BackupVerificationError
+
+    init_settings()
+    with get_connection() as conn:
+        _insert_doc(conn, "ok", "Vendor", data_dir=str(tmp_data_dir))
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    conn = sqlite3.connect(os.path.join(backup_dir, "receiptory.db"))
+    conn.execute("UPDATE documents SET stored_filename = '/etc/hostname'")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(BackupVerificationError, match="escape the storage directory"):
+        verify_backup(backup_dir)
+
+
+def test_verify_rejects_a_non_hex_file_hash(db_path, tmp_data_dir):
+    """file_hash is interpolated into a glob pattern; a metacharacter changes
+    which file is matched and read."""
+    from backend.backup.verify import verify_backup, BackupVerificationError
+
+    init_settings()
+    with get_connection() as conn:
+        _insert_doc(conn, "ok", "Vendor", data_dir=str(tmp_data_dir))
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    conn = sqlite3.connect(os.path.join(backup_dir, "receiptory.db"))
+    conn.execute("UPDATE documents SET file_hash = '../../etc/passwd'")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(BackupVerificationError, match="escape the storage directory"):
+        verify_backup(backup_dir)
+
+
+def test_verify_rejects_a_database_with_no_tables(tmp_path):
+    """The exact artifact the old file copy produced: structurally valid,
+    integrity_check says ok, and it restores to nothing."""
+    from backend.backup.verify import verify_backup, BackupVerificationError
+
+    backup_dir = tmp_path / "empty_backup"
+    backup_dir.mkdir()
+    sqlite3.connect(str(backup_dir / "receiptory.db")).close()
+
+    with pytest.raises(BackupVerificationError, match="no schema_version table"):
+        verify_backup(str(backup_dir))
+
+
+def test_verify_catches_a_file_that_does_not_match_its_hash(db_path, tmp_data_dir):
+    """The filename IS the sha256 of the contents, so a file copied while it was
+    still being written is detectable."""
+    from backend.backup.verify import verify_backup
+
+    init_settings()
+    file_hash, _stored = _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 d")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    victim = os.path.join(backup_dir, "storage", "originals", f"{file_hash}.pdf")
+    with open(victim, "wb") as f:
+        f.write(b"truncated")
+
+    report = verify_backup(backup_dir)
+    assert any("does not match its hash" in p for p in report["problems"])
+
+
+def test_the_secret_checklist_does_not_claim_a_key_was_unset_when_it_cannot_tell():
+    """settings.json only covers keys in DEFAULTS. llm_api_keys is DB-only and
+    bypasses get_all_settings, so it never appears there whether or not it was
+    set -- reporting "not set" would tell someone mid-recovery they had no API
+    keys when they did."""
+    from scripts.restore_backup import _secret_state
+
+    saved = {"telegram_bot_token": "ab***yz", "gmail_app_password": ""}
+    assert _secret_state(saved, "telegram_bot_token") == "was set"
+    assert _secret_state(saved, "gmail_app_password") == "not set at backup time"
+    assert "unknown" in _secret_state(saved, "llm_api_keys")
+    assert "unknown" in _secret_state(None, "telegram_bot_token")
+
+
+def test_verify_rejects_a_backup_containing_symlinks(db_path, tmp_data_dir, tmp_path):
+    """shutil.copytree follows symlinks by default, so restoring a directory
+    that acquired one would materialise whatever is on the other end as a real
+    file inside the restored data directory."""
+    from backend.backup.verify import verify_backup, BackupVerificationError
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 sym")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("content from outside the backup")
+    os.symlink(str(outside), os.path.join(backup_dir, "storage", "originals", "sneaky.pdf"))
+
+    with pytest.raises(BackupVerificationError, match="symlink"):
+        verify_backup(backup_dir)
+
+
+# --- gaps the review mutation-proved -----------------------------------------
+
+
+def test_restore_clears_stale_sidecars_before_opening_the_database(
+    db_path, tmp_data_dir, tmp_path, monkeypatch
+):
+    """A stale -wal from the install being overwritten would be replayed into
+    the freshly restored database.
+
+    Asserted from inside a spy on init_db, not afterwards: init_db opens the
+    database and checkpoints the sidecars away on close, so a post-hoc
+    existence check passes even when the removal is deleted. Mutation-proven --
+    dropping the removal loop left the whole file green.
+    """
+    import backend.database as db_mod
+    from scripts.restore_backup import restore
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 sidecar")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    target = tmp_path / "occupied"
+    target.mkdir()
+    (target / "receiptory.db").write_bytes(b"old install")
+    (target / "receiptory.db-wal").write_bytes(b"another install's tail")
+    (target / "receiptory.db-shm").write_bytes(b"stale shm")
+
+    seen = {}
+    real_init = db_mod.init_db
+
+    def spy(path):
+        seen["path"] = path
+        seen["wal"] = os.path.exists(path + "-wal")
+        seen["shm"] = os.path.exists(path + "-shm")
+        return real_init(path)
+
+    monkeypatch.setattr("scripts.restore_backup.init_db", spy)
+    restore(backup_dir, str(target), force=True)
+
+    # Also pins that migrations ran at all: without this the migration step can
+    # be deleted with every test still passing.
+    assert seen["path"] == str(target / "receiptory.db"), "migrations never ran"
+    assert seen["wal"] is False and seen["shm"] is False, "stale sidecar survived"
+
+
+def test_verify_reports_a_missing_filed_copy(db_path, tmp_data_dir):
+    """Half the file checking. Mutation-proven: replacing the whole
+    stored_filename block with `pass` left every test green."""
+    from backend.backup.verify import verify_backup
+
+    init_settings()
+    _file_hash, stored = _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 filed")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    os.remove(os.path.join(backup_dir, "storage", "filed", stored))
+
+    report = verify_backup(backup_dir)
+    assert any("filed copy missing" in p for p in report["problems"])
+    assert report["filed_verified"] == 0
+
+
+def test_an_unfiled_document_does_not_fail_verification(db_path, tmp_data_dir):
+    """A pending row has its original on disk but no stored_filename yet. Every
+    real install has some; if this guard broke, every backup everywhere fails."""
+    from backend.backup.verify import verify_backup
+
+    init_settings()
+    with get_connection() as conn:
+        _insert_doc(conn, "filed-doc", "Filed Vendor", data_dir=str(tmp_data_dir))
+        pending_hash = _insert_doc(conn, "pending-doc", "Pending Vendor")
+
+    # Ingestion writes the original before inserting the row; filing has not run.
+    originals = os.path.join(str(tmp_data_dir), "storage", "originals")
+    with open(os.path.join(originals, f"{pending_hash}.pdf"), "wb") as f:
+        f.write(b"%PDF-1.4 pending-doc")
+
+    _backup_dir, report = build_backup(str(tmp_data_dir))
+    assert report["documents"] == 2
+    assert report["originals_verified"] == 2
+    assert report["filed_verified"] == 1
+    assert report["problems"] == []
+
+
+def test_a_fatal_verification_does_not_leak_the_assembled_backup(db_path, tmp_data_dir, monkeypatch):
+    """The directory holds a full copy of storage/ by then, and nothing
+    downstream ever removes it: run_backup never gets its backup_dir."""
+    from backend.backup.verify import BackupVerificationError
+
+    init_settings()
+    with get_connection() as conn:
+        _insert_doc(conn, "leak", "Vendor", data_dir=str(tmp_data_dir))
+
+    seen = {}
+
+    def fatal(backup_dir):
+        seen["dir"] = backup_dir
+        raise BackupVerificationError("pretend the artifact is unusable")
+
+    monkeypatch.setattr("backend.backup.runner.verify_backup", fatal)
+
+    with pytest.raises(BackupVerificationError):
+        build_backup(str(tmp_data_dir))
+
+    assert not os.path.exists(seen["dir"]), "a failed backup left its directory behind"
+
+
+def test_cli_verify_only_exits_zero_and_writes_nothing(db_path, tmp_data_dir, monkeypatch, capsys):
+    """main() is the entire user-facing entry point of this feature."""
+    import sys as _sys
+    from scripts import restore_backup
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 cli")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    monkeypatch.setattr(_sys, "argv", ["restore_backup.py", "--verify-only", backup_dir])
+    assert restore_backup.main() == 0
+
+    out = capsys.readouterr().out
+    assert json.loads(out[: out.index("}") + 1])["documents"] == 1
+    assert "would restore" in out
+
+
+def test_cli_refuses_a_full_target_with_exit_code_two(db_path, tmp_data_dir, tmp_path, monkeypatch, capsys):
+    """A refusal is a different outcome from a bad backup, and the message an
+    operator reads must not name pytest as the command to run."""
+    import sys as _sys
+    from scripts import restore_backup
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 cli2")
+    backup_dir, _ = build_backup(str(tmp_data_dir))
+
+    target = tmp_path / "occupied"
+    target.mkdir()
+    (target / "receiptory.db").write_bytes(b"precious")
+
+    monkeypatch.setattr(_sys, "argv", ["restore_backup.py", backup_dir, str(target)])
+    assert restore_backup.main() == 2
+
+    err = capsys.readouterr().err
+    assert "refusing to restore" in err
+    assert "Nothing was written." in err
+    # The suggested command must be the script path, not argv[0] (which is the
+    # test runner here, and would print an instruction that does not work).
+    hint = [ln for ln in err.splitlines() if ln.strip().endswith(".restored")]
+    assert hint and hint[0].strip().startswith("scripts/restore_backup.py"), err
+    assert (target / "receiptory.db").read_bytes() == b"precious"
