@@ -16,7 +16,21 @@ router = APIRouter()
 async def trigger_backup(request: Request, username: str = Depends(require_auth)):
     data_dir = request.app.state.data_dir
     backup_id = await run_backup(data_dir, trigger="manual")
-    return {"message": "Backup triggered", "backup_id": backup_id}
+    # run_backup awaits the whole run, so the outcome is known here. Returning a
+    # bare "triggered" told the person who pressed the button that it worked even
+    # when nothing reached the cloud; they would only find out by reading the
+    # history list underneath.
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT status, error FROM backups WHERE id = ?", (backup_id,)
+        ).fetchone()
+    status = row["status"] if row else "unknown"
+    return {
+        "message": "Backup triggered",
+        "backup_id": backup_id,
+        "status": status,
+        "error": row["error"] if row else None,
+    }
 
 
 @router.get("/backup/history")

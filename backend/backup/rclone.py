@@ -17,12 +17,16 @@ def _rclone_env() -> dict:
 def upload_backup(backup_dir: str, destination: str, backup_type: str, backup_date: date) -> None:
     """Upload backup directory to rclone destination."""
     remote_path = f"{destination}/{backup_date.isoformat()}-{backup_type}"
-    cmd = ["rclone", "copy", backup_dir, remote_path, "--progress"]
+    # No --progress: under capture_output nobody watches it, and rclone writes
+    # its progress renderer (with terminal control codes) to stderr. That spew
+    # ends up in the exception, then in backups.error and the failure
+    # notification, where it is worse than useless.
+    cmd = ["rclone", "copy", backup_dir, remote_path, "--stats-log-level", "ERROR"]
 
     logger.info(f"Uploading backup to {remote_path}")
     result = subprocess.run(cmd, capture_output=True, text=True, env=_rclone_env())
     if result.returncode != 0:
-        raise RuntimeError(f"rclone upload failed: {result.stderr}")
+        raise RuntimeError(f"rclone upload failed: {result.stderr.strip()}")
     logger.info("Backup upload complete")
 
     # Sync refreshed tokens back to DB
@@ -30,7 +34,13 @@ def upload_backup(backup_dir: str, destination: str, backup_type: str, backup_da
 
 
 def apply_retention(destination: str, data_dir: str) -> None:
-    """Delete backups that exceed retention policy."""
+    """Delete backups that exceed retention policy.
+
+    Raises RuntimeError if the listing fails or any purge fails. Callers decide
+    whether that is fatal: scheduler.run_backup records it against the run
+    without demoting an upload that already succeeded, because stale copies left
+    on the remote are untidy rather than dangerous.
+    """
     retention_daily = get_setting("backup_retention_daily")
     retention_weekly = get_setting("backup_retention_weekly")
     retention_monthly = get_setting("backup_retention_monthly")
@@ -39,10 +49,15 @@ def apply_retention(destination: str, data_dir: str) -> None:
     cmd = ["rclone", "lsf", destination, "--dirs-only"]
     result = subprocess.run(cmd, capture_output=True, text=True, env=_rclone_env())
     if result.returncode != 0:
-        logger.warning(f"Failed to list backups for retention: {result.stderr}")
-        return
+        # Raise rather than warn-and-return: a silent return means retention
+        # never ran while the run was still recorded as fully healthy, which is
+        # the same silence this module is being fixed for.
+        raise RuntimeError(
+            f"rclone lsf failed for {destination}: {result.stderr.strip()}"
+        )
 
     today = date.today()
+    failures: list[str] = []
     for line in result.stdout.strip().split("\n"):
         if not line:
             continue
@@ -66,11 +81,24 @@ def apply_retention(destination: str, data_dir: str) -> None:
         # quarterly: never auto-delete
 
         if should_delete:
-            logger.info(f"Deleting expired backup: {dirname}")
-            subprocess.run(
+            # Logged as intent, not as fact. The old line said "Deleting" before
+            # the call and was never retracted on failure, so the log claimed a
+            # deletion that had not happened.
+            logger.info(f"Purging expired backup: {dirname}")
+            purge = subprocess.run(
                 ["rclone", "purge", f"{destination}/{dirname}"],
-                capture_output=True, env=_rclone_env(),
+                capture_output=True, text=True, env=_rclone_env(),
             )
+            if purge.returncode != 0:
+                # Collected, not raised here: one unpurgeable directory must not
+                # stop the sweep and leave every later expired backup in place.
+                failures.append(f"{dirname}: {purge.stderr.strip()}")
+                logger.error(f"Purge failed for {dirname}: {purge.stderr.strip()}")
+            else:
+                logger.info(f"Purged expired backup: {dirname}")
+
+    if failures:
+        raise RuntimeError(f"rclone purge failed for {len(failures)}: {'; '.join(failures)}")
 
 
 def _sync_tokens_if_cloud(destination: str) -> None:

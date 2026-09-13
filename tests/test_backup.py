@@ -1,7 +1,10 @@
+import asyncio
+import contextlib
 import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import stat
 import threading
 import time
@@ -11,9 +14,15 @@ from backend.backup.runner import (
     snapshot_database,
     SNAPSHOT_TIMEOUT_S,
 )
-from backend.backup.scheduler import determine_backup_type
+from backend.backup.scheduler import (
+    determine_backup_type,
+    run_backup,
+    run_backup_scheduler,
+    upload_status,
+    reset_stuck_backups,
+)
 from backend.database import get_connection
-from backend.config import init_settings
+from backend.config import init_settings, set_setting
 from datetime import date
 
 
@@ -438,3 +447,572 @@ def test_snapshot_raises_when_the_copy_fails_integrity_check(db_path, tmp_data_d
 
     # The unusable file must not be left sitting in the backup directory.
     assert not os.path.exists(dest)
+
+
+# --- run_backup upload reporting (issue #43) -------------------------------
+#
+# Before this, every upload exception was caught per destination, logged, and
+# then fall-through marked the row 'completed' and fired backup_ok. With
+# notify_*_backup_ok off by default, a backup that reached no cloud at all was
+# not just green in the UI -- it was completely silent.
+
+
+def _backup_row(backup_id):
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT status, error, size_bytes, local_path FROM backups WHERE id = ?",
+            (backup_id,),
+        ).fetchone()
+    return dict(row)
+
+
+@pytest.fixture
+def backup_env(db_path, tmp_data_dir, monkeypatch):
+    """Stub build_backup and capture notifications; no real files, no rclone."""
+    init_settings()
+    sent = []
+
+    fake_dir = str(tmp_data_dir / "assembled")
+    os.makedirs(fake_dir, exist_ok=True)
+    with open(os.path.join(fake_dir, "receiptory.db"), "wb") as f:
+        f.write(b"x" * 2048)
+
+    monkeypatch.setattr("backend.backup.scheduler.build_backup", lambda d: fake_dir)
+    monkeypatch.setattr(
+        "backend.notifications.notifier.notify",
+        lambda event, payload: sent.append((event, payload)),
+    )
+    return sent, fake_dir
+
+
+def test_upload_status_maps_destination_counts():
+    assert upload_status(0, 0) == "completed"   # nothing configured, local by choice
+    assert upload_status(2, 2) == "completed"
+    assert upload_status(2, 1) == "partial"
+    assert upload_status(2, 0) == "failed"
+    assert upload_status(1, 0) == "failed"
+
+
+async def test_backup_that_reached_no_destination_is_not_reported_as_success(
+    backup_env, tmp_data_dir, monkeypatch
+):
+    sent, _ = backup_env
+    set_setting("backup_destination", "gdrive:receipts")
+
+    def boom(*a, **kw):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr("backend.backup.scheduler.upload_backup", boom)
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    row = _backup_row(backup_id)
+
+    assert row["status"] == "failed"
+    assert "connection refused" in row["error"]
+    assert [e for e, _ in sent] == ["backup_failed"], sent
+    assert "gdrive:receipts" in sent[0][1]["error"]
+    assert "no destination accepted the upload" in sent[0][1]["error"]
+
+
+async def test_partial_upload_is_neither_completed_nor_silent(
+    backup_env, tmp_data_dir, monkeypatch
+):
+    sent, _ = backup_env
+    set_setting("backup_destination", "gdrive:receipts, onedrive:receipts")
+
+    def upload(backup_dir, dest, backup_type, backup_date):
+        if dest.startswith("onedrive"):
+            raise RuntimeError("quota exceeded")
+
+    monkeypatch.setattr("backend.backup.scheduler.upload_backup", upload)
+    monkeypatch.setattr("backend.backup.scheduler.apply_retention", lambda *a, **kw: None)
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    row = _backup_row(backup_id)
+
+    assert row["status"] == "partial"
+    assert "onedrive:receipts: quota exceeded" in row["error"]
+    assert "gdrive" not in row["error"]  # the one that worked is not blamed
+    # backup_ok is off by default, so a partial routed there would say nothing.
+    assert [e for e, _ in sent] == ["backup_failed"], sent
+    assert "only 1 of 2" in sent[0][1]["error"]
+
+
+async def test_all_uploads_succeeding_still_reports_completed(
+    backup_env, tmp_data_dir, monkeypatch
+):
+    sent, fake_dir = backup_env
+    set_setting("backup_destination", "gdrive:receipts")
+    monkeypatch.setattr("backend.backup.scheduler.upload_backup", lambda *a, **kw: None)
+    monkeypatch.setattr("backend.backup.scheduler.apply_retention", lambda *a, **kw: None)
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    row = _backup_row(backup_id)
+
+    assert row["status"] == "completed"
+    assert row["error"] is None
+    assert row["local_path"] == fake_dir
+    assert row["size_bytes"] > 0
+    assert [e for e, _ in sent] == ["backup_ok"], sent
+
+
+async def test_no_destination_configured_is_a_completed_local_backup(
+    backup_env, tmp_data_dir
+):
+    sent, _ = backup_env
+    set_setting("backup_destination", "")
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    row = _backup_row(backup_id)
+
+    assert row["status"] == "completed"
+    assert row["error"] is None
+    assert [e for e, _ in sent] == ["backup_ok"], sent
+
+
+async def test_retention_failure_does_not_demote_a_successful_upload(
+    backup_env, tmp_data_dir, monkeypatch
+):
+    """The copy is off-site, which is what matters. Stale remote copies are
+    untidy, not a data risk -- but they are still reported."""
+    sent, _ = backup_env
+    set_setting("backup_destination", "gdrive:receipts")
+    monkeypatch.setattr("backend.backup.scheduler.upload_backup", lambda *a, **kw: None)
+
+    def purge_fails(*a, **kw):
+        raise RuntimeError("rclone purge failed for 2026-01-01-daily")
+
+    monkeypatch.setattr("backend.backup.scheduler.apply_retention", purge_fails)
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    row = _backup_row(backup_id)
+
+    assert row["status"] == "completed"
+    assert "retention" in row["error"]
+    # backup_ok is off by default and its template never renders an error, so a
+    # warning routed there would reach the owner nowhere.
+    assert [e for e, _ in sent] == ["backup_failed"], sent
+    assert "uploaded successfully" in sent[0][1]["error"]
+
+
+async def test_retention_never_runs_for_a_destination_that_failed_to_upload(
+    backup_env, tmp_data_dir, monkeypatch
+):
+    """Retention purges old backups by date. Running it after a failed upload
+    would delete good history and replace it with nothing."""
+    sent, _ = backup_env
+    set_setting("backup_destination", "gdrive:receipts")
+    retention_calls = []
+
+    monkeypatch.setattr(
+        "backend.backup.scheduler.upload_backup",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("network down")),
+    )
+    monkeypatch.setattr(
+        "backend.backup.scheduler.apply_retention",
+        lambda *a, **kw: retention_calls.append(a),
+    )
+
+    await run_backup(str(tmp_data_dir), trigger="scheduled")
+    assert retention_calls == []
+
+
+async def test_a_failure_building_the_backup_still_reports_failed(
+    backup_env, tmp_data_dir, monkeypatch
+):
+    sent, _ = backup_env
+    monkeypatch.setattr(
+        "backend.backup.scheduler.build_backup",
+        lambda d: (_ for _ in ()).throw(RuntimeError("snapshot integrity check failed")),
+    )
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    row = _backup_row(backup_id)
+
+    assert row["status"] == "failed"
+    assert "integrity check" in row["error"]
+    assert [e for e, _ in sent] == ["backup_failed"], sent
+
+
+# --- rclone purge return code (issue #43) ----------------------------------
+
+
+def _fake_run(listing, purge_rc, purge_stderr="", calls=None, lsf_rc=0):
+    """Stand in for subprocess.run over the rclone calls apply_retention makes.
+
+    Honours text=True instead of ignoring kwargs, and returns a real
+    CompletedProcess. A fake that swallows kwargs lets text=True be deleted from
+    the production call with every test still green, while the error quietly
+    becomes b'...' in the database and in the failure alert.
+    """
+    def run(cmd, **kwargs):
+        if calls is not None:
+            calls.append(cmd)
+        as_text = kwargs.get("text") is True
+        if cmd[1] == "lsf":
+            return subprocess.CompletedProcess(
+                cmd, lsf_rc,
+                stdout=listing if as_text else listing.encode(),
+                stderr="" if as_text else b"",
+            )
+        return subprocess.CompletedProcess(
+            cmd, purge_rc,
+            stdout="" if as_text else b"",
+            stderr=purge_stderr if as_text else purge_stderr.encode(),
+        )
+
+    return run
+
+
+def test_retention_raises_when_rclone_purge_fails(db_path, monkeypatch):
+    """A purge that silently fails leaves expired backups on the remote forever
+    while the log line above it claims they were deleted."""
+    init_settings()
+    monkeypatch.setattr(
+        "backend.backup.rclone.subprocess.run",
+        _fake_run("2020-01-01-daily/\n", purge_rc=1, purge_stderr="directory not found"),
+    )
+    from backend.backup.rclone import apply_retention
+
+    with pytest.raises(RuntimeError, match="2020-01-01-daily"):
+        apply_retention("gdrive:receipts", "/tmp")
+
+
+def test_retention_purges_only_what_is_past_its_policy(db_path, monkeypatch):
+    """Quarterly is never auto-deleted, and a recent daily is left alone."""
+    init_settings()
+    calls = []
+    listing = "\n".join([
+        "2020-01-01-daily/",       # long expired
+        "2020-01-01-quarterly/",   # never auto-deleted
+        f"{date.today().isoformat()}-daily/",  # today, keep
+        "not-a-backup-dir/",       # unparseable, skip
+    ])
+    monkeypatch.setattr(
+        "backend.backup.rclone.subprocess.run",
+        _fake_run(listing, purge_rc=0, calls=calls),
+    )
+    from backend.backup.rclone import apply_retention
+
+    apply_retention("gdrive:receipts", "/tmp")
+
+    purged = [c[2] for c in calls if c[1] == "purge"]
+    assert purged == ["gdrive:receipts/2020-01-01-daily"]
+
+
+# --- gaps found by the /review of this PR ------------------------------------
+
+
+async def test_every_failed_destination_is_named(backup_env, tmp_data_dir, monkeypatch):
+    """With one error per test, "; ".join(errors) and errors[-1] are
+    indistinguishable -- a mutant reporting only the last failure survives."""
+    sent, _ = backup_env
+    set_setting("backup_destination", "gdrive:receipts, onedrive:receipts")
+
+    def upload(backup_dir, dest, backup_type, backup_date):
+        raise RuntimeError("quota exceeded" if dest.startswith("onedrive") else "connection refused")
+
+    monkeypatch.setattr("backend.backup.scheduler.upload_backup", upload)
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    row = _backup_row(backup_id)
+
+    assert row["status"] == "failed"
+    assert "gdrive:receipts: connection refused" in row["error"]
+    assert "onedrive:receipts: quota exceeded" in row["error"]
+
+
+async def test_a_cancelled_run_does_not_stay_running(backup_env, tmp_data_dir, monkeypatch):
+    """CancelledError is a BaseException, so `except Exception` never sees it.
+    Without its own handler the row sits at 'running' forever after a shutdown
+    or a client disconnect, and the panel renders that as in-progress.
+
+    Cancels the real task: raising CancelledError inside the executor thread
+    does NOT exercise the handler.
+    """
+    release = threading.Event()
+
+    def blocking_build(_data_dir):
+        release.wait(timeout=10)  # hold the await open so there is something to cancel
+        return str(tmp_data_dir / "assembled")
+
+    monkeypatch.setattr("backend.backup.scheduler.build_backup", blocking_build)
+
+    task = asyncio.create_task(run_backup(str(tmp_data_dir), trigger="scheduled"))
+    try:
+        for _ in range(200):  # wait until the row exists and the await is live
+            await asyncio.sleep(0.02)
+            with get_connection() as conn:
+                if conn.execute("SELECT COUNT(*) FROM backups").fetchone()[0]:
+                    break
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+
+    with get_connection() as conn:
+        row = dict(conn.execute(
+            "SELECT status, error, completed_at FROM backups ORDER BY id DESC LIMIT 1"
+        ).fetchone())
+    assert row["status"] == "failed"
+    assert row["completed_at"] is not None
+    assert "cancelled" in row["error"]
+
+
+async def test_the_scheduler_sweeps_interrupted_runs_on_start(db_path, tmp_data_dir):
+    """Through run_backup_scheduler, not by calling the helper: the unit test
+    below passes even with the call removed, leaving the sweep wired to nothing."""
+    init_settings()
+    set_setting("backup_destination", "")  # no destination: the loop just sleeps
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO backups (backup_type, destination, status) VALUES ('daily', 'x:y', 'running')"
+        )
+
+    task = asyncio.create_task(run_backup_scheduler(str(tmp_data_dir)))
+    await asyncio.sleep(0.15)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    with get_connection() as conn:
+        status = conn.execute("SELECT status FROM backups ORDER BY id DESC LIMIT 1").fetchone()[0]
+    assert status == "failed", "the scheduler did not sweep the interrupted run"
+
+
+def test_interrupted_runs_are_swept(db_path):
+    """A process killed mid-backup leaves 'running'. Nothing else resolves it."""
+    init_settings()
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO backups (backup_type, destination, status) VALUES ('daily', 'x:y', 'running')"
+        )
+        conn.execute(
+            "INSERT INTO backups (backup_type, destination, status) VALUES ('daily', 'x:y', 'completed')"
+        )
+
+    assert reset_stuck_backups() == 1
+
+    with get_connection() as conn:
+        rows = [dict(r) for r in conn.execute("SELECT status, error FROM backups ORDER BY id")]
+    assert rows[0]["status"] == "failed"
+    assert "interrupted" in rows[0]["error"]
+    assert rows[1]["status"] == "completed"  # a finished run is left alone
+
+
+async def test_a_retention_failure_reaches_a_channel_that_is_on(
+    backup_env, tmp_data_dir, monkeypatch
+):
+    """backup_ok is off by default and format_backup_ok never renders an error,
+    so a retention failure routed there would be invisible to the owner."""
+    sent, _ = backup_env
+    set_setting("backup_destination", "gdrive:receipts")
+    monkeypatch.setattr("backend.backup.scheduler.upload_backup", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "backend.backup.scheduler.apply_retention",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("purge denied")),
+    )
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+
+    assert _backup_row(backup_id)["status"] == "completed"
+    assert [e for e, _ in sent] == ["backup_failed"], sent
+    assert "uploaded successfully" in sent[0][1]["error"]
+    assert "purge denied" in sent[0][1]["error"]
+
+
+async def test_a_destination_set_to_nothing_usable_is_a_failure(backup_env, tmp_data_dir):
+    """" , " is truthy, so the scheduler's `if not destination` gate lets it run.
+    The owner believes a remote is configured; 'completed' under the
+    local-by-choice rule would be the old lie in a new place."""
+    sent, _ = backup_env
+    set_setting("backup_destination", " , ")
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    row = _backup_row(backup_id)
+
+    assert row["status"] == "failed"
+    assert "no usable remote" in row["error"]
+    assert [e for e, _ in sent] == ["backup_failed"], sent
+
+
+async def test_credentials_in_a_destination_never_reach_the_row_or_the_alert(
+    backup_env, tmp_data_dir, monkeypatch
+):
+    """rclone accepts inline connection strings carrying live secrets, and the
+    destination is interpolated into both the row and the notification."""
+    sent, _ = backup_env
+    secret = "wJalrXUtnFEMI_SUPER_SECRET_KEY"
+    set_setting("backup_destination", f":s3,access_key_id=AKIA,secret_access_key={secret}:bucket")
+    monkeypatch.setattr(
+        "backend.backup.scheduler.upload_backup",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("access denied")),
+    )
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    row = _backup_row(backup_id)
+
+    assert secret not in row["error"]
+    assert "[redacted]" in row["error"]
+    assert secret not in sent[0][1]["error"]
+
+    # The destination column sits beside error and /backup/history returns it
+    # with SELECT *, so redacting only the error text would prove nothing.
+    with get_connection() as conn:
+        stored = conn.execute(
+            "SELECT destination FROM backups WHERE id = ?", (backup_id,)
+        ).fetchone()[0]
+    assert secret not in stored
+    assert "[redacted]" in stored
+
+
+async def test_recorded_errors_are_capped(backup_env, tmp_data_dir, monkeypatch):
+    """rclone stderr can run to kilobytes; the text is persisted, returned for
+    50 rows at a time, and sent to Telegram, which rejects over 4096 chars."""
+    sent, _ = backup_env
+    set_setting("backup_destination", "gdrive:receipts")
+    monkeypatch.setattr(
+        "backend.backup.scheduler.upload_backup",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("x" * 20000)),
+    )
+
+    backup_id = await run_backup(str(tmp_data_dir), trigger="scheduled")
+    assert len(_backup_row(backup_id)["error"]) < 1000
+
+
+def test_failure_alerts_are_on_by_default_and_success_alerts_are_not(db_path):
+    """run_backup routes degraded runs to backup_failed precisely because
+    backup_ok is off. If these defaults flip, that routing is wrong and every
+    other test here still passes."""
+    init_settings()
+    from backend.config import get_setting
+
+    assert get_setting("notify_telegram_backup_failed") is True
+    assert get_setting("notify_email_backup_failed") is True
+    assert get_setting("notify_telegram_backup_ok") is False
+    assert get_setting("notify_email_backup_ok") is False
+
+
+def test_retention_error_is_text_not_bytes(db_path, monkeypatch):
+    """Dropping text=True leaves stderr as bytes, and the error reads b'...' in
+    the database and in the alert."""
+    init_settings()
+    monkeypatch.setattr(
+        "backend.backup.rclone.subprocess.run",
+        _fake_run("2020-01-01-daily/\n", purge_rc=1, purge_stderr="directory not found"),
+    )
+    from backend.backup.rclone import apply_retention
+
+    with pytest.raises(RuntimeError) as exc:
+        apply_retention("gdrive:receipts", "/tmp")
+    assert "b'" not in str(exc.value)
+    assert "directory not found" in str(exc.value)
+
+
+def test_one_unpurgeable_backup_does_not_abandon_the_rest(db_path, monkeypatch):
+    """Raising on the first failure abandoned every later expired directory, so
+    one permanently stuck folder froze retention for the whole remote."""
+    init_settings()
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[1] == "lsf":
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="2020-01-01-daily/\n2020-01-02-daily/\n", stderr="")
+        if cmd[2].endswith("2020-01-01-daily"):
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="locked")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("backend.backup.rclone.subprocess.run", run)
+    from backend.backup.rclone import apply_retention
+
+    with pytest.raises(RuntimeError, match="locked"):
+        apply_retention("gdrive:receipts", "/tmp")
+
+    assert [c[2] for c in calls if c[1] == "purge"] == [
+        "gdrive:receipts/2020-01-01-daily",
+        "gdrive:receipts/2020-01-02-daily",
+    ]
+
+
+def test_retention_raises_when_the_listing_fails(db_path, monkeypatch):
+    """A silent return meant retention never ran while the backup was still
+    recorded as fully healthy -- the same silence one line below it."""
+    init_settings()
+    monkeypatch.setattr(
+        "backend.backup.rclone.subprocess.run",
+        _fake_run("", purge_rc=0, lsf_rc=1),
+    )
+    from backend.backup.rclone import apply_retention
+
+    with pytest.raises(RuntimeError, match="lsf failed"):
+        apply_retention("gdrive:receipts", "/tmp")
+
+
+def test_weekly_and_monthly_retention_windows(db_path, monkeypatch):
+    """The weekly (*7) and monthly (*30) branches were uncovered, so a swapped
+    multiplier would silently purge history early."""
+    init_settings()
+    calls = []
+    today = date.today()
+    old = today.replace(year=today.year - 1)
+    listing = "\n".join([
+        f"{old}-weekly/",
+        f"{old}-monthly/",
+        f"{today.isoformat()}-weekly/",
+        f"{today.isoformat()}-monthly/",
+    ])
+    monkeypatch.setattr(
+        "backend.backup.rclone.subprocess.run",
+        _fake_run(listing, purge_rc=0, calls=calls),
+    )
+    from backend.backup.rclone import apply_retention
+
+    apply_retention("gdrive:receipts", "/tmp")
+
+    purged = sorted(c[2].rsplit("/", 1)[1] for c in calls if c[1] == "purge")
+    assert purged == sorted([f"{old}-monthly", f"{old}-weekly"])
+
+
+# --- backup notification rendering -------------------------------------------
+
+
+def test_backup_failure_alert_survives_rclone_stderr_with_markup():
+    """Both sinks parse HTML (Telegram parse_mode="HTML", the email body is a
+    text/html part) and send_telegram_notification only LOGS a send failure, so
+    bad markup drops the alert silently."""
+    from backend.notifications.templates import format_backup_failed
+
+    stderr = 'Failed to purge: <nil> pointer & "quota" >100% for a<b'
+    out = format_backup_failed({"error": stderr})
+
+    for field in ("caption", "html"):
+        assert "<nil>" not in out[field], f"raw markup reached {field}"
+        assert "&lt;nil&gt;" in out[field]
+        assert "&amp;" in out[field]
+    assert out["caption"].startswith("❌ <b>Backup Failed</b>")
+    assert "<p><b>Error:</b>" in out["html"]
+
+
+def test_backup_failure_alert_is_capped_below_the_telegram_limit():
+    from backend.notifications.templates import format_backup_failed
+
+    out = format_backup_failed({"error": "x" * 9000})
+    assert len(out["caption"]) < 4096
+    assert "[truncated]" in out["caption"]
+
+
+def test_backup_success_alert_escapes_the_destination():
+    """The rclone remote string is owner-configured and reaches the same sinks."""
+    from backend.notifications.templates import format_backup_ok
+
+    out = format_backup_ok({
+        "backup_type": "daily",
+        "size_bytes": 1048576,
+        "destination": "gdrive:a&b<c>",
+    })
+    for field in ("caption", "html"):
+        assert "a&b<c>" not in out[field]
+        assert "a&amp;b&lt;c&gt;" in out[field]
