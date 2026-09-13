@@ -177,7 +177,10 @@ async def run_backup(data_dir: str, trigger: str = "manual") -> int:
     with get_connection() as conn:
         conn.execute(
             "INSERT INTO backups (backup_type, destination, status) VALUES (?, ?, ?)",
-            (backup_type, destination, STATUS_RUNNING),
+            # Redacted here too. Redacting only the error text while storing the
+            # raw setting in the column beside it, which /backup/history returns
+            # with SELECT *, would defeat the point.
+            (backup_type, _safe_destination(destination or ""), STATUS_RUNNING),
         )
         backup_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 

@@ -857,6 +857,15 @@ async def test_credentials_in_a_destination_never_reach_the_row_or_the_alert(
     assert "[redacted]" in row["error"]
     assert secret not in sent[0][1]["error"]
 
+    # The destination column sits beside error and /backup/history returns it
+    # with SELECT *, so redacting only the error text would prove nothing.
+    with get_connection() as conn:
+        stored = conn.execute(
+            "SELECT destination FROM backups WHERE id = ?", (backup_id,)
+        ).fetchone()[0]
+    assert secret not in stored
+    assert "[redacted]" in stored
+
 
 async def test_recorded_errors_are_capped(backup_env, tmp_data_dir, monkeypatch):
     """rclone stderr can run to kilobytes; the text is persisted, returned for
