@@ -18,6 +18,7 @@ backend/                 # FastAPI application
   main.py               # App factory, lifespan, route registration
   config.py             # Settings with env > db > default precedence
   auth.py               # Session-based auth (bcrypt + itsdangerous)
+  atomic.py             # Write-temp-then-rename helpers (see Gotchas: shfs)
   database.py           # SQLite connection, WAL, migration runner
   storage.py            # File I/O, page rendering (PyMuPDF)
   models.py             # Pydantic request/response models

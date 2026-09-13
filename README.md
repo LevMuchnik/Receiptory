@@ -153,7 +153,8 @@ All data lives in `data/` (mounted as a Docker volume) and survives container re
 | `data/receiptory.db` | SQLite database |
 | `data/storage/` | Document files (originals, converted, filed) |
 | `data/logs/` | Application logs |
-| `data/rclone.conf` | Cloud backup credentials (auto-generated) |
+| `data/rclone.conf` | Cloud backup credentials (auto-generated; never in a backup) |
+| `data/scanner_test_set/` | Labelled scanner test frames, referenced by `scanner_test_frames` rows (backed up and restored) |
 
 ---
 
@@ -268,7 +269,7 @@ Each item states where it comes from, and the script prints which source it used
 
 Restore to a sibling path if your data directory is a mount point — a mount cannot be renamed, and the script refuses up front rather than failing after the copy.
 
-Not in a backup, so not restored: `rclone.conf`. The Google Drive and OneDrive remotes rebuild themselves from the stored tokens once you reconnect them in Administration > Resilience, but **a remote you added by hand (sftp, S3, a local path) exists only in that file** and has to be reconfigured from scratch. Anything pinned in `.env` keeps working from `.env`.
+`rclone.conf` is not in a backup, so it is carried over from the install being replaced whenever there is one. A restore onto fresh hardware, or into a fresh directory, has no copy to carry: the Google Drive and OneDrive remotes rebuild themselves from the stored tokens once you reconnect them in Administration > Resilience, but **a remote you added by hand (sftp, S3, a local path) exists only in that file** and then has to be reconfigured from scratch. Anything pinned in `.env` keeps working from `.env`.
 
 ### Google Drive
 

@@ -143,4 +143,20 @@ def save_scanner_test_frame(jpeg_bytes: bytes, data_dir: str) -> str:
 
 
 def get_scanner_test_frame_path(rel_path: str, data_dir: str) -> str:
-    return os.path.join(data_dir, rel_path)
+    """Resolve a scanner_test_frames.frame_path, refusing to leave data_dir.
+
+    Defence in depth, and not theoretical. api/scanner.py hands the result of
+    this to FileResponse and to os.unlink, as root. frame_path comes out of the
+    database, and since scanner_test_set became a backup tree a restored
+    database is untrusted input -- os.path.join(data_dir, "/etc/shadow")
+    returns "/etc/shadow", which is an arbitrary read and an arbitrary delete.
+
+    backup/verify.py rejects such a row before a restore ever lands it, but that
+    guard only runs on the restore path. This one runs on every request, so the
+    invariant does not depend on how the row got into the database.
+    """
+    full = os.path.realpath(os.path.join(data_dir, rel_path))
+    root = os.path.realpath(data_dir)
+    if full != root and not full.startswith(root + os.sep):
+        raise ValueError(f"scanner frame path escapes the data directory: {rel_path!r}")
+    return full

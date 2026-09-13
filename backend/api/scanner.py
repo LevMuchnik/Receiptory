@@ -83,7 +83,13 @@ def get_test_frame_image(
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Frame not found")
-    abs_path = get_scanner_test_frame_path(row["frame_path"], data_dir)
+    try:
+        abs_path = get_scanner_test_frame_path(row["frame_path"], data_dir)
+    except ValueError:
+        # A row whose path leaves data_dir. 404 rather than 400: the reason is
+        # not the caller's business, and saying it confirms what is on disk.
+        logger.warning("Frame %s has a path outside the data directory", frame_id)
+        raise HTTPException(status_code=404, detail="Frame file missing")
     if not os.path.exists(abs_path):
         raise HTTPException(status_code=404, detail="Frame file missing")
     return FileResponse(abs_path, media_type="image/jpeg")
@@ -130,7 +136,16 @@ def delete_test_frame(
         if not row:
             raise HTTPException(status_code=404, detail="Frame not found")
         conn.execute("DELETE FROM scanner_test_frames WHERE id = ?", (frame_id,))
-    abs_path = get_scanner_test_frame_path(row["frame_path"], data_dir)
+    # The row is already gone, so a bad path must not 500 here -- and refusing
+    # to unlink a path that leaves data_dir is the whole point of the guard.
+    try:
+        abs_path = get_scanner_test_frame_path(row["frame_path"], data_dir)
+    except ValueError:
+        logger.warning(
+            "Frame %s had a path outside the data directory; row removed, "
+            "nothing unlinked", frame_id
+        )
+        return {"deleted": frame_id}
     if os.path.exists(abs_path):
         try:
             os.unlink(abs_path)

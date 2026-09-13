@@ -66,6 +66,31 @@ def _is_contained_name(name: str) -> bool:
     return bool(name) and not os.path.isabs(name) and os.path.basename(name) == name
 
 
+def _is_contained_relpath(path: str, root: str) -> bool:
+    """True if `path` is a relative path that stays inside `root`.
+
+    The multi-segment sibling of _is_contained_name, for
+    scanner_test_frames.frame_path. That column stores a path RELATIVE to
+    data_dir (storage.save_scanner_test_frame returns
+    "scanner_test_set/<yyyy-mm-dd>/<ts>-<id>.jpg" so the rows survive a data_dir
+    relocation), which means it is a multi-segment path out of an untrusted
+    database joined straight onto a real directory.
+
+    This matters more since scanner_test_set became a backup tree: those rows
+    now arrive alongside files a restore puts on disk, and api/scanner.py hands
+    the joined result to FileResponse and to os.unlink, as root, through
+    storage.get_scanner_test_frame_path -- which is a bare os.path.join. An
+    absolute frame_path discards the prefix exactly the way stored_filename
+    "/etc/hostname" did before the documents guard existed.
+    """
+    if not path or os.path.isabs(path):
+        return False
+    parts = path.replace(os.sep, "/").split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        return False
+    return len(parts) > 1 and parts[0] == root
+
+
 def schema_version(conn: sqlite3.Connection) -> int | None:
     """MAX(schema_version.version), or None if the table is not there at all."""
     try:
@@ -123,6 +148,16 @@ def verify_backup(backup_dir: str) -> dict:
         rows = conn.execute(
             "SELECT id, file_hash, stored_filename FROM documents"
         ).fetchall()
+
+        # Tolerated, not required: a backup taken before migration 006 has no
+        # such table, and refusing to verify an older artifact would make this
+        # check a denial of service on the restore path it exists to protect.
+        try:
+            frames = conn.execute(
+                "SELECT id, frame_path FROM scanner_test_frames"
+            ).fetchall()
+        except sqlite3.Error:
+            frames = []
     finally:
         conn.close()
 
@@ -157,6 +192,11 @@ def verify_backup(backup_dir: str) -> dict:
         if (r["file_hash"] and not _HASH_RE.fullmatch(r["file_hash"]))
         or (r["stored_filename"] and not _is_contained_name(r["stored_filename"]))
     ]
+    malformed += [
+        f"scanner frame {r['id']}: frame_path"
+        for r in frames
+        if r["frame_path"] and not _is_contained_relpath(r["frame_path"], "scanner_test_set")
+    ]
     if malformed:
         raise BackupVerificationError(
             f"database carries {len(malformed)} row(s) whose paths would escape the "
@@ -187,6 +227,27 @@ def verify_backup(backup_dir: str) -> dict:
                 filed_verified += 1
             else:
                 problems.append(f"document {row['id']}: filed copy missing")
+
+    # A floor under "damage". Per-document damage is reported rather than
+    # raised so one lost file cannot stop every future backup -- but an artifact
+    # where EVERY document lost its file is not a damaged backup, it is a
+    # database with no storage tree. That is exactly what a run taken while
+    # storage/ was unreadable produces, and it is indistinguishable from a good
+    # backup downstream: the run completes, uploads, and
+    # scheduler.apply_retention then purges the good backups standing behind it.
+    # Structural, NOT statistical. "Every document is damaged" is the wrong
+    # test: on an install holding one document, its one lost file would satisfy
+    # it, and a fatal error there is precisely the denial-of-service this
+    # module's two-grade split exists to prevent. The condition that actually
+    # means "the tree did not arrive" is that the directory is not there at all,
+    # which no amount of per-document damage can produce.
+    if any(r["file_hash"] for r in rows) and not os.path.isdir(
+        os.path.join(storage, "originals")
+    ):
+        raise BackupVerificationError(
+            f"{len(rows)} document row(s) but no storage/originals directory at all. "
+            f"The storage tree did not arrive; this is a database, not a backup."
+        )
 
     return {
         "schema_version": version,

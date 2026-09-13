@@ -90,10 +90,11 @@ def _is_occupied(path: str) -> bool:
 def _place(src: str, dst: str) -> None:
     """Copy a file or a whole tree into the staging directory.
 
-    dirs_exist_ok because an entry could be reached by more than one policy in
-    future; without it a second write to the same name dies with FileExistsError
-    halfway through assembly, leaving a traceback and a staging directory rather
-    than a message.
+    dirs_exist_ok is belt and braces, not a live requirement: RESTORE_SOURCES is
+    a dict so each name carries exactly one policy, the placement loop is an
+    if/elif that writes each name at most once, and `staging` was created
+    moments ago. If any of those ever stops holding, merging beats aborting
+    mid-assembly with a traceback and an orphan staging directory.
     """
     if os.path.isdir(src):
         shutil.copytree(src, dst, dirs_exist_ok=True)
@@ -296,22 +297,27 @@ def restore(backup_dir: str, target: str, *, force: bool = False) -> dict:
     # disaster-recovery case -- carried nothing at all. The existence checks
     # below are sufficient on their own: if the target is empty or absent, there
     # is nothing there to read.
+    # Printed BEFORE each copy, not summarised after. Copying the storage tree
+    # is the slowest part of a restore, and a summary printed afterwards means
+    # minutes of silence during a disaster recovery. It also means an entry
+    # found in NEITHER source prints nothing at all -- a backup whose storage/
+    # tree was lost in transit would restore in silence and swap away the only
+    # copy of every document.
     from_backup, from_target = [], []
     for name, policy in RESTORE_SOURCES.items():
         backup_src = os.path.join(backup_dir, name)
         target_src = os.path.join(target, name)
 
         if policy in (FROM_BACKUP, BACKUP_THEN_TARGET) and os.path.exists(backup_src):
+            print(f"  {name}  <- the backup")
             _place(backup_src, os.path.join(staging, name))
             from_backup.append(name)
         elif policy in (FROM_TARGET, BACKUP_THEN_TARGET) and os.path.exists(target_src):
+            print(f"  {name}  <- the current install")
             _place(target_src, os.path.join(staging, name))
             from_target.append(name)
-
-    if from_backup:
-        print(f"  from the backup: {', '.join(sorted(from_backup))}")
-    if from_target:
-        print(f"  from the current install: {', '.join(sorted(from_target))}")
+        else:
+            print(f"  {name}  -- NOT PRESENT in either source")
 
     # Bring an older snapshot forward. A backup taken before a schema change
     # restores at its own version, and the app expects the current one.

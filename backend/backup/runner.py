@@ -42,11 +42,12 @@ EXCLUDED_STORAGE_DIRS = frozenset({"page_cache", "tmp"})
 # pipeline.py copies it to <hash>.pdf, and nothing ever deletes the scratch --
 # so converted/ is roughly twice the size it needs to be (5.7MB of duplicate
 # here). Dropping the scratch from the backup is lossless because originals/ is
-# in the backup and the conversion regenerates from it. It is NOT lossless
-# because the two files are equal: measured, 31 of 33 pairs are byte-identical
-# and 2 differ (same size, different bytes -- PDF /CreationDate), because
-# save_converted's existence guard makes <hash>.pdf the OLDEST conversion while
-# the scratch is rewritten on every reprocess.
+# in the backup and the conversion regenerates from it, NOT because the two
+# files are equal: measured, 31 of 33 pairs are byte-identical and 2 differ
+# (same size, different bytes -- PDF /CreationDate), because save_converted's
+# existence guard makes <hash>.pdf the OLDEST conversion while the scratch is
+# rewritten on every reprocess. See _paired_scratch for why comparing them
+# would not buy anything.
 _SCRATCH_SUFFIX = "_converted.pdf"
 
 # Pause before retrying a copy that hit ENOENT. See _copy_tolerating_rename.
@@ -78,34 +79,33 @@ SNAPSHOT_TIMEOUT_S = 120
 SNAPSHOT_PAGE_STEP = 1024
 
 
-def _paired_scratch(directory: str, names: list[str]) -> set[str]:
-    """Scratch conversions whose real counterpart is present AND the same size.
+def _paired_scratch(names: list[str]) -> set[str]:
+    """Scratch conversions whose real <hash>.pdf counterpart is present.
 
-    The size check is the whole point of doing this per-file rather than by
-    glob. save_converted refuses to overwrite an existing <hash>.pdf, so a
-    <hash>.pdf left truncated by a crashed copy is pinned there permanently,
-    and nothing verifies converted/ yet (issue #51). Dropping the scratch in
-    that state would discard the only intact copy. Same size is a cheap proxy
-    for "both are real conversions", and costs one stat on data copytree is
-    about to read anyway.
+    This deliberately does NOT compare the two files. An earlier version
+    dropped the scratch only when the sizes matched, on the theory that a
+    <hash>.pdf left truncated by a crashed copy made the scratch the only
+    intact conversion. That theory is wrong: nothing ever READS
+    converted/<stem>_converted.pdf. get_file_path (storage.py) and serve_page
+    (api/documents.py) both resolve converted/<hash>.pdf and nothing else, so
+    carrying the scratch into the backup rescues nothing -- the restored system
+    still serves the truncated file.
+
+    The exclusion is lossless for a different reason: originals/ is always in
+    the backup and pipeline.py regenerates the conversion from it. Detecting a
+    truncated <hash>.pdf is verification's job, not this function's (issue #51).
+
+    An UNPAIRED scratch file is kept. gmail.py normalizes a system tempfile, so
+    a failure before its unlink leaks converted/tmpXXXXXXXX_converted.pdf --
+    a name nothing will ever match, and not ours to guess about.
     """
     present = set(names)
-    drop = set()
-    for name in names:
-        if not name.endswith(_SCRATCH_SUFFIX):
-            continue
-        partner = name[: -len(_SCRATCH_SUFFIX)] + ".pdf"
-        if partner not in present:
-            continue
-        try:
-            if os.path.getsize(os.path.join(directory, name)) == os.path.getsize(
-                os.path.join(directory, partner)
-            ):
-                drop.add(name)
-        except OSError:
-            # Something moved under us. Keeping the file is the safe answer.
-            continue
-    return drop
+    return {
+        name
+        for name in names
+        if name.endswith(_SCRATCH_SUFFIX)
+        and name[: -len(_SCRATCH_SUFFIX)] + ".pdf" in present
+    }
 
 
 def _ignore_regenerable(storage_root: str):
@@ -127,7 +127,7 @@ def _ignore_regenerable(storage_root: str):
         if here == storage_root:
             drop |= EXCLUDED_STORAGE_DIRS.intersection(names)
         elif here == converted_root:
-            drop |= _paired_scratch(directory, names)
+            drop |= _paired_scratch(names)
         return drop
 
     return _ignore
@@ -163,9 +163,14 @@ def build_backup(data_dir: str) -> tuple[str, dict]:
     The report carries `problems`: per-document damage that is reported rather
     than raised, so one lost file cannot stop every future backup.
     """
+    # mkdtemp, not a bare timestamp. The name used to be
+    # receiptory_backup_<UTC to the SECOND> created with exist_ok=True, and the
+    # trees are copied with dirs_exist_ok=True -- so two runs in the same second
+    # assembled into the SAME directory and merged, one inheriting the other's
+    # files. mkdtemp also creates at 0700 rather than 0755, which is the right
+    # mode for a directory holding the whole database.
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup_dir = os.path.join(tempfile.gettempdir(), f"receiptory_backup_{timestamp}")
-    os.makedirs(backup_dir, exist_ok=True)
+    backup_dir = tempfile.mkdtemp(prefix=f"receiptory_backup_{timestamp}_")
 
     # Snapshot the database FIRST, then copy the files. This order is
     # load-bearing and issue #45 proposed reversing it; do not.
@@ -186,52 +191,56 @@ def build_backup(data_dir: str) -> tuple[str, dict]:
     # damage on every backup that overlaps an upload.
     db_path = os.path.join(data_dir, "receiptory.db")
     snapshot_path = os.path.join(backup_dir, "receiptory.db")
-    if os.path.exists(db_path):
-        snapshot_database(db_path, snapshot_path)
 
-    ignore = _ignore_regenerable(os.path.join(data_dir, "storage"))
-    for tree in BACKUP_TREES:
-        src = os.path.join(data_dir, tree)
-        if not os.path.exists(src):
-            continue
-        shutil.copytree(
-            src,
-            os.path.join(backup_dir, tree),
-            dirs_exist_ok=True,
-            ignore=ignore,
-            copy_function=_copy_tolerating_rename,
+    # One try around EVERYTHING that writes into backup_dir, not just the
+    # verification. Nothing downstream would ever remove this directory: on any
+    # failure run_backup never reaches its `backup_dir` assignment, so
+    # local_path is never recorded and no retention knows the directory exists.
+    # shutil.copytree in particular accumulates per-file failures and raises
+    # shutil.Error at the END of the walk, so a copy fault used to leak a
+    # partly-assembled copy of the whole storage tree into /tmp -- ~160MB, once
+    # per run, every night, for as long as the fault persisted.
+    try:
+        if os.path.exists(db_path):
+            snapshot_database(db_path, snapshot_path)
+
+        ignore = _ignore_regenerable(os.path.join(data_dir, "storage"))
+        for tree in BACKUP_TREES:
+            src = os.path.join(data_dir, tree)
+            if not os.path.exists(src):
+                continue
+            shutil.copytree(
+                src,
+                os.path.join(backup_dir, tree),
+                dirs_exist_ok=True,
+                ignore=ignore,
+                copy_function=_copy_tolerating_rename,
+            )
+
+        # Export JSONL metadata from the snapshot, not the live database. The
+        # snapshot is a pinned instant; the live database keeps moving while the
+        # backup assembles (build_backup runs in an executor while uploads and
+        # the processing queue carry on). Reading the live database here would
+        # put two sources of truth in one backup directory that disagree about
+        # the same documents, with nothing to tell a restorer which is right.
+        _export_jsonl(
+            os.path.join(backup_dir, "metadata.jsonl"),
+            snapshot_path if os.path.exists(snapshot_path) else None,
         )
 
-    # Export JSONL metadata from the snapshot, not the live database. The
-    # snapshot is a pinned instant; the live database keeps moving while the
-    # backup assembles (build_backup runs in an executor while uploads and the
-    # processing queue carry on). Reading the live database here would put two
-    # sources of truth in one backup directory that disagree about the same
-    # documents, with nothing to tell a restorer which one is right.
-    _export_jsonl(
-        os.path.join(backup_dir, "metadata.jsonl"),
-        snapshot_path if os.path.exists(snapshot_path) else None,
-    )
+        # Export settings (with sensitive values masked)
+        from backend.config import get_all_settings_masked
+        settings = get_all_settings_masked()
+        with open(os.path.join(backup_dir, "settings.json"), "w") as f:
+            json.dump(settings, f, indent=2, default=str)
 
-    # Export settings (with sensitive values masked)
-    from backend.config import get_all_settings_masked
-    settings = get_all_settings_masked()
-    with open(os.path.join(backup_dir, "settings.json"), "w") as f:
-        json.dump(settings, f, indent=2, default=str)
-
-    # Prove the artifact restores before anyone is told it exists. rclone
-    # exiting 0 only means bytes moved; it says nothing about whether the
-    # database has tables in it or whether the files its rows point at came
-    # along. Raising here fails the run, so a backup that would not restore is
-    # reported as failed instead of uploaded and discovered years later.
-    try:
+        # Prove the artifact restores before anyone is told it exists. rclone
+        # exiting 0 only means bytes moved; it says nothing about whether the
+        # database has tables in it or whether the files its rows point at came
+        # along. Raising here fails the run, so a backup that would not restore
+        # is reported as failed instead of uploaded and found years later.
         report = verify_backup(backup_dir)
-    except Exception:
-        # The directory is fully assembled by now -- a copy of the whole storage
-        # tree. Nothing downstream would ever remove it: run_backup never gets
-        # its `backup_dir` assignment, so local_path is never recorded and no
-        # retention knows about it. Leaking ~300MB into /tmp on every failure
-        # would be worst on the path this verification exists to start taking.
+    except BaseException:
         shutil.rmtree(backup_dir, ignore_errors=True)
         raise
 

@@ -170,9 +170,96 @@ def test_atomic_write_bytes_keeps_the_existing_mode_on_a_rewrite(tmp_path):
 
 
 def test_atomic_write_bytes_honours_an_explicit_mode(tmp_path):
+    """0o640, not 0o600 -- mkstemp CREATES the file at 0600, so asserting 0600
+    here is true by construction: the chmod could be skipped entirely and the
+    assertion would still hold. Same trap as the umask default two tests up,
+    and it survived the first mutation battery for exactly that reason."""
+    import backend.atomic as atomic_mod
+
+    assert 0o640 not in (0o600, atomic_mod._DEFAULT_MODE), "pick a mode nothing else produces"
     path = tmp_path / "secret.conf"
-    atomic_write_text(str(path), "token = hunter2\n", mode=0o600)
-    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    atomic_write_text(str(path), "token = hunter2\n", mode=0o640)
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o640
+
+
+def test_an_explicit_mode_beats_the_existing_file_mode(tmp_path):
+    """The mode argument must win over the inherit-from-destination branch."""
+    path = tmp_path / "secret.conf"
+    path.write_bytes(b"old")
+    os.chmod(path, 0o666)
+
+    atomic_write_text(str(path), "token\n", mode=0o640)
+
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o640
+
+
+def test_both_the_file_and_its_directory_are_fsynced(tmp_path, monkeypatch):
+    """Asserts the syscalls, not their absence.
+
+    test_a_directory_fsync_failure_does_not_fail_the_write only proves a FAILING
+    fsync does not raise -- it passes just as happily when nothing is fsynced at
+    all. Both fsyncs could be deleted and every other test stayed green. The
+    file fsync makes the CONTENT durable; only the directory fsync makes the
+    RENAME durable, which is what the crash-safety case for rclone.conf rests on.
+    """
+    import backend.atomic as atomic_mod
+
+    kinds = []
+    real = atomic_mod.os.fsync
+
+    def spy(fd):
+        kinds.append("dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+        return real(fd)
+
+    monkeypatch.setattr(atomic_mod.os, "fsync", spy)
+    atomic_write_bytes(str(tmp_path / "f.bin"), b"payload")
+
+    assert "file" in kinds, "the content was never made durable"
+    assert "dir" in kinds, "the rename was never made durable"
+
+
+def test_atomic_copy_fsyncs_both_as_well(tmp_path, monkeypatch):
+    import backend.atomic as atomic_mod
+
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"payload")
+    kinds = []
+    real = atomic_mod.os.fsync
+    monkeypatch.setattr(
+        atomic_mod.os, "fsync",
+        lambda fd: (kinds.append("dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"), real(fd))[1],
+    )
+
+    atomic_copy(str(src), str(tmp_path / "dest.bin"))
+
+    assert "file" in kinds and "dir" in kinds
+
+
+@pytest.mark.parametrize("boom", [KeyboardInterrupt, __import__("asyncio").CancelledError])
+def test_an_interrupt_does_not_orphan_the_scratch_file(boom, tmp_path, monkeypatch):
+    """`except BaseException` is documented as deliberate but was untested:
+    narrowing both handlers to `except Exception` left every test green, because
+    both cleanup tests raise OSError. The orphan this creates is a .rcpt-tmp-*
+    that the backup ignore rule then hides forever."""
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"payload")
+
+    def die(fsrc, fdst, length=0):
+        raise boom()
+
+    monkeypatch.setattr(shutil, "copyfileobj", die)
+    with pytest.raises(boom):
+        atomic_copy(str(src), str(tmp_path / "dest.bin"))
+    assert _leftovers(tmp_path) == [], "an interrupt left a scratch file behind"
+
+    def die_open(fd, mode="r", *a, **k):
+        os.close(fd)
+        raise boom()
+
+    monkeypatch.setattr(os, "fdopen", die_open)
+    with pytest.raises(boom):
+        atomic_write_bytes(str(tmp_path / "other.bin"), b"x")
+    assert _leftovers(tmp_path) == []
 
 
 def test_atomic_write_bytes_on_a_new_file_matches_a_plain_open(tmp_path):
