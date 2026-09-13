@@ -32,13 +32,27 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend.backup.verify import verify_backup, BackupVerificationError  # noqa: E402
+from backend.backup.verify import (  # noqa: E402
+    verify_backup,
+    format_report,
+    BackupVerificationError,
+)
 from backend.backup.runner import SNAPSHOT_REDACTED_KEYS  # noqa: E402
+from backend.database import init_db  # noqa: E402
 
-# Copied as-is. page_cache is 131MB of regenerable 200-DPI renders and tmp is
-# scratch, so neither is required for a working install; they are restored only
-# if the backup happens to carry them.
-_TREES = ("storage", "logs")
+
+class RestoreRefused(RuntimeError):
+    """The restore declined to run. Raised before anything is written."""
+
+
+class TargetWritten(RuntimeError):
+    """Raised after the target has been modified. The target is NOT usable."""
+
+# The trees build_backup writes, so the two cannot drift apart. Note that
+# page_cache (regenerable page renders) and tmp (ingestion scratch) live INSIDE
+# storage/, so they are carried into the backup and back out again wholesale --
+# excluding them is tracked separately, not done here.
+BACKUP_TREES = ("storage", "logs")
 
 
 def _is_occupied(path: str) -> bool:
@@ -48,23 +62,31 @@ def _is_occupied(path: str) -> bool:
 def restore(backup_dir: str, target: str, *, force: bool = False) -> dict:
     """Rebuild `target` from `backup_dir`. Returns the verification report."""
     if not os.path.isdir(backup_dir):
-        raise SystemExit(f"no such backup directory: {backup_dir}")
+        raise RestoreRefused(f"no such backup directory: {backup_dir}")
 
     print(f"Verifying {backup_dir} before touching anything ...")
     report = verify_backup(backup_dir)
-    print(
-        f"  ok: {report['documents']} documents, "
-        f"{report['originals_verified']} originals hash-checked, "
-        f"{report['filed_verified']} filed, schema {report['schema_version']}"
-    )
+    print(f"  ok: {format_report(report)}")
+    if report["problems"]:
+        print(
+            f"  WARNING: {len(report['problems'])} document(s) are damaged in this "
+            f"backup and will restore incomplete:"
+        )
+        for p in report["problems"][:10]:
+            print(f"    - {p}")
 
     if _is_occupied(target) and not force:
-        raise SystemExit(
+        # A literal path, not sys.argv[0]: restore() is also called in-process,
+        # where argv[0] is pytest, and this is the one message an operator reads
+        # under pressure.
+        raise RestoreRefused(
             f"refusing to restore into non-empty {target}.\n"
             f"Restore beside it and swap, which is reversible:\n"
-            f"  {sys.argv[0]} {backup_dir} {target}.restored\n"
+            f"  scripts/restore_backup.py {backup_dir} {target}.restored\n"
             f"  mv {target} {target}.old && mv {target}.restored {target}\n"
-            f"Or pass --force to overwrite it in place."
+            f"Or pass --force to overwrite it in place. --force MERGES: files the\n"
+            f"backup does not contain are left where they are, and any documents\n"
+            f"ingested since the backup lose their rows."
         )
 
     os.makedirs(target, exist_ok=True)
@@ -79,7 +101,7 @@ def restore(backup_dir: str, target: str, *, force: bool = False) -> dict:
         if os.path.exists(sidecar):
             os.remove(sidecar)
 
-    for tree in _TREES:
+    for tree in BACKUP_TREES:
         src = os.path.join(backup_dir, tree)
         if not os.path.isdir(src):
             continue
@@ -89,18 +111,23 @@ def restore(backup_dir: str, target: str, *, force: bool = False) -> dict:
 
     # Bring an older snapshot forward. A backup taken before a schema change
     # restores at its own version, and the app expects the current one.
+    # NOTE: init_db sets the process-global _db_path in backend.database, so
+    # calling restore() in-process repoints the whole application at the target.
     print("Applying migrations ...")
-    from backend.database import init_db
-
     init_db(db_dst)
 
     print("Verifying the restored directory ...")
-    restored = verify_backup(target)
-    print(
-        f"  ok: {restored['documents']} documents, "
-        f"{restored['originals_verified']} originals hash-checked, "
-        f"{restored['filed_verified']} filed, schema {restored['schema_version']}"
-    )
+    try:
+        restored = verify_backup(target)
+    except BackupVerificationError as e:
+        # Past this point the target HAS been overwritten. Reporting this the
+        # same way as a pre-flight failure would tell an operator mid-recovery
+        # that nothing was written while their data directory is a hybrid.
+        raise TargetWritten(
+            f"{e}\nThe target {target} HAS been written and is NOT usable. "
+            f"Re-run against a good backup with --force."
+        ) from e
+    print(f"  ok: {format_report(restored)}")
     return restored
 
 
@@ -159,17 +186,30 @@ def main() -> int:
         if args.verify_only:
             report = verify_backup(args.backup_dir)
             print(json.dumps(report, indent=2))
-            print("\nThis backup would restore.")
+            if report["problems"]:
+                print(
+                    f"\nThis backup would restore, but {len(report['problems'])} "
+                    f"document(s) are damaged and would come back incomplete."
+                )
+            else:
+                print("\nThis backup would restore.")
             return 0
 
         if not args.target:
             parser.error("target is required unless --verify-only is given")
 
         restore(args.backup_dir, args.target, force=args.force)
+    except TargetWritten as e:
+        print(f"\nRESTORE FAILED AFTER WRITING: {e}", file=sys.stderr)
+        return 1
     except BackupVerificationError as e:
         print(f"\nVERIFICATION FAILED: {e}", file=sys.stderr)
-        print("Nothing was written." if not args.verify_only else "", file=sys.stderr)
+        print("Nothing was written.", file=sys.stderr)
         return 1
+    except RestoreRefused as e:
+        print(f"\n{e}", file=sys.stderr)
+        print("Nothing was written.", file=sys.stderr)
+        return 2
 
     _print_secret_checklist(args.backup_dir)
     print("\nRestore complete.")
