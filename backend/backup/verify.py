@@ -132,9 +132,16 @@ def verify_backup(backup_dir: str) -> dict:
     # symlinks by default (verified: a link in the source is materialised as a
     # real file holding the content it points at), so restoring a directory that
     # somehow acquired one would silently pull in whatever is on the other end.
+    #
+    # Walks the WHOLE backup, not just storage/. This used to root at
+    # backup_dir/storage, which quietly made the promise above true of one tree
+    # out of three once scanner_test_set joined the backup -- and the restore
+    # script copytrees that one with symlinks followed too. Scanning the
+    # directory itself rather than a list of names means a tree added later is
+    # covered without anyone remembering to come back here.
     links = [
         os.path.relpath(os.path.join(root, name), backup_dir)
-        for root, dirs, files in os.walk(storage)
+        for root, dirs, files in os.walk(backup_dir)
         for name in dirs + files
         if os.path.islink(os.path.join(root, name))
     ]

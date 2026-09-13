@@ -39,7 +39,7 @@ from backend.backup.verify import (  # noqa: E402
     format_report,
     BackupVerificationError,
 )
-from backend.backup.runner import SNAPSHOT_REDACTED_KEYS  # noqa: E402
+from backend.backup.runner import SNAPSHOT_REDACTED_KEYS, BACKUP_TREES  # noqa: E402
 from backend.database import init_db  # noqa: E402
 
 
@@ -50,25 +50,55 @@ class RestoreRefused(RuntimeError):
 class TargetWritten(RuntimeError):
     """Raised after the target has been modified. The target is NOT usable."""
 
-# The trees build_backup writes, so the two cannot drift apart. Note that
-# page_cache (regenerable page renders) and tmp (ingestion scratch) live INSIDE
-# storage/, so they are carried into the backup and back out again wholesale --
-# excluding them is tracked separately, not done here.
-BACKUP_TREES = ("storage", "logs")
+# Where each item in a restored data directory comes from.
+#
+# This replaced two tuples (BACKUP_TREES and CARRIED_FROM_TARGET) that could not
+# express what was actually needed. scanner_test_set has to come from the backup
+# when the backup has it and from the target when it does not, which meant
+# putting one name in both tuples -- at which point "these two lists are
+# disjoint" stops being true and "CARRIED_FROM_TARGET names everything that gets
+# carried" stops being true. One table with an explicit policy per entry says
+# the thing directly.
+FROM_BACKUP = "from_backup"          # the backup is authoritative; absent is fine
+FROM_TARGET = "from_target"          # never in a backup, must survive a replace
+BACKUP_THEN_TARGET = "backup_then_target"  # prefer the backup, fall back
 
-# Local state that is deliberately NOT in a backup but must survive a restore.
-# The old merge behaviour left these in place by accident; replacing the target
-# would have taken them away, so they are carried across explicitly.
-#   rclone.conf       cloud credentials. Losing it means the restored system
-#                     stops backing up, right after a disaster recovery.
-#   scanner_test_set  the frames scanner_test_frames rows point at; those rows
-#                     DO come across in the database, so dropping the files
-#                     leaves the Lab full of dangling references.
-CARRIED_FROM_TARGET = ("rclone.conf", "scanner_test_set")
+RESTORE_SOURCES = {
+    # BACKUP_TREES is imported from the writer so the two cannot drift apart.
+    # Anything build_backup starts writing is restored without a second edit.
+    **{tree: FROM_BACKUP for tree in BACKUP_TREES},
+
+    # rclone.conf holds the credentials for the remote the backup is uploaded
+    # to, plus any hand-configured sftp/S3/local remote. It is deliberately NOT
+    # in the backup -- the archive travels unencrypted to the very service
+    # those credentials unlock. So it is carried from the machine instead, and
+    # a restore onto fresh hardware genuinely has to reconfigure it.
+    "rclone.conf": FROM_TARGET,
+}
+
+# scanner_test_set only started being backed up recently, so every backup made
+# before that has no copy of it. Taking it from the backup alone would delete
+# the 57 labelled frames off a machine that still has them, while the
+# scanner_test_frames rows in the restored database go on pointing at them.
+RESTORE_SOURCES["scanner_test_set"] = BACKUP_THEN_TARGET
 
 
 def _is_occupied(path: str) -> bool:
     return os.path.isdir(path) and any(os.scandir(path))
+
+
+def _place(src: str, dst: str) -> None:
+    """Copy a file or a whole tree into the staging directory.
+
+    dirs_exist_ok because an entry could be reached by more than one policy in
+    future; without it a second write to the same name dies with FileExistsError
+    halfway through assembly, leaving a traceback and a staging directory rather
+    than a message.
+    """
+    if os.path.isdir(src):
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+    else:
+        shutil.copy2(src, dst)
 
 
 def _in_use(target: str) -> bool:
@@ -256,34 +286,37 @@ def restore(backup_dir: str, target: str, *, force: bool = False) -> dict:
     # target rather than into it is what removed that hazard.
     shutil.copy2(os.path.join(backup_dir, "receiptory.db"), db_dst)
 
-    for tree in BACKUP_TREES:
-        src = os.path.join(backup_dir, tree)
-        if not os.path.isdir(src):
-            continue
-        print(f"  {tree}/")
-        shutil.copytree(src, os.path.join(staging, tree))
+    # Named entries only, never a blind merge -- merging is what #50 removed.
+    # Each entry states where it comes from, and the script says which source it
+    # actually used, so a restore that silently fell back is visible rather than
+    # discovered later.
+    #
+    # Note there is no `if occupied` gate here. There used to be one around the
+    # carry step, which meant a restore onto a FRESH directory -- the actual
+    # disaster-recovery case -- carried nothing at all. The existence checks
+    # below are sufficient on their own: if the target is empty or absent, there
+    # is nothing there to read.
+    from_backup, from_target = [], []
+    for name, policy in RESTORE_SOURCES.items():
+        backup_src = os.path.join(backup_dir, name)
+        target_src = os.path.join(target, name)
+
+        if policy in (FROM_BACKUP, BACKUP_THEN_TARGET) and os.path.exists(backup_src):
+            _place(backup_src, os.path.join(staging, name))
+            from_backup.append(name)
+        elif policy in (FROM_TARGET, BACKUP_THEN_TARGET) and os.path.exists(target_src):
+            _place(target_src, os.path.join(staging, name))
+            from_target.append(name)
+
+    if from_backup:
+        print(f"  from the backup: {', '.join(sorted(from_backup))}")
+    if from_target:
+        print(f"  from the current install: {', '.join(sorted(from_target))}")
 
     # Bring an older snapshot forward. A backup taken before a schema change
     # restores at its own version, and the app expects the current one.
     # NOTE: init_db sets the process-global _db_path in backend.database, so
     # calling restore() in-process repoints the whole application at the target.
-    # Carry local state the backup never held. Named files only, never a blind
-    # merge -- merging is what this change exists to stop.
-    if occupied:
-        carried = []
-        for name in CARRIED_FROM_TARGET:
-            src = os.path.join(target, name)
-            if not os.path.exists(src):
-                continue
-            dst = os.path.join(staging, name)
-            if os.path.isdir(src):
-                shutil.copytree(src, dst)
-            else:
-                shutil.copy2(src, dst)
-            carried.append(name)
-        if carried:
-            print(f"  carried over from the current install: {', '.join(carried)}")
-
     print("Applying migrations ...")
     init_db(db_dst)
 
@@ -389,8 +422,12 @@ def _print_secret_checklist(backup_dir: str) -> None:
         print(f"  - {key}  ({_secret_state(saved, key)})")
     print(
         "\nSet them in Administration > Settings, or in .env for anything you pin\n"
-        "there. Cloud backup also needs its OAuth remotes reconnected, and\n"
-        "rclone.conf is not part of the backup."
+        "there. Cloud backup also needs its OAuth remotes reconnected.\n"
+        "\nrclone.conf is not part of the backup. The Google Drive and OneDrive\n"
+        "remotes rebuild themselves from the stored tokens once you reconnect\n"
+        "them, but a remote you added BY HAND (sftp, S3, a local path) lives in\n"
+        "that file and nowhere else -- if it was not carried over from the\n"
+        "install being replaced, it has to be reconfigured from scratch."
     )
 
 

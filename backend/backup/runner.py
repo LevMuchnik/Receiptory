@@ -10,7 +10,47 @@ from datetime import datetime, timezone
 
 from backend.database import get_connection
 from backend.config import get_all_settings, SENSITIVE_KEYS
+from backend.atomic import TMP_PREFIX
 from backend.backup.verify import verify_backup, format_report, schema_version
+
+# The directories a backup contains, relative to data_dir. Defined here because
+# build_backup writes them, and imported by scripts/restore_backup.py so the
+# writer and the reader cannot disagree about what a backup is. It used to be
+# re-declared over there with a comment promising the two "cannot drift apart",
+# which nothing enforced.
+#
+# storage MUST stay first: tests/test_backup.py writes a row during the first
+# copytree call to prove the snapshot is pinned, and that test means the
+# storage tree.
+#
+# scanner_test_set sits at the data_dir root rather than inside storage/. It is
+# here because scanner_test_frames rows (migration 006) come across in the
+# database and point at those files, so leaving the frames behind restored a
+# Lab full of dangling references. 14MB of labelled camera frames that cannot
+# be re-shot, against the 131MB of page cache this change stops shipping.
+BACKUP_TREES = ("storage", "logs", "scanner_test_set")
+
+# Subtrees of storage/ that never need to leave the machine. page_cache is
+# 131MB of 200-DPI PNG re-renders that storage.render_page rebuilds on demand
+# (and recreates the directory itself, so its absence after a restore is not a
+# failure). tmp is ingestion scratch; url_fetcher.fetch_url is the only public
+# entry point that writes there and it mkdirs first, so that directory is also
+# recreated on demand.
+EXCLUDED_STORAGE_DIRS = frozenset({"page_cache", "tmp"})
+
+# normalize.py writes storage/converted/<stem>_converted.pdf as a scratch file,
+# pipeline.py copies it to <hash>.pdf, and nothing ever deletes the scratch --
+# so converted/ is roughly twice the size it needs to be (5.7MB of duplicate
+# here). Dropping the scratch from the backup is lossless because originals/ is
+# in the backup and the conversion regenerates from it. It is NOT lossless
+# because the two files are equal: measured, 31 of 33 pairs are byte-identical
+# and 2 differ (same size, different bytes -- PDF /CreationDate), because
+# save_converted's existence guard makes <hash>.pdf the OLDEST conversion while
+# the scratch is rewritten on every reprocess.
+_SCRATCH_SUFFIX = "_converted.pdf"
+
+# Pause before retrying a copy that hit ENOENT. See _copy_tolerating_rename.
+_RENAME_RETRY_DELAY_S = 0.05
 
 # Settings rows stripped from the snapshot before it leaves the machine. The
 # backup is uploaded to cloud storage by rclone with no encryption of its own,
@@ -38,7 +78,86 @@ SNAPSHOT_TIMEOUT_S = 120
 SNAPSHOT_PAGE_STEP = 1024
 
 
-def build_backup(data_dir: str) -> str:
+def _paired_scratch(directory: str, names: list[str]) -> set[str]:
+    """Scratch conversions whose real counterpart is present AND the same size.
+
+    The size check is the whole point of doing this per-file rather than by
+    glob. save_converted refuses to overwrite an existing <hash>.pdf, so a
+    <hash>.pdf left truncated by a crashed copy is pinned there permanently,
+    and nothing verifies converted/ yet (issue #51). Dropping the scratch in
+    that state would discard the only intact copy. Same size is a cheap proxy
+    for "both are real conversions", and costs one stat on data copytree is
+    about to read anyway.
+    """
+    present = set(names)
+    drop = set()
+    for name in names:
+        if not name.endswith(_SCRATCH_SUFFIX):
+            continue
+        partner = name[: -len(_SCRATCH_SUFFIX)] + ".pdf"
+        if partner not in present:
+            continue
+        try:
+            if os.path.getsize(os.path.join(directory, name)) == os.path.getsize(
+                os.path.join(directory, partner)
+            ):
+                drop.add(name)
+        except OSError:
+            # Something moved under us. Keeping the file is the safe answer.
+            continue
+    return drop
+
+
+def _ignore_regenerable(storage_root: str):
+    """copytree ignore callable: drop regenerable, transient and in-flight files.
+
+    Scoped by exact directory rather than by name pattern. shutil.ignore_patterns
+    matches at every level, and a hash-named directory could in principle be
+    called `tmp` -- only the two at the root of storage/ are meant here.
+    """
+    storage_root = os.path.abspath(storage_root)
+    converted_root = os.path.join(storage_root, "converted")
+
+    def _ignore(directory: str, names: list[str]) -> set[str]:
+        # At any depth: a file another thread is writing right now. Excluding
+        # these also keeps a stale one from a SIGKILL out of every future
+        # backup.
+        drop = {n for n in names if n.startswith(TMP_PREFIX)}
+        here = os.path.abspath(directory)
+        if here == storage_root:
+            drop |= EXCLUDED_STORAGE_DIRS.intersection(names)
+        elif here == converted_root:
+            drop |= _paired_scratch(directory, names)
+        return drop
+
+    return _ignore
+
+
+def _copy_tolerating_rename(src: str, dst: str, **kwargs) -> str:
+    """copy2, retried once when the source vanishes mid-walk.
+
+    os.replace is not atomic for EXISTENCE on the fuse mount that holds the
+    data directory. Measured on this install: racing 3,174 replaces against
+    continuous readers gave 118 ENOENT in 46,337 reads and zero torn reads; the
+    same probe on btrfs gave 0 ENOENT in 172,022. So a reader sees complete-old,
+    complete-new, or nothing.
+
+    copytree collects a per-file failure into shutil.Error and raises at the end
+    of the walk, which would fail the ENTIRE backup because one document was
+    being reprocessed while the copy ran. save_original and save_converted have
+    existence guards and never rewrite, and TMP_PREFIX files are excluded before
+    they are reached, so save_filed during a reprocess is the only writer that
+    opens this window. A retry a moment later reads the settled file.
+    """
+    try:
+        return shutil.copy2(src, dst, **kwargs)
+    except FileNotFoundError:
+        time.sleep(_RENAME_RETRY_DELAY_S)
+        logger.warning("Retrying %s: vanished mid-copy (rename window)", src)
+        return shutil.copy2(src, dst, **kwargs)
+
+
+def build_backup(data_dir: str) -> tuple[str, dict]:
     """Assemble a backup. Returns (directory, verification report).
 
     The report carries `problems`: per-document damage that is reported rather
@@ -48,21 +167,40 @@ def build_backup(data_dir: str) -> str:
     backup_dir = os.path.join(tempfile.gettempdir(), f"receiptory_backup_{timestamp}")
     os.makedirs(backup_dir, exist_ok=True)
 
-    # Snapshot SQLite database
+    # Snapshot the database FIRST, then copy the files. This order is
+    # load-bearing and issue #45 proposed reversing it; do not.
+    #
+    # Every ingestion path writes the file before inserting the row
+    # (api/upload.py:53->58, ingestion/telegram.py:122->140,
+    # ingestion/gmail.py:337->360 and :524->537,
+    # ingestion/watched_folder.py:31->36), and pipeline.py calls save_filed
+    # before recording stored_filename. So every row in the snapshot already
+    # had its bytes on disk when the snapshot was taken, and those bytes are
+    # still there when the copy runs. The worst case is a file that arrives
+    # between the two with no row pointing at it: orphan bytes, recoverable by
+    # hand from originals/<hash><ext>.
+    #
+    # Copying files first inverts that into a row in the snapshot whose file
+    # was written after the copy already walked past its directory -- a
+    # dangling row, which is not recoverable and which verify_backup reports as
+    # damage on every backup that overlaps an upload.
     db_path = os.path.join(data_dir, "receiptory.db")
     snapshot_path = os.path.join(backup_dir, "receiptory.db")
     if os.path.exists(db_path):
         snapshot_database(db_path, snapshot_path)
 
-    # Copy storage files
-    storage_dir = os.path.join(data_dir, "storage")
-    if os.path.exists(storage_dir):
-        shutil.copytree(storage_dir, os.path.join(backup_dir, "storage"), dirs_exist_ok=True)
-
-    # Copy logs
-    logs_dir = os.path.join(data_dir, "logs")
-    if os.path.exists(logs_dir):
-        shutil.copytree(logs_dir, os.path.join(backup_dir, "logs"), dirs_exist_ok=True)
+    ignore = _ignore_regenerable(os.path.join(data_dir, "storage"))
+    for tree in BACKUP_TREES:
+        src = os.path.join(data_dir, tree)
+        if not os.path.exists(src):
+            continue
+        shutil.copytree(
+            src,
+            os.path.join(backup_dir, tree),
+            dirs_exist_ok=True,
+            ignore=ignore,
+            copy_function=_copy_tolerating_rename,
+        )
 
     # Export JSONL metadata from the snapshot, not the live database. The
     # snapshot is a pinned instant; the live database keeps moving while the
