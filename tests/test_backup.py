@@ -49,12 +49,10 @@ def test_build_backup_creates_archive(db_path, tmp_data_dir):
     init_settings()
     data_dir = str(tmp_data_dir)
 
-    # Insert a document
+    # A document row plus the files on disk it points at. Rows without files
+    # are rejected by verification now, correctly: such a backup cannot restore.
     with get_connection() as conn:
-        conn.execute(
-            """INSERT INTO documents (original_filename, file_hash, file_size_bytes, status, submission_channel, vendor_name)
-               VALUES ('test.pdf', 'h1', 100, 'processed', 'web_upload', 'Test Vendor')"""
-        )
+        _insert_doc(conn, "archive", "Test Vendor", data_dir=data_dir)
 
     backup_dir = build_backup(data_dir)
     assert os.path.exists(os.path.join(backup_dir, "receiptory.db"))
@@ -94,14 +92,37 @@ def _open_writer(path):
     return writer, holder
 
 
-def _insert_doc(conn, file_hash, vendor="Vendor"):
+def _insert_doc(conn, label, vendor="Vendor", data_dir=None):
+    """Insert a document row. With data_dir, also write the files it points at.
+
+    The hash is derived from the content rather than being the label, because
+    verify_backup checks that originals/<hash> really hashes to <hash> -- a row
+    naming a file that cannot exist is not a fixture, it is a backup that would
+    not restore.
+    """
+    import hashlib
+    body = f"%PDF-1.4 {label}".encode()
+    file_hash = hashlib.sha256(body).hexdigest()
+    stored = f"2026-01-01-{label}.pdf"
+
+    if data_dir:
+        originals = os.path.join(data_dir, "storage", "originals")
+        filed_dir = os.path.join(data_dir, "storage", "filed")
+        os.makedirs(originals, exist_ok=True)
+        os.makedirs(filed_dir, exist_ok=True)
+        with open(os.path.join(originals, f"{file_hash}.pdf"), "wb") as f:
+            f.write(body)
+        with open(os.path.join(filed_dir, stored), "wb") as f:
+            f.write(body)
+
     conn.execute(
         """INSERT INTO documents (original_filename, file_hash, file_size_bytes,
-                                  status, submission_channel, vendor_name)
-           VALUES ('x.pdf', ?, 10, 'processed', 'web_upload', ?)""",
-        (file_hash, vendor),
+                                  status, submission_channel, vendor_name, stored_filename)
+           VALUES ('x.pdf', ?, ?, 'processed', 'web_upload', ?, ?)""",
+        (file_hash, len(body), vendor, stored if data_dir else None),
     )
     conn.commit()
+    return file_hash
 
 
 def _scalar(path, sql):
@@ -126,7 +147,7 @@ def test_build_backup_snapshots_rows_still_sitting_in_the_wal(db_path, tmp_data_
     init_settings()
     writer, holder = _open_writer(db_path)
     try:
-        _insert_doc(writer, "build-hash", "Build Vendor")
+        build_hash = _insert_doc(writer, "build", "Build Vendor", data_dir=str(tmp_data_dir))
         assert os.path.getsize(db_path + "-wal") > 0
         backup_dir = build_backup(str(tmp_data_dir))
     finally:
@@ -136,7 +157,7 @@ def test_build_backup_snapshots_rows_still_sitting_in_the_wal(db_path, tmp_data_
     copied = os.path.join(backup_dir, "receiptory.db")
     assert not os.path.exists(copied + "-wal")
     assert _scalar(
-        copied, "SELECT vendor_name FROM documents WHERE file_hash = 'build-hash'"
+        copied, f"SELECT vendor_name FROM documents WHERE file_hash = '{build_hash}'"
     ) == "Build Vendor"
 
 
@@ -149,7 +170,7 @@ def test_snapshot_captures_rows_still_sitting_in_the_wal(db_path, tmp_data_dir):
     """
     writer, holder = _open_writer(db_path)
     try:
-        _insert_doc(writer, "wal-hash", "WAL Vendor")
+        wal_hash = _insert_doc(writer, "wal", "WAL Vendor")
 
         # Precondition: the data really is in the WAL, not the main file. Without
         # this the test could pass against a checkpointed database and prove nothing.
@@ -162,7 +183,7 @@ def test_snapshot_captures_rows_still_sitting_in_the_wal(db_path, tmp_data_dir):
         holder.close()
 
     assert _scalar(
-        dest, "SELECT vendor_name FROM documents WHERE file_hash = 'wal-hash'"
+        dest, f"SELECT vendor_name FROM documents WHERE file_hash = '{wal_hash}'"
     ) == "WAL Vendor"
 
 
@@ -174,7 +195,7 @@ def test_snapshot_is_standalone_without_sidecar_files(db_path, tmp_data_dir):
     """
     writer, holder = _open_writer(db_path)
     try:
-        _insert_doc(writer, "side-hash")
+        side_hash = _insert_doc(writer, "side")
         dest = str(tmp_data_dir / "standalone.db")
         snapshot_database(db_path, dest)
     finally:
@@ -184,7 +205,7 @@ def test_snapshot_is_standalone_without_sidecar_files(db_path, tmp_data_dir):
     assert not os.path.exists(dest + "-wal")
     assert not os.path.exists(dest + "-shm")
     assert _scalar(
-        dest, "SELECT COUNT(*) FROM documents WHERE file_hash = 'side-hash'"
+        dest, f"SELECT COUNT(*) FROM documents WHERE file_hash = '{side_hash}'"
     ) == 1
 
 
@@ -299,7 +320,7 @@ def test_snapshot_waits_out_a_blocking_lock(db_path, tmp_data_dir):
     """
     blocker = sqlite3.connect(db_path, timeout=10)
     blocker.execute("PRAGMA locking_mode=EXCLUSIVE")
-    _insert_doc(blocker, "lock-hash", "Lock Vendor")
+    lock_hash = _insert_doc(blocker, "lock", "Lock Vendor")
 
     dest = str(tmp_data_dir / "contended.db")
     t, result = _run_snapshot_in_thread(db_path, dest)
@@ -311,7 +332,7 @@ def test_snapshot_waits_out_a_blocking_lock(db_path, tmp_data_dir):
     assert not t.is_alive()
     assert result.get("ok") is True, f"snapshot failed under contention: {result.get('error')}"
     assert _scalar(
-        dest, "SELECT COUNT(*) FROM documents WHERE file_hash = 'lock-hash'"
+        dest, f"SELECT COUNT(*) FROM documents WHERE file_hash = '{lock_hash}'"
     ) == 1
 
 
@@ -328,7 +349,7 @@ def test_snapshot_gives_up_on_a_lock_that_is_never_released(db_path, tmp_data_di
 
     blocker = sqlite3.connect(db_path, timeout=10)
     blocker.execute("PRAGMA locking_mode=EXCLUSIVE")
-    _insert_doc(blocker, "stuck-hash", "Stuck Vendor")
+    _insert_doc(blocker, "stuck", "Stuck Vendor")
     try:
         t, result = _run_snapshot_in_thread(db_path, str(tmp_data_dir / "stuck.db"))
         t.join(timeout=30)
@@ -385,20 +406,21 @@ def test_metadata_jsonl_is_exported_from_the_snapshot_not_the_live_db(
     real_copytree = shutil.copytree
 
     written = []
+    during = []
 
     def copytree_then_write(*args, **kwargs):
         # Runs after the snapshot, before the JSONL export. build_backup calls
         # copytree once for storage and once for logs; write on the first only.
         if not written:
             written.append(True)
-            _insert_doc(writer, "during-hash", "During Vendor")
+            during.append(_insert_doc(writer, "during", "During Vendor", data_dir=str(tmp_data_dir)))
         return real_copytree(*args, **kwargs)
 
     # Patches the stdlib symbol for the test; undone at teardown.
     monkeypatch.setattr(shutil, "copytree", copytree_then_write)
 
     try:
-        _insert_doc(writer, "before-hash", "Before Vendor")
+        before_hash = _insert_doc(writer, "before", "Before Vendor", data_dir=str(tmp_data_dir))
         backup_dir = build_backup(str(tmp_data_dir))
     finally:
         writer.close()
@@ -407,11 +429,11 @@ def test_metadata_jsonl_is_exported_from_the_snapshot_not_the_live_db(
     with open(os.path.join(backup_dir, "metadata.jsonl")) as f:
         hashes = {json.loads(line)["file_hash"] for line in f if line.strip()}
 
-    assert "before-hash" in hashes
-    assert "during-hash" not in hashes, "metadata.jsonl read the live DB, not the snapshot"
+    assert before_hash in hashes
+    assert during[0] not in hashes, "metadata.jsonl read the live DB, not the snapshot"
     assert _scalar(
         os.path.join(backup_dir, "receiptory.db"),
-        "SELECT COUNT(*) FROM documents WHERE file_hash = 'during-hash'",
+        f"SELECT COUNT(*) FROM documents WHERE file_hash = '{during[0]}'",
     ) == 0
 
 
@@ -1016,3 +1038,169 @@ def test_backup_success_alert_escapes_the_destination():
     for field in ("caption", "html"):
         assert "a&b<c>" not in out[field]
         assert "a&amp;b&lt;c&gt;" in out[field]
+
+
+# --- restore (issue #44) -----------------------------------------------------
+#
+# Nothing ever tried to restore a backup, which is why a database that restored
+# to zero tables shipped green for months. These go through the real
+# build_backup -> restore round trip.
+
+
+def _seed_document(data_dir, file_hash, body=b"%PDF-1.4 fake", vendor="Vendor"):
+    """A document row plus the files on disk it points at, as ingestion does."""
+    originals = os.path.join(data_dir, "storage", "originals")
+    filed_dir = os.path.join(data_dir, "storage", "filed")
+    os.makedirs(originals, exist_ok=True)
+    os.makedirs(filed_dir, exist_ok=True)
+
+    import hashlib
+    real_hash = hashlib.sha256(body).hexdigest() if file_hash is None else file_hash
+    with open(os.path.join(originals, f"{real_hash}.pdf"), "wb") as f:
+        f.write(body)
+    stored = f"2026-01-01-{real_hash[:8]}.pdf"
+    with open(os.path.join(filed_dir, stored), "wb") as f:
+        f.write(body)
+
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO documents (original_filename, file_hash, file_size_bytes,
+                                      status, submission_channel, vendor_name, stored_filename)
+               VALUES ('doc.pdf', ?, ?, 'processed', 'web_upload', ?, ?)""",
+            (real_hash, len(body), vendor, stored),
+        )
+    return real_hash, stored
+
+
+def test_a_backup_restores_into_a_working_data_dir(db_path, tmp_data_dir, tmp_path):
+    """The round trip nobody had ever run."""
+    from scripts.restore_backup import restore
+
+    init_settings()
+    file_hash, stored = _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 restore me")
+
+    backup_dir = build_backup(str(tmp_data_dir))
+
+    target = str(tmp_path / "restored")
+    report = restore(backup_dir, target)
+
+    assert report["documents"] == 1
+    assert report["originals_verified"] == 1
+
+    # The database came back and is queryable standalone.
+    assert _scalar(
+        os.path.join(target, "receiptory.db"),
+        "SELECT vendor_name FROM documents WHERE file_hash = ?" .replace("?", f"'{file_hash}'"),
+    ) == "Vendor"
+    # And the bytes its rows point at came with it.
+    assert os.path.exists(os.path.join(target, "storage", "originals", f"{file_hash}.pdf"))
+    assert os.path.exists(os.path.join(target, "storage", "filed", stored))
+    # No sidecars ride along into the restored directory.
+    assert not os.path.exists(os.path.join(target, "receiptory.db-wal"))
+
+
+def test_restore_refuses_a_non_empty_target_without_force(db_path, tmp_data_dir, tmp_path):
+    """Restoring writes over real documents. The default must not be able to
+    destroy a live install by accident."""
+    from scripts.restore_backup import restore
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 a")
+    backup_dir = build_backup(str(tmp_data_dir))
+
+    target = tmp_path / "occupied"
+    target.mkdir()
+    (target / "receiptory.db").write_bytes(b"precious")
+
+    with pytest.raises(SystemExit, match="refusing to restore"):
+        restore(backup_dir, str(target))
+
+    assert (target / "receiptory.db").read_bytes() == b"precious"
+
+    restore(backup_dir, str(target), force=True)
+    assert (target / "receiptory.db").read_bytes() != b"precious"
+
+
+def test_restore_refuses_a_backup_that_would_not_restore(db_path, tmp_data_dir, tmp_path):
+    """Verification runs before anything is written, so a bad backup cannot
+    half-overwrite a good directory."""
+    from scripts.restore_backup import restore
+    from backend.backup.verify import BackupVerificationError
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 b")
+    backup_dir = build_backup(str(tmp_data_dir))
+
+    # Lose a file the database still references.
+    originals = os.path.join(backup_dir, "storage", "originals")
+    os.remove(os.path.join(originals, os.listdir(originals)[0]))
+
+    target = str(tmp_path / "should_stay_empty")
+    with pytest.raises(BackupVerificationError, match="referenced file"):
+        restore(backup_dir, target)
+    assert not os.path.exists(os.path.join(target, "receiptory.db"))
+
+
+def test_build_backup_fails_when_a_referenced_file_is_missing(db_path, tmp_data_dir):
+    """Auto-verification: a backup that would not restore is a failed run, not a
+    green one. This is the shape of check that would have caught the WAL bug.
+
+    No monkeypatching -- the file is simply gone from storage while the row that
+    names it is still in the database, which is what a lost or truncated file
+    looks like from the backup's point of view.
+    """
+    from backend.backup.verify import BackupVerificationError
+
+    init_settings()
+    with get_connection() as conn:
+        file_hash = _insert_doc(conn, "vanish", "Gone Vendor", data_dir=str(tmp_data_dir))
+
+    os.remove(os.path.join(str(tmp_data_dir), "storage", "originals", f"{file_hash}.pdf"))
+
+    with pytest.raises(BackupVerificationError, match="referenced file"):
+        build_backup(str(tmp_data_dir))
+
+
+def test_verify_rejects_a_database_with_no_tables(tmp_path):
+    """The exact artifact the old file copy produced: structurally valid,
+    integrity_check says ok, and it restores to nothing."""
+    from backend.backup.verify import verify_backup, BackupVerificationError
+
+    backup_dir = tmp_path / "empty_backup"
+    backup_dir.mkdir()
+    sqlite3.connect(str(backup_dir / "receiptory.db")).close()
+
+    with pytest.raises(BackupVerificationError, match="no schema_version table"):
+        verify_backup(str(backup_dir))
+
+
+def test_verify_catches_a_file_that_does_not_match_its_hash(db_path, tmp_data_dir):
+    """The filename IS the sha256 of the contents, so a file copied while it was
+    still being written is detectable."""
+    from backend.backup.verify import verify_backup, BackupVerificationError
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 d")
+    backup_dir = build_backup(str(tmp_data_dir))
+
+    originals = os.path.join(backup_dir, "storage", "originals")
+    victim = os.path.join(originals, os.listdir(originals)[0])
+    with open(victim, "wb") as f:
+        f.write(b"truncated")
+
+    with pytest.raises(BackupVerificationError, match="do not match their hash"):
+        verify_backup(backup_dir)
+
+
+def test_the_secret_checklist_does_not_claim_a_key_was_unset_when_it_cannot_tell():
+    """settings.json only covers keys in DEFAULTS. llm_api_keys is DB-only and
+    bypasses get_all_settings, so it never appears there whether or not it was
+    set -- reporting "not set" would tell someone mid-recovery they had no API
+    keys when they did."""
+    from scripts.restore_backup import _secret_state
+
+    saved = {"telegram_bot_token": "ab***yz", "gmail_app_password": ""}
+    assert _secret_state(saved, "telegram_bot_token") == "was set"
+    assert _secret_state(saved, "gmail_app_password") == "not set at backup time"
+    assert "unknown" in _secret_state(saved, "llm_api_keys")
+    assert "unknown" in _secret_state(None, "telegram_bot_token")

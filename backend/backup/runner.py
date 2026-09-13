@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from backend.database import get_connection
 from backend.config import get_all_settings, SENSITIVE_KEYS
+from backend.backup.verify import verify_backup
 
 # Settings rows stripped from the snapshot before it leaves the machine. The
 # backup is uploaded to cloud storage by rclone with no encryption of its own,
@@ -75,6 +76,18 @@ def build_backup(data_dir: str) -> str:
     settings = get_all_settings_masked()
     with open(os.path.join(backup_dir, "settings.json"), "w") as f:
         json.dump(settings, f, indent=2, default=str)
+
+    # Prove the artifact restores before anyone is told it exists. rclone
+    # exiting 0 only means bytes moved; it says nothing about whether the
+    # database has tables in it or whether the files its rows point at came
+    # along. Raising here fails the run, so a backup that would not restore is
+    # reported as failed instead of uploaded and discovered years later.
+    report = verify_backup(backup_dir)
+    logger.info(
+        f"Backup verified: {report['documents']} documents, "
+        f"{report['originals_verified']} originals hash-checked, "
+        f"{report['filed_verified']} filed present, schema {report['schema_version']}"
+    )
 
     logger.info(f"Backup assembled at {backup_dir}")
     return backup_dir

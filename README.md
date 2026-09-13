@@ -227,6 +227,26 @@ The database is captured with SQLite's online backup API, so it is a consistent 
 
 **Secrets are stripped from the backup.** The uploaded copy has the LLM API keys, Telegram bot token, Gmail app password, cloud OAuth tokens and login password hash removed, because the backup is uploaded with no encryption of its own. **Restoring therefore requires re-entering them** — `settings.json` lists which keys existed, with masked values.
 
+Every backup is verified before it is reported as done: the snapshot must open, carry the expected schema, and every file its document rows reference must be present with a matching SHA-256. A backup that would not restore fails the run instead of being uploaded.
+
+### Restoring
+
+```bash
+# Is this backup any good? Reads only, writes nothing.
+uv run python scripts/restore_backup.py --verify-only /path/to/backup
+
+# Rebuild into a fresh directory, then swap it in (reversible).
+uv run python scripts/restore_backup.py /path/to/backup data.restored
+mv data data.old && mv data.restored data
+
+# Or overwrite an existing data directory in place.
+uv run python scripts/restore_backup.py /path/to/backup data --force
+```
+
+Stop the container first. The script verifies the backup before writing anything, restores `receiptory.db` plus `storage/` and `logs/`, runs migrations so an older snapshot is brought up to the current schema, verifies the result, and prints which secrets to re-enter.
+
+Not in a backup, so not restored: `rclone.conf` (reconnect the cloud remotes in Administration > Resilience) and `scanner_test_set/`. Anything pinned in `.env` keeps working from `.env`.
+
 ### Google Drive
 
 1. Go to [Google Cloud Console > Credentials](https://console.cloud.google.com/apis/credentials)
