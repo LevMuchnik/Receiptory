@@ -132,3 +132,42 @@ def test_active_config_requires_auth(app):
     assert client.get("/api/scanner/active-config").status_code == 401
     assert client.put("/api/scanner/active-config",
                       json={"detector": "classical", "params": {}}).status_code == 401
+
+
+def test_deleting_a_frame_holds_the_storage_mutation_lock(authed_client, tmp_data_dir):
+    """scanner_test_set is a BACKUP_TREE (backup/runner.py), so this unlink sits
+    in the same race storage.remove_filed does.
+
+    build_backup copytrees these trees while the app runs, and
+    _copy_tolerating_rename's single retry is built for a rename window -- a
+    DELETED file never settles, so the retry raises too, copytree raises
+    shutil.Error at the end of the walk, and build_backup discards the run.
+    Deleting a test frame at 02:00 would otherwise cost that night's backup.
+
+    This endpoint predates the lock and was found by review, not by the change
+    that introduced it: the PR's own comments claimed remove_filed was the first
+    deleter from a backed-up tree, and it was not.
+    """
+    import backend.api.scanner as scanner_mod
+    from backend.atomic import STORAGE_MUTATION_LOCK
+
+    body = _post_frame(authed_client)
+    held = []
+    real_unlink = scanner_mod.os.unlink
+
+    def spy(path):
+        held.append(STORAGE_MUTATION_LOCK.locked())
+        return real_unlink(path)
+
+    scanner_mod.os.unlink = spy
+    try:
+        resp = authed_client.delete(f"/api/scanner/test-frames/{body['id']}")
+    finally:
+        scanner_mod.os.unlink = real_unlink
+
+    assert resp.status_code == 200
+    assert held == [True], (
+        "a file in a BACKUP_TREE was unlinked without STORAGE_MUTATION_LOCK -- "
+        "this can discard a whole nightly backup run"
+    )
+    assert not STORAGE_MUTATION_LOCK.locked(), "the lock was not released"

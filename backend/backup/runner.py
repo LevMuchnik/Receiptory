@@ -10,8 +10,13 @@ from datetime import datetime, timezone
 
 from backend.database import get_connection
 from backend.config import get_all_settings, SENSITIVE_KEYS
-from backend.atomic import TMP_PREFIX
-from backend.backup.verify import verify_backup, format_report, schema_version
+from backend.atomic import STORAGE_MUTATION_LOCK, TMP_PREFIX
+from backend.backup.verify import (
+    verify_backup,
+    format_report,
+    schema_version,
+    _MAX_LISTED,
+)
 
 # The directories a backup contains, relative to data_dir. Defined here because
 # build_backup writes them, and imported by scripts/restore_backup.py so the
@@ -148,6 +153,12 @@ def _copy_tolerating_rename(src: str, dst: str, **kwargs) -> str:
     existence guards and never rewrite, and TMP_PREFIX files are excluded before
     they are reached, so save_filed during a reprocess is the only writer that
     opens this window. A retry a moment later reads the settled file.
+
+    Note what this does NOT cover: a file that was DELETED rather than renamed
+    never settles, so the retry raises too and the whole walk fails. That is why
+    storage.remove_filed takes STORAGE_MUTATION_LOCK and build_backup holds it
+    across the copy, instead of this retry being widened to swallow ENOENT --
+    swallowing it would silently drop a file a snapshot row still points at.
     """
     try:
         return shutil.copy2(src, dst, **kwargs)
@@ -185,6 +196,11 @@ def build_backup(data_dir: str) -> tuple[str, dict]:
     # between the two with no row pointing at it: orphan bytes, recoverable by
     # hand from originals/<hash><ext>.
     #
+    # That second clause is no longer free. It held only because nothing in the
+    # project deleted from storage/; storage.remove_filed now does. Both sides
+    # take atomic.STORAGE_MUTATION_LOCK, which this function holds across the
+    # snapshot and the copytree below -- see the `with` a few lines down.
+    #
     # Copying files first inverts that into a row in the snapshot whose file
     # was written after the copy already walked past its directory -- a
     # dangling row, which is not recoverable and which verify_backup reports as
@@ -201,21 +217,39 @@ def build_backup(data_dir: str) -> tuple[str, dict]:
     # partly-assembled copy of the whole storage tree into /tmp -- ~160MB, once
     # per run, every night, for as long as the fault persisted.
     try:
-        if os.path.exists(db_path):
-            snapshot_database(db_path, snapshot_path)
+        # STORAGE_MUTATION_LOCK spans the snapshot AND the copy, which is what
+        # makes the ordering argument above true rather than merely lucky. That
+        # argument's second clause -- the bytes are still there when the copy
+        # runs -- used to hold because no code deleted from storage/. Issue #54
+        # added one (storage.remove_filed drops a filed/ copy no row references
+        # after a reprocess renames it), and without this lock it breaks the
+        # backup two ways: delete between the snapshot and the walk and the
+        # snapshot row names a file that is gone, so verify_backup reports
+        # damage on a healthy install; delete DURING the walk and
+        # _copy_tolerating_rename's single retry fails too -- it is built for a
+        # rename window, where the retry finds the settled file, and a delete
+        # never settles -- so copytree raises shutil.Error at the end of the
+        # walk and the `except BaseException` below discards the whole run.
+        #
+        # Held for the assembly only, not the upload: 2.7s measured on a
+        # 314-document install (run 170, 2026-09-14). A reprocess that waits on
+        # it is already waiting seconds on a model call.
+        with STORAGE_MUTATION_LOCK:
+            if os.path.exists(db_path):
+                snapshot_database(db_path, snapshot_path)
 
-        ignore = _ignore_regenerable(os.path.join(data_dir, "storage"))
-        for tree in BACKUP_TREES:
-            src = os.path.join(data_dir, tree)
-            if not os.path.exists(src):
-                continue
-            shutil.copytree(
-                src,
-                os.path.join(backup_dir, tree),
-                dirs_exist_ok=True,
-                ignore=ignore,
-                copy_function=_copy_tolerating_rename,
-            )
+            ignore = _ignore_regenerable(os.path.join(data_dir, "storage"))
+            for tree in BACKUP_TREES:
+                src = os.path.join(data_dir, tree)
+                if not os.path.exists(src):
+                    continue
+                shutil.copytree(
+                    src,
+                    os.path.join(backup_dir, tree),
+                    dirs_exist_ok=True,
+                    ignore=ignore,
+                    copy_function=_copy_tolerating_rename,
+                )
 
         # Export JSONL metadata from the snapshot, not the live database. The
         # snapshot is a pinned instant; the live database keeps moving while the
@@ -245,6 +279,15 @@ def build_backup(data_dir: str) -> tuple[str, dict]:
         raise
 
     logger.info(f"Backup verified: {format_report(report)}")
+    if report.get("filed_orphans"):
+        # Named, not just counted -- "3 unreferenced" is not actionable on its
+        # own, and the same split is why `problems` is logged below. INFO, not
+        # ERROR: nothing is missing, something is extra. scripts/
+        # cleanup_filed_orphans.py is how these get cleared.
+        logger.info(
+            f"Backup contains {report['filed_orphans']} filed/ file(s) no row "
+            f"references: " + "; ".join(report["orphan_names"][:_MAX_LISTED])
+        )
     if report["problems"]:
         # Damage is reported, not fatal. The caller records it against the run.
         logger.error(

@@ -6,6 +6,8 @@ import logging
 import os
 import re
 import tempfile
+
+from backend.atomic import STORAGE_MUTATION_LOCK
 from email import policy as email_policy
 
 from bs4 import BeautifulSoup as _BS
@@ -177,7 +179,15 @@ def _render_first_page(content: bytes, filename: str, data_dir: str) -> bytes | 
             from backend.storage import render_all_pages_to_memory
             pages = render_all_pages_to_memory(pdf_path, dpi=150)
             if norm.converted and os.path.exists(pdf_path):
-                os.unlink(pdf_path)
+                # normalize writes this scratch into storage/converted/, which is
+                # inside a BACKUP_TREE, and _paired_scratch only drops a
+                # <stem>_converted.pdf that HAS a <stem>.pdf sibling. This one's
+                # stem is a temp-file name, so it has no sibling and copytree
+                # copies it. Deleting it unguarded while build_backup walks
+                # converted/ defeats _copy_tolerating_rename's retry (a deleted
+                # file never settles) and discards the entire backup run.
+                with STORAGE_MUTATION_LOCK:
+                    os.unlink(pdf_path)
             return pages[0] if pages else None
         finally:
             if os.path.exists(tmp_path):
@@ -196,7 +206,9 @@ def _render_first_page_from_file(file_path: str, data_dir: str) -> bytes | None:
         from backend.storage import render_all_pages_to_memory
         pages = render_all_pages_to_memory(pdf_path, dpi=150)
         if norm.converted and os.path.exists(pdf_path):
-            os.unlink(pdf_path)
+            # Same BACKUP_TREE race as the attachment path above.
+            with STORAGE_MUTATION_LOCK:
+                os.unlink(pdf_path)
         return pages[0] if pages else None
     except Exception as e:
         logger.debug(f"Failed to render first page of {file_path}: {e}")
