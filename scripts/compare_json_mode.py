@@ -34,7 +34,7 @@ load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 
 from backend.database import init_db, get_connection
 from backend.config import get_setting
-from backend.storage import get_file_path, render_all_pages_to_memory
+from backend.storage import get_file_path, get_filed_path, render_all_pages_to_memory
 from backend.processing.extract import extract_document
 from backend.processing.pipeline import estimate_cost
 
@@ -66,8 +66,16 @@ def pick_sample(limit: int) -> list[dict]:
 def resolve_pdf(doc: dict, data_dir: str) -> str | None:
     """Prefer the filed PDF (what the pipeline extracted from), then converted, then a PDF original."""
     if doc["stored_filename"]:
-        filed = os.path.join(data_dir, "storage", "filed", doc["stored_filename"])
-        if os.path.exists(filed):
+        # Through the resolver like every other consumer of this column. The
+        # value is LLM-derived and, on a restored database, untrusted: a bare
+        # join discards the prefix for an absolute path. Harmless here (the
+        # result is only read), but leaving one of four call sites unguarded is
+        # how the invariant rots.
+        try:
+            filed = get_filed_path(doc["stored_filename"], data_dir)
+        except ValueError:
+            filed = None
+        if filed and os.path.exists(filed):
             return filed
     converted = get_file_path("converted", doc["file_hash"], ".pdf", data_dir)
     if os.path.exists(converted):

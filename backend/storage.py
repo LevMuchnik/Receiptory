@@ -6,7 +6,12 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 
-from backend.atomic import atomic_copy, atomic_write_bytes
+from backend.atomic import (
+    STORAGE_MUTATION_LOCK,
+    atomic_copy,
+    atomic_write_bytes,
+    is_contained_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,16 +51,68 @@ def save_converted(src_path: str, file_hash: str, data_dir: str) -> str:
     return dest
 
 
+def get_filed_path(stored_filename: str, data_dir: str) -> str:
+    """Resolve a documents.stored_filename, refusing to leave storage/filed.
+
+    Every consumer of that column goes through here, because it is untrusted
+    input on more than one path. api/export.py joins it and hands the result to
+    ZipFile.write as root, so a restored row naming "/etc/shadow" was an
+    arbitrary read straight into the export zip -- os.path.join discards the
+    prefix for an absolute path, and os.path.exists then says yes. Since #54
+    the same value also reaches os.unlink, which makes it an arbitrary delete.
+
+    verify.py rejects such a row before a restore lands it, but that guard runs
+    only on the restore path. This one runs on every use, so the invariant does
+    not depend on how the row got into the database -- the same lesson #45 cost
+    us on scanner_test_frames.frame_path.
+    """
+    if not is_contained_name(stored_filename):
+        raise ValueError(
+            f"stored_filename escapes the filed directory: {stored_filename!r}"
+        )
+    path = os.path.join(data_dir, "storage", "filed", stored_filename)
+    # A contained NAME can still point anywhere. ZipFile.write follows symlinks,
+    # so filed/receipt.pdf aimed at /etc/shadow would put that content in the
+    # export under a harmless arcname. backup/verify.py already refuses to
+    # verify any backup containing a symlink; without this the live tree held
+    # the opposite policy to the backup tree. islink is False for a path that
+    # does not exist, so save_filed creating a new file is unaffected.
+    if os.path.islink(path):
+        raise ValueError(f"filed copy is a symlink: {stored_filename!r}")
+    return path
+
+
 def save_filed(src_path: str, stored_filename: str, data_dir: str) -> str:
-    dest_dir = os.path.join(data_dir, "storage", "filed")
-    os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, stored_filename)
+    dest = get_filed_path(stored_filename, data_dir)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
     # The only save_* helper with no existence guard, so this is the one that
     # genuinely overwrites in place -- pipeline.py re-runs it on every
     # reprocess. That makes it the single writer a backup's copytree can catch
     # mid-write, which is why it has to be atomic.
     atomic_copy(src_path, dest)
     return dest
+
+
+def remove_filed(stored_filename: str, data_dir: str) -> bool:
+    """Delete a filed/ copy no row references any more. Returns True if it went.
+
+    Takes STORAGE_MUTATION_LOCK, which EVERY deleter from a BACKUP_TREE must
+    hold -- see the lock's comment in atomic.py for what breaks without it.
+    (Not "the first deleter": api/scanner.py's delete_test_frame also unlinks
+    from scanner_test_set/, which runner.py copies too. It predated the lock and
+    now takes it as well.)
+
+    A missing file is success, not an error: the caller's goal is that the name
+    is gone, and two reprocesses of the same document race to the same
+    conclusion.
+    """
+    path = get_filed_path(stored_filename, data_dir)
+    with STORAGE_MUTATION_LOCK:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            return False
+    return True
 
 
 def get_file_path(file_type: str, file_hash: str, ext: str, data_dir: str) -> str:

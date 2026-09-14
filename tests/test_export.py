@@ -244,3 +244,154 @@ def test_export_month_single_digit(authed_client):
     """month='2026-1' is accepted — strptime is lenient, strftime zero-pads output."""
     resp = authed_client.post("/api/export", json={"preset": "month", "month": "2026-1"})
     assert resp.status_code == 200
+
+
+def test_export_omits_a_row_whose_stored_filename_escapes_filed(authed_client, docs_with_files, tmp_path):
+    """Was an arbitrary root read straight into the export zip.
+
+    os.path.join(filed_dir, "/etc/shadow") returns "/etc/shadow" -- the prefix
+    is silently discarded -- os.path.exists then says yes, and ZipFile.write
+    copied it in under the arcname "<section>/<cat>//etc/shadow". The row is
+    untrusted because a restored database is untrusted, which is exactly the
+    lesson #45 cost us on scanner_test_frames.frame_path.
+
+    The bad row is skipped and the export still succeeds: one poisoned row must
+    not take the whole export down either.
+    """
+    from backend.database import get_connection
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("root password hash")
+
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE documents SET stored_filename = ? WHERE original_filename = 'r2.pdf'",
+            (str(secret),),
+        )
+
+    resp = authed_client.post(
+        "/api/export",
+        json={"date_basis": "receipt", "date_from": "2026-01-01", "date_to": "2026-12-31"},
+    )
+
+    assert resp.status_code == 200
+    names = zipfile.ZipFile(io.BytesIO(resp.content)).namelist()
+    assert not any("secret.txt" in n for n in names), "an absolute path was read into the zip"
+    assert not any(n.endswith(str(secret)) for n in names)
+    # The healthy document still exports.
+    assert any("2026-01-15-INV001-h1.pdf" in n for n in names)
+    assert any("metadata.csv" in n for n in names)
+
+
+def test_export_arcname_cannot_escape_the_extraction_directory(authed_client, docs_with_files):
+    """Zip-slip. The arcname is section/category/filename and only the filename
+    was hardened; categories.name is a bare str in CategoryCreate with no
+    validation. Verified: zipfile.ZipInfo.from_file normpaths the arcname and
+    strips a LEADING separator but keeps ".." intact, so
+    "expense/../../../tmp/evil/x.pdf" is stored as "../../tmp/evil/x.pdf" --
+    which unzip writes outside wherever you extracted."""
+    from backend.database import get_connection
+
+    with get_connection() as conn:
+        conn.execute("UPDATE categories SET name = ? WHERE id = 4", ("../../../../tmp/evil",))
+        conn.execute("UPDATE categories SET section = ? WHERE id = 4", ("../..",))
+
+    resp = authed_client.post(
+        "/api/export",
+        json={"date_basis": "receipt", "date_from": "2026-01-01", "date_to": "2026-12-31"},
+    )
+
+    assert resp.status_code == 200
+    for n in zipfile.ZipFile(io.BytesIO(resp.content)).namelist():
+        assert not n.startswith("/"), f"absolute arcname: {n!r}"
+        assert ".." not in n.split("/"), f"zip-slip arcname: {n!r}"
+
+
+def test_a_document_whose_pdf_was_omitted_is_not_marked_exported(authed_client, docs_with_files, tmp_path):
+    """last_exported_date is what preset='since_last_export' filters on, so
+    stamping a document whose PDF never made it into the zip retires it from
+    every future incremental export, silently and permanently."""
+    from backend.database import get_connection
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("not a receipt")
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE documents SET stored_filename = ? WHERE original_filename = 'r2.pdf'",
+            (str(secret),),
+        )
+
+    resp = authed_client.post(
+        "/api/export",
+        json={"date_basis": "receipt", "date_from": "2026-01-01", "date_to": "2026-12-31"},
+    )
+    assert resp.status_code == 200
+
+    with get_connection() as conn:
+        rows = {
+            r["original_filename"]: r["last_exported_date"]
+            for r in conn.execute(
+                "SELECT original_filename, last_exported_date FROM documents"
+            )
+        }
+    assert rows["r1.pdf"] is not None, "the delivered document should be stamped"
+    assert rows["r2.pdf"] is None, (
+        "a document whose PDF was omitted was marked exported -- "
+        "since_last_export will never offer it again"
+    )
+
+
+def test_a_document_whose_filed_copy_is_missing_is_not_marked_exported(
+    authed_client, docs_with_files, tmp_data_dir
+):
+    """The OTHER omitted branch, and the one that actually fires in production:
+    the row is fine, the file is gone -- lost to exactly the rename churn this
+    PR is about. Mutation-proven gap: replacing that omitted.add with `pass`
+    left tests/test_export.py at 15/15 green."""
+    from backend.database import get_connection
+
+    os.unlink(os.path.join(str(tmp_data_dir), "storage", "filed", "2026-01-20-INV002-h2.pdf"))
+
+    resp = authed_client.post(
+        "/api/export",
+        json={"date_basis": "receipt", "date_from": "2026-01-01", "date_to": "2026-12-31"},
+    )
+    assert resp.status_code == 200
+
+    with get_connection() as conn:
+        rows = {
+            r["original_filename"]: r["last_exported_date"]
+            for r in conn.execute(
+                "SELECT original_filename, last_exported_date FROM documents"
+            )
+        }
+    assert rows["r1.pdf"] is not None
+    assert rows["r2.pdf"] is None, (
+        "a document whose filed copy was missing was stamped as exported"
+    )
+
+
+def test_two_categories_never_share_an_export_folder(authed_client, docs_with_files):
+    """_slugify is many-to-one: "Travel/Meals" and "Travel Meals" both become
+    "Travel_Meals". Without the category id in the folder name, two distinct
+    categories merge into one heading in the archive."""
+    from backend.database import get_connection
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT category_id FROM documents WHERE category_id IS NOT NULL"
+        ).fetchall()
+        ids = [r["category_id"] for r in rows]
+        assert len(ids) >= 2, "fixture needs two categories to collide"
+        conn.execute("UPDATE categories SET name = ? WHERE id = ?", ("Travel/Meals", ids[0]))
+        conn.execute("UPDATE categories SET name = ? WHERE id = ?", ("Travel Meals", ids[1]))
+
+    resp = authed_client.post(
+        "/api/export",
+        json={"date_basis": "receipt", "date_from": "2026-01-01", "date_to": "2026-12-31"},
+    )
+    assert resp.status_code == 200
+
+    names = zipfile.ZipFile(io.BytesIO(resp.content)).namelist()
+    folders = {n.rsplit("/", 1)[0] for n in names if n.endswith(".pdf")}
+    assert len(folders) == 2, f"two categories collapsed into one folder: {folders}"

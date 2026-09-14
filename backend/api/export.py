@@ -13,6 +13,7 @@ from backend.auth import require_auth
 from backend.config import get_setting
 from backend.database import get_connection
 from backend.models import ExportRequest
+from backend.storage import get_filed_path
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -70,7 +71,6 @@ EXPORT_CSV_FIELDS = [
 @router.post("/export")
 def export_documents(body: ExportRequest, request: Request, username: str = Depends(require_auth)):
     data_dir = request.app.state.data_dir
-    filed_dir = os.path.join(data_dir, "storage", "filed")
 
     # Build query conditions
     conditions = ["d.is_deleted = 0"]
@@ -152,18 +152,89 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
             params,
         ).fetchall()
 
+    # Documents whose PDF did not make it into the zip. They must NOT be
+    # stamped as exported below: preset="since_last_export" filters on
+    # last_exported_date IS NULL, so marking an undelivered document would
+    # retire it from every future incremental export, silently and forever.
+    omitted: set[int] = set()
+
     # Build zip in memory
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         # Add PDFs organized by section/category
         for row in rows:
-            section = row["category_section"] or "other"
-            cat_name = row["category_name"] or "uncategorized"
+            # Slugified, because BOTH of these reach the zip arcname and neither
+            # is validated on the way in: categories.name is a bare `str` in
+            # CategoryCreate, and section is only a Literal on write, not on
+            # read. zipfile.ZipInfo.from_file normpaths the arcname and strips a
+            # LEADING separator but keeps ".." intact -- verified:
+            # "expense/../../../tmp/evil/x.pdf" is stored as
+            # "../../tmp/evil/x.pdf", which unzip happily writes outside the
+            # extraction directory. Hardening only the filename would leave two
+            # of three path components open, which is the exact mistake #45 cost
+            # us on scanner_test_frames.frame_path.
+            section = _slugify(row["category_section"] or "") or "other"
+            # Prefixed with the category id, because _slugify is many-to-one:
+            # "Travel/Meals", "Travel Meals" and "Travel_Meals" all collapse to
+            # one folder, and a name made entirely of punctuation slugs to ""
+            # and would land in the real "uncategorized" folder. Nothing is
+            # lost either way (filenames carry a hash suffix) but documents
+            # would be filed under the wrong heading in the archive someone
+            # else reads. Ids start at 1, so 0 is a fallback no row can claim.
+            cat_id = row["category_id"] or 0
+            cat_name = f"{cat_id}-" + (_slugify(row["category_name"] or "") or "uncategorized")
             stored = row["stored_filename"]
+            if not stored:
+                # No filed copy was ever recorded, so there is no PDF to ship.
+                # Reachable: when document_ids is supplied the query skips the
+                # status='processed' filter, so a pending or failed row can be
+                # exported by id straight from the Documents list. Stamping it
+                # would retire it from every future since_last_export run --
+                # the same defect as the two branches below, one case wider.
+                omitted.add(row["id"])
+                continue
             if stored:
-                pdf_path = os.path.join(filed_dir, stored)
+                # Resolved, not joined. An absolute stored_filename made
+                # os.path.join return that path verbatim, os.path.exists say
+                # yes, and this line copy the file into the zip as root -- with
+                # an arcname of "<section>/<cat>//etc/shadow". One bad row must
+                # not take the export down either, so it is skipped and logged.
+                try:
+                    pdf_path = get_filed_path(stored, data_dir)
+                except ValueError:
+                    omitted.add(row["id"])
+                    logger.warning(
+                        "Document %s has a stored_filename outside filed/; its "
+                        "PDF is omitted from the export (the metadata row is "
+                        "still included)", row["id"]
+                    )
+                    continue
                 if os.path.exists(pdf_path):
-                    zf.write(pdf_path, f"{section}/{cat_name}/{stored}")
+                    try:
+                        zf.write(pdf_path, f"{section}/{cat_name}/{stored}")
+                    except FileNotFoundError:
+                        # exists() then write() is a gap, and this change is what
+                        # made it reachable: storage.remove_filed now genuinely
+                        # unlinks this exact path when a reprocess renames a
+                        # document. Export takes no lock, so a reprocess mid-zip
+                        # would otherwise raise out of here as an unhandled 500
+                        # and lose the whole archive -- and the Documents page
+                        # offers batch-reprocess and export on the same
+                        # selection. One document omitted beats no export.
+                        omitted.add(row["id"])
+                        logger.warning(
+                            "Document %s: %s vanished while the export was being "
+                            "built (concurrent reprocess); its PDF is omitted",
+                            row["id"], stored
+                        )
+                else:
+                    # Pre-existing trigger, same consequence: the row is in the
+                    # metadata but its PDF is not in the archive.
+                    omitted.add(row["id"])
+                    logger.warning(
+                        "Document %s: filed copy %s is missing; its PDF is "
+                        "omitted from the export", row["id"], stored
+                    )
 
         # Add CSV metadata
         csv_buf = io.StringIO()
@@ -194,7 +265,13 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
 
     # Update last_exported_date
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    doc_ids = [row["id"] for row in rows]
+    doc_ids = [row["id"] for row in rows if row["id"] not in omitted]
+    if omitted:
+        logger.warning(
+            "%d document(s) had no PDF in this export and were left unstamped, "
+            "so they stay eligible for the next since_last_export run",
+            len(omitted),
+        )
     if doc_ids:
         placeholders = ",".join("?" * len(doc_ids))
         with get_connection() as conn:
