@@ -2429,3 +2429,222 @@ def test_one_damaged_document_on_a_one_document_install_is_still_only_damage(
     report = verify_backup(backup_dir)
     assert len(report["problems"]) == 1
     assert "original missing" in report["problems"][0]
+
+
+# ---------------------------------------------------------------------------
+# Unreferenced filed/ copies -- issue #54
+# ---------------------------------------------------------------------------
+
+
+def test_verify_counts_a_filed_copy_no_row_references(db_path, tmp_data_dir):
+    """Measured on the live install before this existed: 315 files in filed/
+    against 310 referenced names, shipping in all 15 retained backups, and the
+    nightly report said "310 filed present" without a word about the other 5."""
+    from backend.backup.verify import verify_backup
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 filed")
+    orphan = os.path.join(str(tmp_data_dir), "storage", "filed", "2019-01-01-stale-deadbeef.pdf")
+    with open(orphan, "wb") as f:
+        f.write(b"%PDF-1.4 nobody points at me")
+
+    backup_dir, report = build_backup(str(tmp_data_dir))
+
+    assert report["filed_orphans"] == 1
+    assert report["orphan_names"] == ["2019-01-01-stale-deadbeef.pdf"]
+
+
+def test_an_unreferenced_copy_is_not_damage(db_path, tmp_data_dir):
+    """The grade matters more than the count.
+
+    `problems` means "this document's bytes are missing or do not match their
+    hash" and drives the damage notification. An orphan is the opposite fact:
+    nothing is missing, something is extra. Putting it in `problems` would
+    report damage every night on a healthy install and cost the damage count the
+    only question it can answer -- the #48 verifier-must-not-become-its-own-
+    outage rule in its noise form.
+    """
+    from backend.backup.verify import verify_backup, format_report
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 filed")
+    with open(os.path.join(str(tmp_data_dir), "storage", "filed", "x-00000000.pdf"), "wb") as f:
+        f.write(b"%PDF-1.4 extra")
+
+    _backup_dir, report = build_backup(str(tmp_data_dir))
+
+    assert report["problems"] == [], "an orphan was graded as damage"
+    assert report["filed_orphans"] == 1
+    line = format_report(report)
+    assert "1 unreferenced" in line
+    assert "damaged" not in line
+
+
+def test_a_clean_tree_reports_zero_unreferenced(db_path, tmp_data_dir):
+    """The count only means something if it sits at zero the rest of the time."""
+    from backend.backup.verify import format_report
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 a")
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 b")
+
+    _backup_dir, report = build_backup(str(tmp_data_dir))
+
+    assert report["filed_orphans"] == 0
+    assert "unreferenced" not in format_report(report)
+
+
+def test_a_soft_deleted_rows_file_is_not_unreferenced(db_path, tmp_data_dir):
+    """delete_document sets is_deleted and never unlinks. 70 of 314 rows on the
+    live install are soft-deleted and still reference their file; counting those
+    as orphans would report 70 every night on a correct install."""
+    init_settings()
+    _file_hash, stored = _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 deleted")
+    with get_connection() as conn:
+        conn.execute("UPDATE documents SET is_deleted = 1 WHERE stored_filename = ?", (stored,))
+
+    _backup_dir, report = build_backup(str(tmp_data_dir))
+
+    assert report["filed_orphans"] == 0
+
+
+def test_an_install_with_no_filed_directory_reports_zero(db_path, tmp_data_dir):
+    """A backup taken before anything was filed, or an older artifact."""
+    from backend.backup.verify import verify_backup
+
+    init_settings()
+    with get_connection() as conn:
+        pending_hash = _insert_doc(conn, "pending-doc", "Pending Vendor")
+    originals = os.path.join(str(tmp_data_dir), "storage", "originals")
+    os.makedirs(originals, exist_ok=True)
+    with open(os.path.join(originals, f"{pending_hash}.pdf"), "wb") as f:
+        f.write(b"%PDF-1.4 pending")
+
+    _backup_dir, report = build_backup(str(tmp_data_dir))
+
+    assert report["filed_orphans"] == 0
+    assert report["orphan_names"] == []
+
+
+def test_build_backup_holds_the_storage_lock_while_copying(db_path, tmp_data_dir):
+    """Without this the lock is decoration.
+
+    storage.remove_filed deletes from the storage tree, and build_backup's
+    snapshot-then-copy ordering assumes nothing does. A delete landing inside
+    the copytree makes _copy_tolerating_rename's single retry fail -- it is
+    built for a rename window, where the retry finds the settled file -- so
+    copytree raises shutil.Error at the end of the walk and the whole run is
+    discarded. One reprocess at 02:00, no backup that night.
+
+    Spies the SNAPSHOT as well as the copy, because the lock has to span both.
+    Mutation-proven: with only copytree spied, moving snapshot_database out of
+    the `with` block left all 105 tests in this file green -- and that narrowing
+    reopens exactly half the race. A delete landing between the snapshot and the
+    walk makes the snapshot row name a file that is gone, and verify_backup then
+    reports damage on a completely healthy install.
+    """
+    import backend.backup.runner as runner_mod
+    from backend.atomic import STORAGE_MUTATION_LOCK
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 filed")
+
+    held = {}
+    real_snapshot = runner_mod.snapshot_database
+    real_copytree = runner_mod.shutil.copytree
+
+    def snap_spy(*a, **k):
+        held["snapshot"] = STORAGE_MUTATION_LOCK.locked()
+        return real_snapshot(*a, **k)
+
+    def copy_spy(*a, **k):
+        held["copytree"] = STORAGE_MUTATION_LOCK.locked()
+        return real_copytree(*a, **k)
+
+    runner_mod.snapshot_database = snap_spy
+    runner_mod.shutil.copytree = copy_spy
+    try:
+        build_backup(str(tmp_data_dir))
+    finally:
+        runner_mod.snapshot_database = real_snapshot
+        runner_mod.shutil.copytree = real_copytree
+
+    assert held.get("snapshot") is True, (
+        "the database snapshot ran OUTSIDE the lock -- a delete between it and "
+        "the walk makes verify_backup report damage on a healthy install"
+    )
+    assert held.get("copytree") is True, (
+        "the storage tree was copied without holding the lock"
+    )
+    assert not STORAGE_MUTATION_LOCK.locked(), "the lock was not released"
+
+
+def test_orphan_names_are_truncated_but_the_count_is_not(db_path, tmp_data_dir):
+    """The count/list split is the whole point of the new field, and every other
+    orphan test seeds exactly one, so the _MAX_LISTED boundary never fired.
+    Without this, the report could name all 315 files on a real install and
+    nothing would notice."""
+    from backend.backup.verify import _MAX_LISTED
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 filed")
+    filed = os.path.join(str(tmp_data_dir), "storage", "filed")
+    extra = _MAX_LISTED + 3
+    for i in range(extra):
+        with open(os.path.join(filed, f"2019-01-{i:02d}-stale-0000000{i}.pdf"), "wb") as f:
+            f.write(b"%PDF-1.4 orphan")
+
+    _backup_dir, report = build_backup(str(tmp_data_dir))
+
+    assert report["filed_orphans"] == extra, "the COUNT must not be truncated"
+    # Full list, like `problems`: a pre-truncated list would make
+    # len(orphan_names) silently disagree with filed_orphans.
+    assert len(report["orphan_names"]) == extra
+    assert extra > _MAX_LISTED, "the fixture must exceed the display cap"
+    assert report["problems"] == []
+
+
+def test_a_directory_in_filed_is_not_counted_as_unreferenced(db_path, tmp_data_dir):
+    """os.listdir returns directories too, and a directory can never be a filed
+    copy. Counting one would pin the number above zero forever, which costs the
+    count the only thing it is good for."""
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 filed")
+    os.makedirs(os.path.join(str(tmp_data_dir), "storage", "filed", "a_subdir"))
+
+    _backup_dir, report = build_backup(str(tmp_data_dir))
+
+    assert report["filed_orphans"] == 0, "a directory was counted as an orphan file"
+
+
+def test_the_backup_log_names_the_orphans_but_caps_the_list(db_path, tmp_data_dir, caplog):
+    """Mutation-proven gap: changing the guard to `if False:` left this file at
+    107/107 green, so the whole logging branch was unenforced.
+
+    "3 unreferenced" is not actionable; the names are. And the cap matters
+    because verify_backup deliberately returns the FULL list on the argument
+    that callers slice at display time -- nothing else checks that any caller
+    does, so all 315 names from a real install could land in the log.
+    """
+    import logging
+
+    from backend.backup.verify import _MAX_LISTED
+
+    init_settings()
+    _seed_document(str(tmp_data_dir), None, b"%PDF-1.4 filed")
+    filed = os.path.join(str(tmp_data_dir), "storage", "filed")
+    extra = _MAX_LISTED + 3
+    for i in range(extra):
+        with open(os.path.join(filed, f"2019-01-{i:02d}-stale-0000000{i}.pdf"), "wb") as f:
+            f.write(b"%PDF-1.4 orphan")
+
+    with caplog.at_level(logging.INFO, logger="backend.backup.runner"):
+        build_backup(str(tmp_data_dir))
+
+    named = [r for r in caplog.records if "no row" in r.getMessage()]
+    assert named, "the orphans were counted but never named"
+    msg = named[0].getMessage()
+    assert named[0].levelno == logging.INFO, "extra files are not damage"
+    assert str(extra) in msg
+    assert msg.count("stale") <= _MAX_LISTED, "the whole list went into the log"
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
