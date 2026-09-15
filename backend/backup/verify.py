@@ -18,6 +18,11 @@ backups, forever -- a verifier that becomes a denial of service on the thing
 it protects. The caller records the damage against the run so the owner is
 told, and still keeps the artifact.
 
+**Unreferenced** is neither, and is counted rather than listed as a problem: a
+file in filed/ that no row names. Nothing is missing and no document is at
+risk, so calling it damage would report an alert every night on a healthy
+install and cost the damage count the only meaning it has.
+
 Safe against a live system: every ingestion path writes the file before
 inserting the row (api/upload.py, ingestion/telegram.py and ingestion/gmail.py
 both call save_original before their INSERT, as does ingestion/watched_folder.py)
@@ -31,6 +36,8 @@ import hashlib
 import os
 import re
 import sqlite3
+
+from backend.atomic import is_contained_name
 
 _HASH_CHUNK = 1 << 20
 
@@ -62,8 +69,16 @@ def _sha256(path: str) -> str:
 
 
 def _is_contained_name(name: str) -> bool:
-    """True if `name` is a plain filename that cannot escape its directory."""
-    return bool(name) and not os.path.isabs(name) and os.path.basename(name) == name
+    """True if `name` is a plain filename that cannot escape its directory.
+
+    Thin alias. The definition lives in backend.atomic so that storage.py's
+    get_filed_path -- which guards a live os.unlink and the export zip -- and
+    this restore-path guard cannot drift apart. It is imported from atomic and
+    not from storage because storage.py imports fitz (PyMuPDF) at module level,
+    and this module is deliberately stdlib-only so verifying a backup does not
+    need an image library installed.
+    """
+    return is_contained_name(name)
 
 
 def _is_contained_relpath(path: str, root: str) -> bool:
@@ -249,11 +264,49 @@ def verify_backup(backup_dir: str) -> dict:
             f"The storage tree did not arrive; this is a database, not a backup."
         )
 
+    # Files in filed/ that no row names. NOT damage, and deliberately not in
+    # `problems`.
+    #
+    # `problems` means "this document's bytes are missing or do not match their
+    # hash" and drives the damage notification. An orphan is the opposite fact:
+    # nothing is missing, something is extra. Folding it in would report damage
+    # every night on a completely healthy install, which is the #48
+    # verifier-must-not-become-its-own-outage rule in its noise form -- and it
+    # would make the damage count unable to answer the one question it exists
+    # for, which is "am I losing data".
+    #
+    # Soft-deleted rows count as referencing: delete_document sets is_deleted
+    # and never unlinks, so 70 of 314 files here belong to deleted documents and
+    # are not orphans.
+    #
+    # No TMP_PREFIX filter. _ignore_regenerable drops those during copytree, so
+    # a backup cannot contain one, and a branch that cannot execute is the dead
+    # defensive code this review rejected elsewhere.
+    referenced = {r["stored_filename"] for r in rows if r["stored_filename"]}
+    filed_dir = os.path.join(storage, "filed")
+    try:
+        # Files only. os.listdir also returns directories, and a directory can
+        # never be a filed copy, so counting one would pin the number above zero
+        # permanently -- which costs the count the only thing it is good for,
+        # namely that any non-zero value means something changed.
+        on_disk = {e.name for e in os.scandir(filed_dir) if e.is_file()}
+    except OSError:
+        # No filed/ at all: an install that has never filed anything, or an
+        # older backup. Zero orphans, not an error.
+        on_disk = set()
+    orphans = sorted(on_disk - referenced)
+
     return {
         "schema_version": version,
         "documents": len(rows),
         "originals_verified": originals_verified,
         "filed_verified": filed_verified,
+        "filed_orphans": len(orphans),
+        # Full list, like `problems`. Callers slice at display time
+        # (runner.py, scheduler.py and restore_backup.py all do that for
+        # problems), so len(orphan_names) cannot silently disagree with
+        # filed_orphans the way a pre-truncated list would.
+        "orphan_names": orphans,
         "problems": problems,
     }
 
@@ -266,6 +319,10 @@ def format_report(report: dict) -> str:
         f"{report['filed_verified']} filed present, "
         f"schema {report['schema_version']}"
     )
+    # Reported separately from damage, and only when non-zero, so a steady-state
+    # install stays quiet and any number at all means something changed.
+    if report.get("filed_orphans"):
+        line += f", {report['filed_orphans']} unreferenced"
     if report["problems"]:
         line += f" -- {len(report['problems'])} damaged"
     return line

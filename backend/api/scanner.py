@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from backend.atomic import STORAGE_MUTATION_LOCK
 from backend.auth import require_auth
 from backend.config import get_setting, set_setting
 from backend.database import get_connection
@@ -147,10 +148,18 @@ def delete_test_frame(
         )
         return {"deleted": frame_id}
     if os.path.exists(abs_path):
-        try:
-            os.unlink(abs_path)
-        except OSError as e:
-            logger.warning(f"Failed to delete frame file {abs_path}: {e}")
+        # scanner_test_set is a BACKUP_TREE (backup/runner.py), so this unlink
+        # has to take the same lock storage.remove_filed does. build_backup
+        # copytrees these trees live, and _copy_tolerating_rename's single retry
+        # is built for a rename window -- a file that was DELETED never settles,
+        # so the retry raises too, copytree raises shutil.Error at the end of
+        # the walk, and the whole run is discarded. Deleting a test frame at
+        # 02:00 would otherwise cost that night's backup.
+        with STORAGE_MUTATION_LOCK:
+            try:
+                os.unlink(abs_path)
+            except OSError as e:
+                logger.warning(f"Failed to delete frame file {abs_path}: {e}")
     return {"deleted": frame_id}
 
 

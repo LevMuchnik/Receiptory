@@ -298,3 +298,81 @@ def _raise_on_dir_fd(real_fsync):
         return real_fsync(fd)
 
     return fsync
+
+
+# ---------------------------------------------------------------------------
+# is_contained_name / STORAGE_MUTATION_LOCK -- issue #54
+#
+# Both live here rather than in storage.py because backup/verify.py must import
+# them and storage.py imports fitz (PyMuPDF) at module level, which would put an
+# image library on the restore path.
+# ---------------------------------------------------------------------------
+
+
+def test_is_contained_name_accepts_only_plain_filenames():
+    from backend.atomic import is_contained_name
+
+    assert is_contained_name("2026-01-01-INV1-c0ffee12.pdf")
+    assert is_contained_name("no-extension")
+
+    # NUL and backslash are mutation-proven gaps: deleting both clauses from
+    # is_contained_name left this file and test_storage.py at 36/36 green.
+    for bad in ("", "/etc/shadow", "../x.pdf", "sub/dir.pdf", "a/../b.pdf", ".", "..",
+                "a\x00b.pdf", "sub\\dir.pdf", "..\\..\\etc\\shadow"):
+        assert not is_contained_name(bad), f"{bad!r} was accepted"
+
+
+def test_this_module_stays_importable_without_pymupdf():
+    """The reason the predicate is here and not in storage.py.
+
+    backup/verify.py imports it, and verify.py is what runs on the restore path
+    -- the one place you least want an optional native dependency. storage.py
+    imports fitz at module level, so importing the predicate from there would
+    make verifying a backup require PyMuPDF.
+
+    A SUBPROCESS, deliberately. The in-process version of this test was inert:
+    it blocked fitz and evicted backend.atomic and backend.backup.verify, but
+    left backend.storage cached -- and test collection imports backend.storage
+    long before this file runs. Measured: with verify.py changed to
+    `from backend.storage import is_contained_name` (the exact inversion this
+    test exists to catch), `pytest tests/test_atomic.py` failed while
+    `pytest tests/test_export.py tests/test_atomic.py` passed 31/31. Any earlier
+    test, any -k selection, any new file sorting first would disarm it, which is
+    the same true-by-construction trap this suite keeps finding.
+
+    A fresh interpreter has no warm cache to hide behind.
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; sys.modules['fitz'] = None; "
+        "import backend.backup.verify as v; "
+        "assert v._is_contained_name('a.pdf')"
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    )
+    assert r.returncode == 0, (
+        "backup/verify.py no longer imports without PyMuPDF -- the restore path "
+        f"just grew a dependency on an image library:\n{r.stderr}"
+    )
+
+
+def test_the_storage_mutation_lock_is_a_real_lock():
+    """Guards the first code in the project that deletes from storage/, against
+    build_backup's copytree. A stand-in that does not actually exclude would
+    make every test that asserts `.locked()` pass while protecting nothing."""
+    import threading
+
+    from backend.atomic import STORAGE_MUTATION_LOCK
+
+    assert isinstance(STORAGE_MUTATION_LOCK, type(threading.Lock()))
+    assert not STORAGE_MUTATION_LOCK.locked()
+    with STORAGE_MUTATION_LOCK:
+        assert STORAGE_MUTATION_LOCK.locked()
+        assert not STORAGE_MUTATION_LOCK.acquire(blocking=False), "the lock does not exclude"
+    assert not STORAGE_MUTATION_LOCK.locked()

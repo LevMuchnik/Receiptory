@@ -226,3 +226,260 @@ def test_process_document_with_trailing_junk_response(mock_completion, pending_d
     assert doc["vendor_name"] == "Office Depot"
     assert doc["total_amount"] == 354.51
     assert doc["processing_error"] is None
+
+
+# ---------------------------------------------------------------------------
+# Superseded filed/ copies -- issue #54
+#
+# generate_stored_filename builds the name from receipt_date and
+# vendor_receipt_id, both verbatim LLM output, so a reprocess that reads the
+# document differently writes a NEW name. Measured on the live install before
+# this landed: 315 files in filed/ against 310 referenced names, and in every
+# case it was the YEAR that moved, not the receipt id.
+#
+# Note the harness: every other test here sets mock_extract.return_value, one
+# fixed result. A rename needs side_effect=[first, second]; return_value twice
+# exercises the no-change branch only and would pass with the unlink deleted.
+# ---------------------------------------------------------------------------
+
+import os as _os
+
+import backend.processing.pipeline as pipeline_mod
+
+from dataclasses import replace as _replace
+
+# Only the YEAR changes, which is what the live install actually showed: the
+# receipt ids were stable and the year moved (issue #63).
+SECOND_EXTRACTION = _replace(MOCK_EXTRACTION, receipt_date="2024-01-15")
+SECOND_LLM_RESULT = _replace(MOCK_LLM_RESULT, extraction=SECOND_EXTRACTION)
+
+
+def _filed(data_dir):
+    d = _os.path.join(data_dir, "storage", "filed")
+    return sorted(_os.listdir(d)) if _os.path.isdir(d) else []
+
+
+def _stored_name(doc_id):
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT stored_filename FROM documents WHERE id = ?", (doc_id,)
+        ).fetchone()["stored_filename"]
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_a_reprocess_that_renames_removes_the_superseded_copy(mock_extract, pending_doc, setup_db):
+    mock_extract.side_effect = [MOCK_LLM_RESULT, SECOND_LLM_RESULT]
+
+    process_document(pending_doc, setup_db)
+    first = _stored_name(pending_doc)
+    assert _filed(setup_db) == [first]
+
+    process_document(pending_doc, setup_db)
+    second = _stored_name(pending_doc)
+
+    assert second != first, "the fixture did not actually produce a rename"
+    assert _filed(setup_db) == [second], "the old filed/ copy was orphaned"
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_a_reprocess_that_changes_nothing_keeps_its_file(mock_extract, pending_doc, setup_db):
+    """The guard that stops the unlink deleting the file it just wrote.
+
+    Drop `previous == current` and this test is what fails: save_filed rewrites
+    the same name, then the cleanup removes it, and the document ends up with a
+    row pointing at nothing.
+    """
+    mock_extract.return_value = MOCK_LLM_RESULT
+
+    process_document(pending_doc, setup_db)
+    process_document(pending_doc, setup_db)
+
+    name = _stored_name(pending_doc)
+    assert _filed(setup_db) == [name]
+    assert _os.path.exists(_os.path.join(setup_db, "storage", "filed", name))
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_the_first_processing_removes_nothing(mock_extract, pending_doc, setup_db):
+    """previous is NULL on a first pass. Nothing to supersede."""
+    mock_extract.return_value = MOCK_LLM_RESULT
+
+    with patch("backend.processing.pipeline.remove_filed") as rm:
+        process_document(pending_doc, setup_db)
+
+    rm.assert_not_called()
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_the_row_already_names_the_new_file_when_the_old_one_is_unlinked(
+    mock_extract, pending_doc, setup_db
+):
+    """The ordering IS the crash-safety design, and nothing else would notice it
+    being reversed.
+
+        save_filed(new) -> UPDATE stored_filename = new -> unlink(old)
+
+    Every crash point in that sequence leaves a harmless spare file. Swap the
+    last two and a crash leaves a row naming a file that is gone, which
+    verify_backup correctly reports as damage. Every other test in this file
+    passes with the statements swapped.
+    """
+    mock_extract.side_effect = [MOCK_LLM_RESULT, SECOND_LLM_RESULT]
+    process_document(pending_doc, setup_db)
+    first = _stored_name(pending_doc)
+
+    observed = {}
+    real_remove = pipeline_mod.remove_filed
+
+    def spy(name, data_dir):
+        observed["row_said"] = _stored_name(pending_doc)
+        observed["removing"] = name
+        return real_remove(name, data_dir)
+
+    with patch("backend.processing.pipeline.remove_filed", spy):
+        process_document(pending_doc, setup_db)
+
+    second = _stored_name(pending_doc)
+    assert observed["removing"] == first
+    assert observed["row_said"] == second, (
+        "the old file was unlinked BEFORE the row was updated -- a crash there "
+        "leaves a document whose filed copy is gone"
+    )
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_a_file_another_row_still_references_is_kept(mock_extract, pending_doc, setup_db):
+    """Needs an 8-hex-prefix collision that also matches on date and receipt id
+    to happen for real. It is here because the operation is an irreversible
+    delete, so the safety should not rest on a birthday-bound argument that a
+    future change to the filename scheme would silently invalidate."""
+    mock_extract.side_effect = [MOCK_LLM_RESULT, SECOND_LLM_RESULT]
+    process_document(pending_doc, setup_db)
+    first = _stored_name(pending_doc)
+
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO documents (original_filename, file_hash, file_size_bytes, status, "
+            "submission_channel, stored_filename) VALUES (?, ?, ?, 'processed', 'web_upload', ?)",
+            ("other.pdf", "f" * 64, 10, first),
+        )
+
+    process_document(pending_doc, setup_db)
+
+    assert first in _filed(setup_db), "deleted a file another document still points at"
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_a_previous_name_that_escapes_filed_is_never_unlinked(mock_extract, pending_doc, setup_db, tmp_path):
+    """A restored database is untrusted input, and this path is an os.unlink
+    running as root. The document must still complete."""
+    mock_extract.return_value = MOCK_LLM_RESULT
+    victim = tmp_path / "precious"
+    victim.write_text("do not delete me")
+
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE documents SET stored_filename = ? WHERE id = ?", (str(victim), pending_doc)
+        )
+
+    process_document(pending_doc, setup_db)
+
+    assert victim.exists(), "an absolute stored_filename reached os.unlink"
+    with get_connection() as conn:
+        assert conn.execute(
+            "SELECT status FROM documents WHERE id = ?", (pending_doc,)
+        ).fetchone()["status"] == "processed"
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_an_unlink_that_fails_does_not_fail_the_document(mock_extract, pending_doc, setup_db):
+    """Filing has already succeeded and the row is already correct, so a stale
+    copy that cannot be removed is untidy, not a failed document."""
+    mock_extract.side_effect = [MOCK_LLM_RESULT, SECOND_LLM_RESULT]
+    process_document(pending_doc, setup_db)
+
+    def boom(name, data_dir):
+        raise OSError("read-only file system")
+
+    with patch("backend.processing.pipeline.remove_filed", boom):
+        process_document(pending_doc, setup_db)
+
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT status, stored_filename FROM documents WHERE id = ?", (pending_doc,)
+        ).fetchone()
+    assert row["status"] == "processed"
+    assert row["stored_filename"] is not None
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_a_raise_between_save_filed_and_the_update_orphans_the_new_file(
+    mock_extract, pending_doc, setup_db
+):
+    """CHARACTERISATION of the accepted window, gstack-shortcut(dec-333b80f5).
+
+    Not desired behaviour -- accepted behaviour, pinned so a change in either
+    direction is visible. save_filed writes the new name ~18 lines above the
+    UPDATE that records it. A raise in between is caught by process_document,
+    which sets status='failed' without touching stored_filename, so the file
+    just written is orphaned permanently and the cleanup never runs (it only
+    fires after a COMMITTED rename).
+
+    If this test starts failing because the file is gone, the window was closed:
+    delete the shortcut marker, the ledger entry and this test.
+    """
+    mock_extract.return_value = MOCK_LLM_RESULT
+
+    with patch("backend.processing.pipeline.estimate_cost", side_effect=RuntimeError("boom")):
+        process_document(pending_doc, setup_db)
+
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT status, stored_filename FROM documents WHERE id = ?", (pending_doc,)
+        ).fetchone()
+
+    assert row["status"] == "failed"
+    assert row["stored_filename"] is None, "the UPDATE committed after all"
+    assert _filed(setup_db) != [], (
+        "the accepted orphan window has closed -- update dec-333b80f5 and delete this test"
+    )
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_a_database_error_during_cleanup_does_not_fail_a_processed_document(
+    mock_extract, pending_doc, setup_db
+):
+    """The cleanup runs AFTER the UPDATE commits, so anything escaping it would
+    reach process_document's `except Exception`, rewrite status='failed' for a
+    document that actually succeeded, send a failure notification, and get the
+    document requeued -- and a reprocess is what creates orphans in the first
+    place. The shared-name SELECT can raise sqlite3.Error ('database is locked')
+    under WAL contention with the backup thread this PR serialises against, so
+    catching only OSError around the unlink was not enough.
+    """
+    import sqlite3
+
+    mock_extract.side_effect = [MOCK_LLM_RESULT, SECOND_LLM_RESULT]
+    process_document(pending_doc, setup_db)
+
+    # Raise from inside the cleanup specifically. Counting get_connection calls
+    # does not work: _run_pipeline opens several before the UPDATE (the category
+    # lookups), so an nth-call trap fires during processing instead and the
+    # document legitimately fails -- which is what the first version of this
+    # test actually measured.
+    def boom(doc_id, previous, data_dir):
+        raise sqlite3.OperationalError("database is locked")
+
+    with patch("backend.processing.pipeline._remove_superseded", boom):
+        process_document(pending_doc, setup_db)
+
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT status, stored_filename FROM documents WHERE id = ?", (pending_doc,)
+        ).fetchone()
+    assert row["status"] == "processed", (
+        "a locked database during cleanup marked a successfully processed "
+        "document as failed"
+    )
+    assert row["stored_filename"] is not None
