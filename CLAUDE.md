@@ -92,7 +92,7 @@ cd .claude/skills/gstack && ./setup
 - `test_normalize.py::test_html_to_pdf` is skipped on Windows (weasyprint requires GTK/Pango native libs). Passes in Docker/Linux.
 - Backend API tests use `create_app(data_dir, run_background=False)` with `TestClient`.
 
-**Frontend (vitest):** `cd frontend && npm test` (11 files, 222 tests).
+**Frontend (vitest):** `cd frontend && npm test` (11 files, 237 tests).
 
 - Config is `frontend/vitest.config.ts`: `environment: "node"`, **no jsdom**, `include: ["src/**/*.test.ts"]`. Tests live next to the module they cover (`src/lib/scanner/geometry.test.ts`, ...).
 - Pure logic only, on purpose. `ImageData`, `HTMLCanvasElement`, and `drawImage` do not exist in Node, so anything touching a canvas (`src/lib/scanner/canvas-utils.ts`) is deliberately untested — covering it means jsdom plus the native `canvas` package, which drags cairo/pango build deps into the Docker image.
