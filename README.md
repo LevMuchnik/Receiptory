@@ -336,6 +336,10 @@ uv run pytest tests/ -v
 cd frontend && npm test
 ```
 
+Both suites run on a fresh clone with nothing extra to fetch: the sample PDF the backend tests use is generated at test time, not read from a fixture directory.
+
+The frontend build tooling (`tailwindcss`, `@tailwindcss/vite`, `tw-animate-css`, the `shadcn` generator) lives in `devDependencies`, so `npm install` / `npm ci` is required before `npm run build`. `--omit=dev` will not build the frontend.
+
 ### Claude Code Dev Container
 
 A sidecar container for in-place development on UNRAID (no host installs needed).
