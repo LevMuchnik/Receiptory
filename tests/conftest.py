@@ -2,7 +2,6 @@ import json
 import os
 import tempfile
 import pytest
-from pathlib import Path
 from unittest.mock import MagicMock
 from backend.database import init_db, get_connection
 
@@ -48,8 +47,19 @@ def db_conn(db_path):
         yield conn
 
 @pytest.fixture
-def sample_pdf_path():
-    return str(Path(__file__).parent.parent / "test_documents" / "Receipt - esim.pdf")
+def sample_pdf_path(tmp_path):
+    # Generated, not read from test_documents/: that directory is gitignored, so
+    # a fresh clone failed every test using this fixture. Same shape as the file
+    # it replaces (one US Letter page); no test depends on its text.
+    import fitz
+
+    path = tmp_path / "synthetic-receipt.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 72), "Synthetic Receipt\nVendor: Example Office\nTotal: 42.00 USD", fontsize=12)
+    document.save(path)
+    document.close()
+    return str(path)
 
 
 SAMPLE_LLM_RESPONSE = json.dumps({
