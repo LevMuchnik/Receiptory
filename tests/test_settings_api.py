@@ -1,6 +1,12 @@
 import pytest
 import bcrypt
+from unittest.mock import MagicMock, patch
+
+import litellm
 from fastapi.testclient import TestClient
+
+from backend.processing.extract import build_extraction_schema
+from backend.processing.pipeline import extraction_categories
 from backend.main import create_app
 from backend.config import init_settings, set_setting
 
@@ -186,3 +192,130 @@ def test_llm_api_keys_select_and_delete_clears_ref(authed_client):
 def test_llm_api_keys_requires_auth(app):
     resp = TestClient(app).get("/api/settings/llm-api-keys")
     assert resp.status_code == 401
+
+
+# --- POST /settings/test-llm: connectivity plus the structured-output probe (issue #67) ---
+
+
+def _reply(text="Hello from test"):
+    response = MagicMock()
+    response.choices = [MagicMock()]
+    response.choices[0].message.content = text
+    return response
+
+
+def _test_llm(authed_client, completion, supported=True):
+    with patch("backend.api.settings.resolve_llm_api_key", return_value="test-key"), \
+         patch("litellm.completion", side_effect=completion) as mock_completion, \
+         patch("litellm.supports_response_schema", return_value=supported):
+        resp = authed_client.post("/api/settings/test-llm")
+    return resp, mock_completion
+
+
+def test_test_llm_probes_the_real_extraction_schema(authed_client):
+    """The probe sends the schema extraction will send, category enum included:
+    a large enum is the documented way a schema gets rejected, so a toy schema
+    would say "supported" where the real one fails."""
+    resp, mock_completion = _test_llm(authed_client, [_reply(), _reply("{}")])
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+    assert resp.json()["schema"] == "supported"
+    assert mock_completion.call_count == 2
+    assert "response_format" not in mock_completion.call_args_list[0].kwargs
+    sent = mock_completion.call_args_list[1].kwargs["response_format"]
+    assert sent["type"] == "json_schema"
+    assert sent["json_schema"]["schema"] == build_extraction_schema(*extraction_categories())
+    assert len(sent["json_schema"]["schema"]["properties"]["category"]["enum"]) > 1  # seeded categories, not the no-enum case
+
+
+def test_test_llm_reports_a_model_without_schema_support_without_a_second_call(authed_client):
+    resp, mock_completion = _test_llm(authed_client, [_reply()], supported=False)
+    assert resp.status_code == 200
+    assert resp.json()["schema"] == "unsupported"
+    assert mock_completion.call_count == 1
+
+
+def test_test_llm_reports_a_rejected_schema_but_still_connects(authed_client):
+    rejected = litellm.BadRequestError(message="schema too complex", model="gemini/x", llm_provider="gemini")
+    resp, _ = _test_llm(authed_client, [_reply(), rejected])
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+    assert resp.json()["schema"] == "rejected"
+    assert "schema too complex" in resp.json()["schema_detail"]
+    assert "falls back to JSON mode" in resp.json()["schema_detail"]
+
+
+def test_test_llm_reports_an_unexpected_probe_failure_as_error(authed_client):
+    resp, _ = _test_llm(authed_client, [_reply(), TimeoutError("read timed out")])
+    assert resp.status_code == 200
+    assert resp.json()["schema"] == "error"
+
+
+def test_test_llm_connectivity_failure_is_still_a_500(authed_client):
+    resp, mock_completion = _test_llm(authed_client, [Exception("bad key")])
+    assert resp.status_code == 500
+    assert "LLM test failed" in resp.json()["detail"]
+    assert mock_completion.call_count == 1
+
+
+def test_test_llm_without_a_key_is_still_a_400(authed_client):
+    with patch("backend.api.settings.resolve_llm_api_key", return_value=""):
+        resp = authed_client.post("/api/settings/test-llm")
+    assert resp.status_code == 400
+
+
+
+def test_test_llm_with_json_mode_off_reports_off_without_a_second_call(authed_client):
+    """Extraction then sends no response_format at all, so a schema verdict
+    would describe a request that never happens."""
+    set_setting("llm_json_mode", False)
+    resp, mock_completion = _test_llm(authed_client, [_reply()])
+    assert resp.status_code == 200
+    assert resp.json()["schema"] == "off"
+    assert mock_completion.call_count == 1
+
+
+def test_test_llm_does_not_report_a_non_schema_400_as_a_rejected_schema(authed_client):
+    overflow = litellm.ContextWindowExceededError(message="too long", model="gemini/x", llm_provider="gemini")
+    resp, _ = _test_llm(authed_client, [_reply(), overflow])
+    assert resp.json()["schema"] == "error"
+
+
+def test_test_llm_probe_setup_failure_is_reported_not_a_500(authed_client):
+    """Connectivity already succeeded; the probe must never turn that into a
+    bare Internal Server Error."""
+    with patch("backend.processing.pipeline.extraction_categories", side_effect=RuntimeError("db gone")):
+        resp, _ = _test_llm(authed_client, [_reply()])
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+    assert resp.json()["schema"] == "error"
+
+
+def test_test_llm_calls_carry_a_timeout(authed_client):
+    _, mock_completion = _test_llm(authed_client, [_reply(), _reply("{}")])
+    assert all(c.kwargs.get("timeout") for c in mock_completion.call_args_list)
+
+
+def test_test_llm_probe_never_sends_reasoning_effort(authed_client):
+    """A thinking budget above the probe's 50-token cap 400s on its own, and
+    would then be reported as a rejected schema."""
+    set_setting("llm_reasoning_effort", "high")
+    with patch("litellm.supports_reasoning", return_value=True):
+        resp, mock_completion = _test_llm(authed_client, [_reply(), _reply("{}")])
+    assert resp.json()["schema"] == "supported"
+    probe = mock_completion.call_args_list[1].kwargs
+    assert probe["response_format"]["type"] == "json_schema"
+    assert "reasoning_effort" not in probe
+    assert probe["api_key"] == "test-key"
+
+
+
+def test_test_llm_masks_the_api_key_in_error_text(authed_client):
+    """Gemini carries the key in the request URL, and some errors quote it."""
+    leak = Exception("GET https://generativelanguage.googleapis.com/v1/models?key=test-key failed")
+    resp, _ = _test_llm(authed_client, [leak])
+    assert resp.status_code == 500
+    assert "test-key" not in resp.json()["detail"] and "***-key" in resp.json()["detail"]
+    resp, _ = _test_llm(authed_client, [_reply(), litellm.BadRequestError(message="schema rejected, url ...?key=test-key", model="m", llm_provider="gemini")])
+    assert resp.json()["schema"] == "rejected"
+    assert "test-key" not in resp.json()["schema_detail"]
