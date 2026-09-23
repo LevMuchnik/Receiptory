@@ -43,7 +43,7 @@ frontend/src/           # React SPA
   components/scanner/   # Mobile scanner UI (viewfinder, review, nav)
 frontend/vitest.config.ts  # Frontend test config
 migrations/             # Numbered SQL files (001_initial_schema.sql, ...)
-scripts/                # Dev utilities (compare_json_mode.py A/B harness)
+scripts/                # Dev utilities (compare_json_mode.py: extraction A/B harness and merge gate)
 tests/                  # pytest test suite
 ```
 
