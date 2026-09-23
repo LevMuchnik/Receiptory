@@ -10,6 +10,10 @@ def mock_llm_settings(monkeypatch):
     monkeypatch.setenv("RECEIPTORY_LLM_API_KEY", "test-key")
     monkeypatch.setenv("RECEIPTORY_LLM_TEMPERATURE", "1.0")
     monkeypatch.setenv("RECEIPTORY_LLM_REASONING_EFFORT", "none")
+    # These tests run with no database, so every setting triage reads has to
+    # come from the environment: an unset one falls through to get_connection(),
+    # raises, and the triage guard (correctly) keeps everything.
+    monkeypatch.setenv("RECEIPTORY_LLM_JSON_MODE", "true")
 
 
 def _make_doc(identifier: str, source: str = "attachment", image: bytes = b"fake-png") -> ClassificationDocument:
@@ -24,7 +28,7 @@ async def test_classify_returns_matching_identifiers(mock_llm_settings):
     mock_response.choices = [MagicMock()]
     mock_response.choices[0].message.content = '["invoice.pdf"]'
 
-    with patch("backend.ingestion.url_triage.litellm_completion", return_value=mock_response):
+    with patch("backend.processing.extract.litellm_completion", return_value=mock_response):
         result = await classify_email_documents(
             sender_email="billing@vendor.com",
             subject="Your Invoice #123",
@@ -42,7 +46,7 @@ async def test_classify_returns_empty_when_none_qualify(mock_llm_settings):
     mock_response.choices = [MagicMock()]
     mock_response.choices[0].message.content = '[]'
 
-    with patch("backend.ingestion.url_triage.litellm_completion", return_value=mock_response):
+    with patch("backend.processing.extract.litellm_completion", return_value=mock_response):
         result = await classify_email_documents(
             sender_email="news@company.com",
             subject="Weekly Newsletter",
@@ -60,7 +64,7 @@ async def test_classify_filters_invalid_identifiers(mock_llm_settings):
     mock_response.choices = [MagicMock()]
     mock_response.choices[0].message.content = '["real.pdf", "hallucinated.pdf"]'
 
-    with patch("backend.ingestion.url_triage.litellm_completion", return_value=mock_response):
+    with patch("backend.processing.extract.litellm_completion", return_value=mock_response):
         result = await classify_email_documents(
             sender_email="a@b.com", subject="test", body_text="", documents=docs,
         )
@@ -71,7 +75,7 @@ async def test_classify_filters_invalid_identifiers(mock_llm_settings):
 async def test_classify_fallback_on_llm_failure(mock_llm_settings):
     """On LLM error, fallback returns all identifiers."""
     docs = [_make_doc("a.pdf"), _make_doc("b.png")]
-    with patch("backend.ingestion.url_triage.litellm_completion", side_effect=Exception("API down")):
+    with patch("backend.processing.extract.litellm_completion", side_effect=Exception("API down")):
         result = await classify_email_documents(
             sender_email="a@b.com", subject="test", body_text="", documents=docs,
         )
@@ -105,7 +109,7 @@ async def test_triage_urls_returns_candidates(mock_llm_settings):
     mock_response.choices = [MagicMock()]
     mock_response.choices[0].message.content = '["https://billing.com/invoice/123"]'
 
-    with patch("backend.ingestion.url_triage.litellm_completion", return_value=mock_response):
+    with patch("backend.processing.extract.litellm_completion", return_value=mock_response):
         result = await triage_email_urls(
             sender_email="billing@vendor.com",
             subject="Your Invoice",
@@ -119,7 +123,7 @@ async def test_triage_urls_returns_candidates(mock_llm_settings):
 async def test_triage_urls_fallback_on_failure(mock_llm_settings):
     """On LLM failure, returns all URLs."""
     urls = ["https://a.com", "https://b.com"]
-    with patch("backend.ingestion.url_triage.litellm_completion", side_effect=Exception("fail")):
+    with patch("backend.processing.extract.litellm_completion", side_effect=Exception("fail")):
         result = await triage_email_urls(
             sender_email="a@b.com", subject="test", body_text="", urls=urls,
         )
