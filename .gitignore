@@ -12,3 +12,8 @@ test_documents/
 .gstack/
 .claude-dev-home/
 .claude/skills/gstack/
+
+# A/B harness results (scripts/compare_json_mode.py --save): full extractions,
+# including OCR text and tax IDs. The script refuses any other in-repo path.
+*.compare.json
+*.compare.json.tmp
