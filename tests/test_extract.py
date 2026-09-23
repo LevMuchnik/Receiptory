@@ -1,8 +1,12 @@
 import json
 import logging
+import re
+import jsonschema
+import litellm
 import pytest
 from unittest.mock import patch
-from backend.processing.extract import (build_extraction_prompt, parse_llm_response, extract_document, totals_mismatch, ParseFailure, _MAX_PARSE_RETRIES)
+from backend.models import AdditionalField, LineItem
+from backend.processing.extract import (build_extraction_prompt, build_extraction_schema, is_schema_rejection, parse_llm_response, extract_document, response_format_kwargs, totals_mismatch, ParseFailure, _EXPECTED_KEYS, _FIELD_SCHEMAS, _MAX_PARSE_RETRIES)
 from tests.conftest import SAMPLE_LLM_RESPONSE, mock_llm_response
 
 EXTRACT_LOGGER = "backend.processing.extract"
@@ -310,13 +314,175 @@ def test_extract_document_calls_llm(mock_completion):
 _EXTRACT_ARGS = dict(page_images=[b"fake-png-bytes"], model="gemini/gemini-3-flash-preview", api_key="test-key", business_names=["Acme"], business_addresses=["123 Main"], business_tax_ids=["515000000"], expense_categories=[{"name": "office_supplies", "description": "Office stuff"}], issued_categories=[])
 
 
+_EXPENSE = [{"name": "office_supplies", "description": "Office stuff"}, {"name": "travel", "description": ""}]
+_ISSUED = [{"name": "Tax Invoice", "description": "Standard invoice"}, {"name": "travel", "description": "same name, other section"}]
+
+
+def _prompt_fields(prompt: str) -> list[str]:
+    # Anchored on "- name:" at column 0: total_amount's entry runs over ten
+    # indented continuation lines, and the category lists above the section
+    # are indented too.
+    section = prompt.split("## Required Output", 1)[1]
+    return re.findall(r"^- (\w+):", section, flags=re.MULTILINE)
+
+
+def _object_schemas(node):
+    if isinstance(node, dict):
+        if node.get("type") == "object":
+            yield node
+        for value in node.values():
+            yield from _object_schemas(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _object_schemas(value)
+
+
+def test_prompt_lists_the_schema_fields_in_schema_order():
+    """The prompt is hand-written and the schema is data; this is what keeps
+    them one list. Order is load-bearing, not cosmetic: under a schema the
+    model writes keys in this order, and the json_object fallback follows the
+    prompt's."""
+    prompt = build_extraction_prompt(["Acme"], [], [], _EXPENSE, _ISSUED)
+    assert _prompt_fields(prompt) == list(_FIELD_SCHEMAS)
+
+
+def test_shape_gate_keys_are_the_schema_fields():
+    assert _EXPECTED_KEYS == frozenset(build_extraction_schema([], [])["properties"])
+
+
+def test_schema_category_enum_is_deduped_names_plus_null():
+    schema = build_extraction_schema(_EXPENSE, _ISSUED)
+    assert schema["properties"]["category"] == {"type": ["string", "null"], "enum": ["Tax Invoice", "office_supplies", "travel", None]}
+
+
+def test_schema_without_categories_emits_no_enum():
+    """An empty enum is not valid JSON Schema, and a blank name is not a category."""
+    assert build_extraction_schema([], [])["properties"]["category"] == {"type": ["string", "null"]}
+    assert "enum" not in build_extraction_schema([{"name": "", "description": ""}], [])["properties"]["category"]
+
+
+def test_schema_is_strict_at_every_object_level():
+    """OpenAI strict mode rejects a schema with an optional key or an open
+    object anywhere, so the same schema only survives a model swap if every
+    level is closed."""
+    objects = list(_object_schemas(build_extraction_schema(_EXPENSE, _ISSUED)))
+    assert len(objects) == 3  # the document, a line item, an additional field
+    for obj in objects:
+        assert obj["required"] == list(obj["properties"])
+        assert obj["additionalProperties"] is False
+
+
+def test_sample_response_validates_against_the_schema():
+    jsonschema.validate(json.loads(SAMPLE_LLM_RESPONSE), build_extraction_schema(_EXPENSE, []))
+
+
+def test_schema_rejects_an_unlisted_category_and_a_missing_field():
+    schema = build_extraction_schema(_EXPENSE, [])
+    doc = json.loads(SAMPLE_LLM_RESPONSE)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({**doc, "category": "made_up"}, schema)
+    del doc["raw_extracted_text"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(doc, schema)
+
+
+def test_building_a_schema_does_not_mutate_the_shared_fragments():
+    build_extraction_schema(_EXPENSE, _ISSUED)["properties"]["receipt_date"]["type"].append("integer")
+    assert _FIELD_SCHEMAS["receipt_date"] == {"type": ["string", "null"]}
+
+
+@patch("litellm.supports_response_schema", return_value=True)
+def test_response_format_kwargs_asks_for_the_schema_when_supported(_supports):
+    assert response_format_kwargs("m", "n", {"type": "object"}) == {
+        "response_format": {"type": "json_schema", "json_schema": {"name": "n", "schema": {"type": "object"}, "strict": True}},
+        "drop_params": True,
+    }
+
+
+@patch("litellm.supports_response_schema", return_value=False)
+def test_response_format_kwargs_falls_back_to_json_object_when_unsupported(_supports):
+    assert response_format_kwargs("m", "n", {"type": "object"}) == {"response_format": {"type": "json_object"}, "drop_params": True}
+
+
+@patch("litellm.supports_response_schema", side_effect=Exception("model not in registry"))
+def test_response_format_kwargs_treats_an_unknown_model_as_unsupported(_supports):
+    assert response_format_kwargs("m", "n", {"type": "object"}) == {"response_format": {"type": "json_object"}, "drop_params": True}
+
+
+@patch("litellm.supports_response_schema", return_value=True)
 @patch("backend.processing.extract.litellm_completion")
-def test_extract_document_requests_json_mode(mock_completion):
+def test_extract_document_requests_the_extraction_schema(mock_completion, _supports):
+    mock_completion.return_value = mock_llm_response()
+    extract_document(**_EXTRACT_ARGS)
+    kwargs = mock_completion.call_args.kwargs
+    assert kwargs["response_format"]["type"] == "json_schema"
+    assert kwargs["response_format"]["json_schema"]["schema"] == build_extraction_schema(_EXTRACT_ARGS["expense_categories"], _EXTRACT_ARGS["issued_categories"])
+    assert kwargs["drop_params"] is True
+
+
+@patch("litellm.supports_response_schema", return_value=False)
+@patch("backend.processing.extract.litellm_completion")
+def test_extract_document_keeps_json_object_for_a_model_without_schema_support(mock_completion, _supports):
+    """Regression guard. Before #67 every model got json_object. A model litellm
+    does not list as schema-capable must still get it, not lose JSON mode."""
     mock_completion.return_value = mock_llm_response()
     extract_document(**_EXTRACT_ARGS)
     kwargs = mock_completion.call_args.kwargs
     assert kwargs["response_format"] == {"type": "json_object"}
     assert kwargs["drop_params"] is True
+
+
+def _schema_rejected():
+    return litellm.BadRequestError(message="Request contains an invalid argument: schema too complex", model="gemini/gemini-3.5-flash", llm_provider="gemini")
+
+
+def _formats_sent(mock_completion) -> list[str]:
+    return [c.kwargs["response_format"]["type"] for c in mock_completion.call_args_list]
+
+
+@patch("litellm.supports_response_schema", return_value=True)
+@patch("backend.processing.extract.litellm_completion")
+def test_a_rejected_schema_falls_back_to_json_object(mock_completion, _supports, caplog):
+    mock_completion.side_effect = [_schema_rejected(), mock_llm_response()]
+    with caplog.at_level(logging.ERROR, logger=EXTRACT_LOGGER):
+        result = extract_document(**_EXTRACT_ARGS)
+    assert _formats_sent(mock_completion) == ["json_schema", "json_object"]
+    assert result.extraction.vendor_name == "Office Depot"
+    assert result.tokens_in == 1000  # a rejected call carries no usage
+    assert "rejected the response schema (BadRequestError)" in caplog.text
+
+
+@patch("litellm.supports_response_schema", return_value=True)
+@patch("backend.processing.extract.litellm_completion")
+def test_the_schema_fallback_sticks_and_does_not_spend_a_parse_retry(mock_completion, _supports):
+    """With one parse retry: the 400, then an unparseable reply, then a good
+    one. Had the 400 consumed the retry, the unparseable reply would fail the
+    document. The retry must also not go back to the rejected schema."""
+    mock_completion.side_effect = [_schema_rejected(), mock_llm_response(content="not json at all"), mock_llm_response()]
+    result = extract_document(**_EXTRACT_ARGS, parse_retries=1)
+    assert _formats_sent(mock_completion) == ["json_schema", "json_object", "json_object"]
+    assert result.extraction.vendor_name == "Office Depot"
+    assert result.tokens_in == 2000
+
+
+@patch("litellm.supports_response_schema", return_value=False)
+@patch("backend.processing.extract.litellm_completion")
+def test_a_bad_request_without_a_schema_is_raised_not_retried(mock_completion, _supports):
+    mock_completion.side_effect = _schema_rejected()
+    with pytest.raises(litellm.BadRequestError):
+        extract_document(**_EXTRACT_ARGS, parse_retries=3)
+    assert mock_completion.call_count == 1
+
+
+@patch("litellm.supports_response_schema", return_value=True)
+@patch("backend.processing.extract.litellm_completion")
+def test_a_second_bad_request_after_the_fallback_propagates(mock_completion, _supports):
+    """The fallback is taken once: if the json_object re-call also fails, its
+    error propagates and the document fails, with no further retry."""
+    mock_completion.side_effect = [_schema_rejected(), litellm.ContextWindowExceededError(message="too long", model="gemini/x", llm_provider="gemini")]
+    with pytest.raises(litellm.ContextWindowExceededError):
+        extract_document(**_EXTRACT_ARGS, parse_retries=3)
+    assert _formats_sent(mock_completion) == ["json_schema", "json_object"]
 
 
 @patch("backend.processing.extract.litellm_completion")
@@ -743,3 +909,139 @@ def test_totals_mismatch_scales_the_tolerance_with_the_invoice():
     assert totals_mismatch(145.76, 26.24, 198.00) is not None      # +26.00 tip
     assert totals_mismatch(143.57, 0.0, 163.52) is not None        # +19.95 shipping
     assert totals_mismatch(10.00, 0.0, 10.05) is not None          # 5 agorot on a 10 receipt
+
+
+
+# --- A line item must always validate as models.LineItem ---
+
+def test_schema_line_item_description_is_a_required_string():
+    """Not nullable: models.LineItem.description is `str`, and GET /documents
+    validates every stored line item, so one null would 500 the whole list."""
+    item = build_extraction_schema(_EXPENSE, [])["properties"]["line_items"]["items"]
+    assert item["properties"]["description"] == {"type": "string"}
+    assert "description" in item["required"]
+
+
+def test_parse_repairs_line_items_that_would_break_the_document_list():
+    """json_object mode and a schema-ignoring model are not bound by the schema,
+    so the parser guarantees the shape itself."""
+    data = json.loads(SAMPLE_LLM_RESPONSE)
+    data["line_items"] = [
+        {"description": None, "quantity": 1, "unit_price": 5},
+        {"quantity": 2, "unit_price": "3.5"},
+        {"description": 42, "quantity": None, "unit_price": None},
+        "a bare string",
+        ["a", "list"],
+    ]
+    items = parse_llm_response(json.dumps(data)).line_items
+    assert [i["description"] for i in items] == ["", "", "42"]
+    for item in items:
+        LineItem(**item)  # what GET /documents does to every stored item
+
+
+@pytest.mark.parametrize("error, expected", [
+    (litellm.BadRequestError(message="schema too complex", model="m", llm_provider="gemini"), True),
+    (litellm.BadRequestError(message="400 The specified schema produces a constraint that has too many states for serving", model="m", llm_provider="gemini"), True),
+    (litellm.BadRequestError(message="Invalid schema for response_format 'x': enum too long", model="m", llm_provider="openai"), True),
+    # litellm maps any Gemini error containing "403" to a plain BadRequestError.
+    (litellm.BadRequestError(message="GeminiException BadRequestError - 403 PERMISSION_DENIED: API key not valid", model="m", llm_provider="gemini"), False),
+    (litellm.BadRequestError(message="Request contains an invalid argument: image too large", model="m", llm_provider="gemini"), False),
+    (litellm.ContextWindowExceededError(message="too long", model="m", llm_provider="gemini"), False),
+    (litellm.ContentPolicyViolationError(message="blocked", model="m", llm_provider="gemini"), False),
+    (litellm.ImageFetchError(message="no image"), False),
+    (ValueError("not an API error"), False),
+])
+def test_is_schema_rejection_excludes_400s_that_are_not_about_the_schema(error, expected):
+    assert is_schema_rejection(error) is expected
+
+
+@patch("litellm.supports_response_schema", return_value=True)
+@patch("backend.processing.extract.litellm_completion")
+def test_a_non_schema_400_on_the_schema_call_is_raised_without_a_retry(mock_completion, _supports):
+    """A context overflow fails the same way without the schema: re-sending
+    every page image would only double the wait and log a false rejection."""
+    mock_completion.side_effect = litellm.ContextWindowExceededError(message="too long", model="gemini/x", llm_provider="gemini")
+    with pytest.raises(litellm.ContextWindowExceededError):
+        extract_document(**_EXTRACT_ARGS, parse_retries=3)
+    assert mock_completion.call_count == 1
+
+
+@patch("backend.processing.extract.litellm_completion")
+def test_a_bad_request_with_json_mode_off_is_raised_not_retried(mock_completion):
+    """No response_format at all: there is no schema to drop, so the 400 is the
+    document's own and propagates unchanged after one call."""
+    mock_completion.side_effect = _schema_rejected()
+    with pytest.raises(litellm.BadRequestError):
+        extract_document(**_EXTRACT_ARGS, json_mode=False, parse_retries=3)
+    assert mock_completion.call_count == 1
+
+
+def test_parse_leaves_absent_line_item_numbers_absent():
+    """The repair fills a missing description but must not invent quantity or
+    unit_price: LineItem defaults them, and a 0.0 would read as a real value."""
+    data = json.loads(SAMPLE_LLM_RESPONSE)
+    data["line_items"] = [{"description": "Service fee"}]
+    items = parse_llm_response(json.dumps(data)).line_items
+    assert items == [{"description": "Service fee"}]
+    LineItem(**items[0])
+
+
+
+@patch("litellm.supports_response_schema", return_value=True)
+@patch("backend.processing.extract.litellm_completion")
+def test_a_revoked_key_is_not_mistaken_for_a_rejected_schema(mock_completion, _supports):
+    """Gemini's 403s arrive as a plain BadRequestError. Retrying without the
+    schema would double every call and log a false schema rejection."""
+    mock_completion.side_effect = litellm.BadRequestError(message="GeminiException BadRequestError - 403 PERMISSION_DENIED", model="gemini/x", llm_provider="gemini")
+    with pytest.raises(litellm.BadRequestError):
+        extract_document(**_EXTRACT_ARGS, parse_retries=3)
+    assert mock_completion.call_count == 1
+
+
+def test_parse_repairs_additional_fields_that_would_break_the_document_list():
+    """models.AdditionalField is key: str, value: str, and pydantic does not
+    coerce 88.0 to a string, so one numeric value would 500 GET /documents."""
+    data = json.loads(SAMPLE_LLM_RESPONSE)
+    data["additional_fields"] = [
+        {"key": "tip_amount", "value": 88.0},
+        {"key": "note", "value": None},
+        {"value": "keyless"},
+        {"key": None, "value": "null key"},
+        "a bare string",
+    ]
+    fields = parse_llm_response(json.dumps(data)).additional_fields
+    assert fields == [{"key": "tip_amount", "value": "88.0"}, {"key": "note", "value": ""}]
+    for field in fields:
+        AdditionalField(**field)
+
+
+@pytest.mark.parametrize("supported, json_mode, side_effect, expected", [
+    (True, True, None, "json_schema"),
+    (False, True, None, "json_object"),
+    (True, False, None, "none"),
+    (True, True, "reject", "json_object_fallback"),
+])
+def test_extract_document_reports_the_output_mode_it_actually_used(supported, json_mode, side_effect, expected):
+    responses = [mock_llm_response()] if side_effect is None else [_schema_rejected(), mock_llm_response()]
+    with patch("litellm.supports_response_schema", return_value=supported), \
+         patch("backend.processing.extract.litellm_completion", side_effect=responses):
+        assert extract_document(**_EXTRACT_ARGS, json_mode=json_mode).output_mode == expected
+
+
+
+def test_additional_fields_given_as_an_object_are_kept(caplog):
+    """{"iban": "..."} instead of a list is a common json_object-mode deviation;
+    it used to be stored, and must not be silently dropped now."""
+    data = json.loads(SAMPLE_LLM_RESPONSE)
+    data["additional_fields"] = {"iban": "IL62 0108 0000 0009 9999 999", "branch": 12}
+    assert parse_llm_response(json.dumps(data)).additional_fields == [
+        {"key": "iban", "value": "IL62 0108 0000 0009 9999 999"}, {"key": "branch", "value": "12"}]
+
+
+def test_dropped_items_are_logged(caplog):
+    data = json.loads(SAMPLE_LLM_RESPONSE)
+    data["line_items"] = ["not an object", {"description": "ok"}]
+    data["additional_fields"] = [{"value": "no key"}, {"key": "k", "value": "v"}]
+    with caplog.at_level(logging.WARNING, logger=EXTRACT_LOGGER):
+        parse_llm_response(json.dumps(data))
+    assert "Dropped 1 line item(s)" in caplog.text and "Dropped 1 additional field(s)" in caplog.text

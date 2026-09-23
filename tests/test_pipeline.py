@@ -483,3 +483,43 @@ def test_a_database_error_during_cleanup_does_not_fail_a_processed_document(
         "document as failed"
     )
     assert row["stored_filename"] is not None
+
+
+
+def test_extraction_categories_splits_sections_and_skips_deleted_and_system(setup_db):
+    """Shared by the pipeline and the settings probe, so the prompt and the
+    schema's category enum are built from exactly this."""
+    from backend.database import get_connection
+    from backend.processing.pipeline import extraction_categories
+    with get_connection() as conn:
+        conn.execute("INSERT INTO categories (name, description, section) VALUES ('zz_expense', 'e', 'expense')")
+        conn.execute("INSERT INTO categories (name, description, section) VALUES ('zz_issued', NULL, 'issued')")
+        conn.execute("INSERT INTO categories (name, description, section, is_deleted) VALUES ('zz_gone', 'd', 'expense', 1)")
+        conn.commit()
+        system = [r[0] for r in conn.execute("SELECT name FROM categories WHERE is_system = 1")]
+    expense, issued = extraction_categories()
+    names_e, names_i = {c["name"] for c in expense}, {c["name"] for c in issued}
+    assert "zz_expense" in names_e and "zz_expense" not in names_i
+    assert "zz_issued" in names_i and "zz_issued" not in names_e
+    assert {"description": "", "name": "zz_issued"} in issued  # NULL description becomes ""
+    assert "zz_gone" not in names_e | names_i
+    assert system and not (set(system) & (names_e | names_i))
+
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_pipeline_passes_expense_and_issued_categories_the_right_way_round(mock_extract, pending_doc, setup_db):
+    """The call site of extraction_categories(): swapped unpacking would list
+    expense categories under the issued-invoice heading in the prompt."""
+    from backend.database import get_connection
+    from backend.processing.pipeline import extraction_categories
+    with get_connection() as conn:
+        conn.execute("INSERT INTO categories (name, description, section) VALUES ('zz_e', '', 'expense')")
+        conn.execute("INSERT INTO categories (name, description, section) VALUES ('zz_i', '', 'issued')")
+        conn.commit()
+    mock_extract.side_effect = RuntimeError("stop after the call is recorded")
+    process_document(pending_doc, setup_db)
+    expense, issued = extraction_categories()
+    kwargs = mock_extract.call_args.kwargs
+    assert kwargs["expense_categories"] == expense and kwargs["issued_categories"] == issued
+    assert "zz_e" in {c["name"] for c in expense} and "zz_i" in {c["name"] for c in issued}
