@@ -1,3 +1,4 @@
+import copy
 import json
 import math
 import re
@@ -55,6 +56,93 @@ class LLMExtractionResult:
     tokens_in: int
     tokens_out: int
     model: str
+    # The response_format the successful call used: "json_schema", "json_object",
+    # "json_object_fallback" (a schema was requested and rejected), or "none".
+    # scripts/compare_json_mode.py records it, so an A/B run that silently fell
+    # back cannot pass itself off as a measurement of the schema.
+    output_mode: str = "none"
+
+
+_NULLABLE_STRING = {"type": ["string", "null"]}
+_NULLABLE_NUMBER = {"type": ["number", "null"]}
+DOCUMENT_TYPES = ("expense_receipt", "issued_invoice", "other_document")
+
+
+def strict_object_schema(properties: dict[str, dict]) -> dict:
+    """Every property required, nothing else allowed: the shape OpenAI strict
+    mode demands, so one schema serves every provider litellm can route to.
+    Optional values are expressed as nullable types, never as missing keys."""
+    return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
+
+
+# The fields the model returns, in the order it writes them. One list, three
+# consumers: the response schema (build_extraction_schema), the parser's shape
+# gate (_EXPECTED_KEYS), and the prompt's "Required Output" list, which
+# tests/test_extract.py pins to this exact order.
+#
+# The order is load-bearing: under a schema the model emits keys in declaration
+# order, and what it has written is its working memory for what follows. Moving
+# raw_extracted_text FIRST (transcribe, then extract) was tried in issue #67 and
+# measured against master on 26 real documents: no gain on misdated years
+# (7 -> 6 of 22 correct), and alongside the schema it misread "2026" as "2020" on
+# correctly dated receipts and dropped tax_amount more often. It was taken out.
+# Re-run scripts/compare_json_mode.py before reordering. `category` is a plain
+# nullable string here; build_extraction_schema narrows it to the categories.
+_FIELD_SCHEMAS: dict[str, dict] = {
+    "receipt_date": _NULLABLE_STRING,
+    "document_title": _NULLABLE_STRING,
+    "vendor_name": _NULLABLE_STRING,
+    "vendor_tax_id": _NULLABLE_STRING,
+    "vendor_receipt_id": _NULLABLE_STRING,
+    "client_name": _NULLABLE_STRING,
+    "client_tax_id": _NULLABLE_STRING,
+    "description": _NULLABLE_STRING,
+    # description is a plain string, NOT nullable: models.LineItem.description
+    # is `str`, and GET /documents validates every stored line item on the way
+    # out, so one null description would 500 the whole document list. Under
+    # json_object mode the model never returned one (0 of 255 stored
+    # documents); a nullable schema would invite it. parse_llm_response also
+    # coerces it, for the modes a schema does not bind.
+    "line_items": {"type": "array", "items": strict_object_schema({
+        "description": {"type": "string"}, "quantity": _NULLABLE_NUMBER, "unit_price": _NULLABLE_NUMBER,
+    })},
+    "subtotal": _NULLABLE_NUMBER,
+    "tax_amount": _NULLABLE_NUMBER,
+    "total_amount": _NULLABLE_NUMBER,
+    "currency": _NULLABLE_STRING,
+    "payment_method": _NULLABLE_STRING,
+    "payment_identifier": _NULLABLE_STRING,
+    "language": _NULLABLE_STRING,
+    "additional_fields": {"type": "array", "items": strict_object_schema({
+        "key": {"type": "string"}, "value": {"type": "string"},
+    })},
+    "raw_extracted_text": _NULLABLE_STRING,
+    "document_type": {"type": "string", "enum": list(DOCUMENT_TYPES)},
+    "category": _NULLABLE_STRING,
+    # Required and never null: the model says "unreadable" with 0.0, which still
+    # routes to needs_review. Measured before this change: a missing confidence
+    # never once occurred on a successful extraction.
+    "extraction_confidence": {"type": "number"},
+}
+
+
+def build_extraction_schema(expense_categories: list[dict[str, str]], issued_categories: list[dict[str, str]]) -> dict:
+    """The JSON Schema the extraction call asks the model to fill.
+
+    `category` becomes an enum of the user's category names plus null. Names are
+    deduplicated across the two sections: the enum cannot tell them apart, and
+    pipeline.py still checks the returned name against the expected section, so
+    a wrong-section pick is NULLed there exactly as it was before the schema. A
+    user with no categories gets the plain nullable string, because an empty
+    `enum` is not valid JSON Schema.
+
+    Deep-copied: the fragments in _FIELD_SCHEMAS are shared module state.
+    """
+    properties = copy.deepcopy(_FIELD_SCHEMAS)
+    names = sorted({c["name"] for c in (*expense_categories, *issued_categories) if c.get("name")})
+    if names:
+        properties["category"] = {"type": ["string", "null"], "enum": [*names, None]}
+    return strict_object_schema(properties)
 
 
 def build_extraction_prompt(business_names: list[str], business_addresses: list[str], business_tax_ids: list[str], expense_categories: list[dict[str, str]], issued_categories: list[dict[str, str]]) -> str:
@@ -184,17 +272,14 @@ _FENCE_OPEN_RE = re.compile(r"```(?:json)?", re.IGNORECASE)
 # schema, or it is a decoy/garbage/fragment (e.g. {} from JSON mode, an example
 # object inside model prose, or a lone line item from a truncated response)
 # and the candidate fails rather than filing an all-None record as processed.
-_EXPECTED_KEYS = frozenset({
-    "receipt_date", "document_title", "vendor_name", "vendor_tax_id", "vendor_receipt_id",
-    "client_name", "client_tax_id", "description", "line_items", "subtotal", "tax_amount",
-    "total_amount", "currency", "payment_method", "payment_identifier", "language",
-    "additional_fields", "raw_extracted_text", "document_type", "category", "extraction_confidence",
-})
+_EXPECTED_KEYS = frozenset(_FIELD_SCHEMAS)
 # A parse recovered via the fence or salvage tier means the model deviated
 # from instructions — trust the result a little less.
 _SALVAGE_CONFIDENCE_FACTOR = 0.9
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # keep \t and \n
 _TRAILING_SNIPPET_CHARS = 500
+# How much of a provider's error message to log.
+_ERROR_SNIPPET_CHARS = 500
 _FAILURE_LOG_CHARS = 2000
 _MAX_SALVAGE_ATTEMPTS = 1000
 # Safety cap on llm_parse_retries: retries are sequential paid LLM calls on the
@@ -345,16 +430,41 @@ def parse_llm_response(response_text: str) -> ExtractionResult:
         logger.warning(f"LLM response contained trailing data after the JSON object; ignored. Trailing snippet: {_sanitize_for_log(trailing[:_TRAILING_SNIPPET_CHARS])}")
     line_items = data.get("line_items", [])
     if isinstance(line_items, list):
-        # Same NaN/string-number defense as the scalar money fields: a NaN
-        # unit_price would serialize as invalid JSON (json.dumps allow_nan)
-        # and break every client-side JSON.parse of the stored line items.
+        # Every stored item must validate as models.LineItem, because
+        # GET /documents validates them all on the way out and one bad item
+        # 500s the whole list. So: dicts only, and a string description (a
+        # missing or null one becomes ""). The schema already forbids both;
+        # json_object mode and a model that ignores the schema do not.
+        kept = [item for item in line_items if isinstance(item, dict)]
+        if len(kept) != len(line_items):
+            logger.warning(f"Dropped {len(line_items) - len(kept)} line item(s) that were not objects")
+        line_items = kept
         for item in line_items:
-            if isinstance(item, dict):
-                for key in ("quantity", "unit_price"):
-                    if key in item:
-                        item[key] = _as_float(item[key])
+            description = item.get("description")
+            item["description"] = "" if description is None else str(description)
+            # Same NaN/string-number defense as the scalar money fields: a NaN
+            # unit_price would serialize as invalid JSON (json.dumps allow_nan)
+            # and break every client-side JSON.parse of the stored line items.
+            for key in ("quantity", "unit_price"):
+                if key in item:
+                    item[key] = _as_float(item[key])
     else:
         line_items = []
+    # Same guarantee for additional_fields: models.AdditionalField is
+    # key: str, value: str and pydantic does not coerce 88.0 to "88.0", so one
+    # numeric value would 500 GET /documents. Entries without a key are dropped.
+    additional_fields = data.get("additional_fields", [])
+    if isinstance(additional_fields, dict):
+        # A common json_object-mode deviation: {"iban": "..."} instead of
+        # [{"key": "iban", "value": "..."}]. Keep the data in the stored shape.
+        additional_fields = [{"key": k, "value": v} for k, v in additional_fields.items()]
+    if isinstance(additional_fields, list):
+        kept = [f for f in additional_fields if isinstance(f, dict) and f.get("key") is not None]
+        if len(kept) != len(additional_fields):
+            logger.warning(f"Dropped {len(additional_fields) - len(kept)} additional field(s) without a key")
+        additional_fields = [{"key": str(f["key"]), "value": "" if f.get("value") is None else str(f["value"])} for f in kept]
+    else:
+        additional_fields = []
     confidence = _as_float(data.get("extraction_confidence"))
     if confidence is not None and not (0.0 <= confidence <= 1.0):
         logger.warning(f"LLM returned out-of-range extraction_confidence {confidence}; treating as unknown")
@@ -371,7 +481,7 @@ def parse_llm_response(response_text: str) -> ExtractionResult:
         tax_amount=_as_float(data.get("tax_amount")), total_amount=_as_float(data.get("total_amount")),
         currency=data.get("currency"), payment_method=data.get("payment_method"),
         payment_identifier=data.get("payment_identifier"), language=data.get("language"),
-        additional_fields=data.get("additional_fields", []),
+        additional_fields=additional_fields,
         raw_extracted_text=data.get("raw_extracted_text"),
         document_type=data.get("document_type"), category_name=data.get("category"),
         extraction_confidence=confidence,
@@ -381,6 +491,90 @@ def parse_llm_response(response_text: str) -> ExtractionResult:
 
 def litellm_completion(**kwargs):
     return litellm.completion(**kwargs)
+
+
+def response_format_kwargs(model: str, name: str, schema: dict) -> dict[str, Any]:
+    """litellm kwargs asking for `schema`, or for plain JSON where the model can't take one.
+
+    json_schema when litellm's registry says the model supports response
+    schemas; json_object otherwise, including an id the registry doesn't know
+    (self-hosted, brand new). drop_params is set either way: a model with
+    neither drops the param rather than erroring, so a model swap can never
+    brick a call (the issue #10 invariant). It is a blanket flag and can drop
+    other unsupported params too, which is accepted: the callers' parsers are
+    the net. Same shape as reasoning_effort_kwargs below, and shared with
+    ingestion/url_triage.py.
+    """
+    try:
+        supported = litellm.supports_response_schema(model=model)
+    except Exception:
+        supported = False
+    if supported:
+        response_format: dict[str, Any] = {"type": "json_schema", "json_schema": {"name": name, "schema": schema, "strict": True}}
+    else:
+        response_format = {"type": "json_object"}
+    return {"response_format": response_format, "drop_params": True}
+
+
+EXTRACTION_SCHEMA_NAME = "receipt_extraction"
+
+
+def extraction_format_kwargs(model: str, expense_categories: list[dict[str, str]], issued_categories: list[dict[str, str]]) -> dict[str, Any]:
+    """The response_format kwargs extraction sends: the schema with the user's
+    category enum. The settings page's LLM test sends the same kwargs with a
+    minimal prompt, so it tests whether the provider accepts this schema; it
+    does not re-run a whole extraction."""
+    return response_format_kwargs(model, EXTRACTION_SCHEMA_NAME, build_extraction_schema(expense_categories, issued_categories))
+
+
+# 400s that are not about the schema. Re-sending without it fails the same way
+# (the document is still too long, the page still unsafe, the image still
+# unfetchable), so these are raised as they are instead of being retried and
+# reported as a rejected schema.
+_NOT_SCHEMA_REJECTIONS = (litellm.ContextWindowExceededError, litellm.ContentPolicyViolationError, litellm.ImageFetchError)
+
+
+def is_schema_rejection(error: BaseException) -> bool:
+    """A 400 in which the provider refused the response schema.
+
+    Gemini documents that a complex schema (an enum with many values: the
+    category list is user-editable) fails with 400 InvalidArgument ("The
+    specified schema produces a constraint that has too many states..."), and
+    OpenAI answers "Invalid schema for response_format...". litellm raises both
+    as a plain BadRequestError. So does much else: litellm 1.93 maps any Gemini
+    error containing "403" (a revoked key, billing, API not enabled) to
+    BadRequestError too (exception_mapping_utils.py). So the error must also
+    name a schema. Its subclasses for other causes are excluded outright
+    (_NOT_SCHEMA_REJECTIONS). A refusal worded without "schema" is not retried:
+    the document fails with the provider's own message (issue #67 /ship, D1).
+    """
+    return (
+        isinstance(error, litellm.BadRequestError)
+        and not isinstance(error, _NOT_SCHEMA_REJECTIONS)
+        and "schema" in str(error).lower()
+    )
+
+
+def complete_with_schema_fallback(completion_kwargs: dict[str, Any]) -> Any:
+    """One completion call; if the provider rejects the schema, retry once without it.
+
+    On a schema rejection (is_schema_rejection) of a json_schema call, switch
+    to json_object and re-call rather than fail. The switch is written back
+    into completion_kwargs, so the caller's later calls with the same kwargs
+    (extraction's parse retries) skip the schema too. Anything else raises
+    unchanged, with no extra call: a 400 on a json_object call, or a
+    non-schema 400 such as ContextWindowExceededError. A rejected call returns
+    no usage, so there are no tokens to account for. Shared by extraction and
+    ingestion/url_triage.py.
+    """
+    try:
+        return litellm_completion(**completion_kwargs)
+    except litellm.BadRequestError as e:
+        if not is_schema_rejection(e) or (completion_kwargs.get("response_format") or {}).get("type") != "json_schema":
+            raise
+        logger.error(f"LLM rejected the response schema ({type(e).__name__}); retrying once in json_object mode: {_sanitize_for_log(str(e)[:_ERROR_SNIPPET_CHARS])}")
+        completion_kwargs["response_format"] = {"type": "json_object"}
+        return litellm_completion(**completion_kwargs)
 
 
 # Allowed reasoning-effort levels. "none" means "don't send the param" — the
@@ -438,13 +632,11 @@ def extract_document(page_images: list[bytes], model: str, api_key: str, busines
         content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
     completion_kwargs: dict[str, Any] = dict(model=model, api_key=api_key, messages=[{"role": "user", "content": content}], temperature=temperature, max_tokens=max_tokens)
     if json_mode:
-        # JSON mode stops trailing junk at the source (issue #10). drop_params
-        # is a blanket litellm flag: on a model without response_format support
-        # it silently drops ANY unsupported param (potentially temperature or
-        # max_tokens too) instead of erroring — accepted so a model swap can
-        # never brick extraction; the tolerant parser is the net.
-        completion_kwargs["response_format"] = {"type": "json_object"}
-        completion_kwargs["drop_params"] = True
+        # Ask for the extraction schema (issue #67), falling back to plain JSON
+        # mode (issue #10) on a model that can't take one. The schema binds the
+        # field names, types, key order and the category list; the tolerant
+        # parser stays as the net for the fallback modes.
+        completion_kwargs.update(extraction_format_kwargs(model, expense_categories, issued_categories))
     # Reasoning effort (issue #13): merged in only for reasoning-capable models
     # when the setting is not "none"; on the inject path this also flips
     # drop_params=True (a no-op when json_mode already set it).
@@ -483,8 +675,9 @@ def extract_document(page_images: list[bytes], model: str, api_key: str, busines
         retries = _MAX_PARSE_RETRIES
     tokens_in_total = 0
     tokens_out_total = 0
+    requested_mode = (completion_kwargs.get("response_format") or {}).get("type", "none")
     for attempt in range(retries + 1):
-        response = litellm_completion(**completion_kwargs)
+        response = complete_with_schema_fallback(completion_kwargs)
         usage = response.usage
         tokens_in_total += getattr(usage, "prompt_tokens", 0) or 0
         tokens_out_total += getattr(usage, "completion_tokens", 0) or 0
@@ -525,7 +718,9 @@ def extract_document(page_images: list[bytes], model: str, api_key: str, busines
                 logger.error(f"LLM response truncated at max_tokens={max_tokens}; salvage tier matched only a fragment — rejecting. Tail:\n{_sanitize_for_log(raw_content[-_FAILURE_LOG_CHARS:])}")
                 raise ValueError(truncation_error)
             logger.warning(f"LLM response hit max_tokens={max_tokens} but a complete leading JSON object was parsed")
-        return LLMExtractionResult(extraction=extraction, tokens_in=tokens_in_total, tokens_out=tokens_out_total, model=model)
+        sent_mode = (completion_kwargs.get("response_format") or {}).get("type", "none")
+        output_mode = "json_object_fallback" if requested_mode == "json_schema" and sent_mode != "json_schema" else sent_mode
+        return LLMExtractionResult(extraction=extraction, tokens_in=tokens_in_total, tokens_out=tokens_out_total, model=model, output_mode=output_mode)
     # Unreachable: retries is clamped >= 0 so the loop runs at least once, and
     # each iteration returns or raises. Guard against a future edit that breaks
     # that invariant rather than silently returning None.

@@ -22,29 +22,28 @@ Deferred items captured during planning and review. Organized by component, sort
 
 ## Extraction
 
-### Typed response_schema structured output for extraction
+### Stop sending `temperature` to Gemini 3+ before Google removes it
 
-**What:** Upgrade the extraction LLM call from `json_object` mode to a full typed schema (litellm `response_format` with `json_schema`, mapping to Gemini's `response_schema`) so the model is constrained to the exact field names and types `parse_llm_response()` expects.
+**What:** Move sampling guidance off `temperature` for Gemini 3+ models. Extraction and the three `url_triage` calls all send `temperature` (`llm_temperature`, currently 1.0).
 
-**Why:** JSON mode (shipped with issue #10) guarantees *syntactically* valid JSON but not the right shape — wrong field names, string-where-number, or missing keys still pass silently into `data.get()` defaults.
+**Why:** Every Gemini call logs `DeprecationWarning: temperature, top_p, and top_k continue to function for Gemini 3+ (gemini-3.5-flash) but are planned for removal in a future release. Move sampling guidance into the system instructions instead.` (21 in the container log 2026-09-17 → 09-22). When the removal lands, the call either has the param dropped, which is harmless since 1.0 is Gemini 3's default, or 400s, which fails every extraction.
 
 **Pros:**
-- Eliminates a whole class of silent field-level extraction misses
-- The schema doubles as executable documentation of the extraction contract
+- Removes a weekly stream of log noise
+- Confirms the behaviour on our terms rather than on Google's removal date
 
 **Cons:**
-- Gemini's schema dialect has quirks (limited unions/nullability support)
-- Over-constraining can degrade extraction quality on messy receipts — needs its own eval
-- Requires a drift check before becoming default
+- At 1.0 the fix is probably "omit temperature for Gemini 3+", which is model-specific branching in `extract.py` and `url_triage.py`
 
 **Context:**
-- Source: eng review of issue #10 (2026-07-20), decision D15
-- `scripts/compare_json_mode.py` (built for the #10 merge gate) is exactly the A/B harness this experiment should reuse — extend it to a third arm (schema mode)
-- The extraction fields live in `ExtractionResult` (backend/processing/extract.py) and the prompt's Required Output section
+- Source: status check 2026-09-22, deferred from the #67 eng review (2026-09-23) to keep that PR's A/B gate from measuring a third change
+- Warning raised at litellm `llms/vertex_ai/gemini/vertex_and_google_ai_studio_gemini.py:1104`
+- After #67 every extraction and triage call carries `drop_params=True` while `llm_json_mode` is on (the default); with JSON mode off and reasoning "none" it is not sent. That should make the removal the harmless case. Verify, don't assume.
+- Verify with the A/B harness: `--temperature` overrides BOTH arms of a run, so compare two `--control --save` runs at different temperatures with `--compare`. It cannot omit temperature yet; that needs a small flag first.
 
-**Effort:** M
-**Priority:** P2
-**Depends on:** Issue #10 shipped (json_object mode live and stable)
+**Effort:** S
+**Priority:** P3
+**Depends on:** #67 landed (puts `drop_params` on the triage calls)
 
 ### Update extraction model to gemini-3.8-flash
 
@@ -73,30 +72,7 @@ Deferred items captured during planning and review. Organized by component, sort
 
 ## Ingestion
 
-### Harden url_triage JSON parsing (mirror extraction #10)
-
-**What:** Give the three `url_triage.py` LLM calls (`triage_telegram_urls`, `triage_email_urls`, `classify_email_documents`) the same JSON robustness extraction got in #10: `response_format={"type":"json_object"}` + `drop_params=True`, and reuse the tolerant parse ladder instead of a single strict `json.loads(_strip_code_fences(...))`.
-
-**Why:** Today a malformed/degenerate LLM response makes triage fall through to its fallback — `return list(urls)` / `return fallback` — which silently ingests ALL urls/documents, including junk. Extraction is protected against this; triage is not.
-
-**Pros:**
-- Closes the last unprotected LLM-parse path in the pipeline
-- Makes triage failure explicit (drop) rather than silent (ingest everything)
-- json_object mode also suppresses the class of litellm unsupported-param warnings that extraction avoids via `drop_params`
-
-**Cons:**
-- Touches a second subsystem's robustness — deliberately kept out of the temperature-alignment PR (issue #11) to stay right-sized
-- Needs its own tests for all three call sites (malformed response → correct fallback)
-- The tolerant ladder lives in `extract.py` (`parse_llm_response`) — sharing it means a small refactor to expose it
-
-**Context:**
-- Source: eng review of issue #11 (2026-07-20), tension 2 / deferred from the temperature work
-- Call sites + strict parse: `backend/ingestion/url_triage.py:67-78, 133-148, 215-231`
-- Reference implementation: extraction's json_mode + tolerant ladder in `backend/processing/extract.py` (see the `drop_params` comment at :304-311)
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** None (independent of #11; can land any time)
+_No open items. The triage hardening landed in #67; see Completed._
 
 ## Scanner
 
@@ -565,4 +541,11 @@ Deferred items captured during planning and review. Organized by component, sort
 
 ## Completed
 
-_No completed items yet._
+### Typed response_schema structured output for extraction
+
+**Done 2026-09-23 in issue #67.** Extraction requests a JSON schema built from `_FIELD_SCHEMAS` (`backend/processing/extract.py`), with json_object as the fallback. Measured against master with `scripts/compare_json_mode.py --control/--save/--compare` before merge.
+
+### Harden url_triage JSON parsing (mirror extraction #10)
+
+**Done 2026-09-23 in issue #67.** The three triage calls share one helper, `_llm_select`: a schema, the same one-shot json_object fallback as extraction, and a leading-JSON-value parse that ignores Gemini's trailing text. It does not reuse extraction's full salvage ladder (the reply is a short string list). The proposal to DROP on failure was declined: triage still ingests everything on any failure, because a junk document is visible and a dropped receipt is not (eng review decision 2A).
+

@@ -41,6 +41,19 @@ def process_document(doc_id: int, data_dir: str) -> None:
             pass
 
 
+def extraction_categories() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """The (expense, issued) category lists the extraction prompt and schema are built from.
+
+    Shared with the settings page's LLM test, which probes the schema built from
+    these same lists (the category enum is the part a provider may reject).
+    """
+    with get_connection() as conn:
+        cats = conn.execute("SELECT name, description, section FROM categories WHERE is_deleted = 0 AND is_system = 0").fetchall()
+    expense = [{"name": c["name"], "description": c["description"] or ""} for c in cats if c["section"] == "expense"]
+    issued = [{"name": c["name"], "description": c["description"] or ""} for c in cats if c["section"] == "issued"]
+    return expense, issued
+
+
 def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
     file_hash = doc["file_hash"]
     original_ext = os.path.splitext(doc["original_filename"])[1].lower() or ".pdf"
@@ -59,10 +72,7 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
     business_addresses = get_setting("business_addresses")
     business_tax_ids = get_setting("business_tax_ids")
     confidence_threshold = get_setting("confidence_threshold")
-    with get_connection() as conn:
-        cats = conn.execute("SELECT name, description, section FROM categories WHERE is_deleted = 0 AND is_system = 0").fetchall()
-    expense_categories = [{"name": c["name"], "description": c["description"] or ""} for c in cats if c["section"] == "expense"]
-    issued_categories = [{"name": c["name"], "description": c["description"] or ""} for c in cats if c["section"] == "issued"]
+    expense_categories, issued_categories = extraction_categories()
     temperature = get_setting("llm_temperature")
     max_tokens = get_setting("llm_max_tokens")
     json_mode = get_setting("llm_json_mode")

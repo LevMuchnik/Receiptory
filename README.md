@@ -36,6 +36,7 @@ Receiptory is a single-container web application that ingests receipts and invoi
 **Processing**
 - LLM-powered extraction via [litellm](https://github.com/BerriAI/litellm) (Gemini, OpenAI, Anthropic, and more)
 - Single-pass OCR, field extraction, and classification
+- Structured output: extraction asks the model for a JSON schema where it supports one, with a JSON-mode fallback. **Test LLM Connection** (Administration, LLM Intelligence Engine card) reports which one your model gets
 - Automatic vendor detection, amount parsing, tax ID matching
 - Confidence scoring with human review queue for uncertain extractions
 
@@ -404,7 +405,7 @@ receiptory/
 │   ├── lib/                   # API client, hooks, utilities, PDF builder
 │   └── lib/scanner/           # Boundary detection, geometry, canvas helpers
 ├── migrations/                # Numbered SQL migration files
-├── scripts/                   # Dev utilities (JSON-mode A/B harness)
+├── scripts/                   # Dev utilities (extraction A/B harness and merge gate, backup restore)
 ├── tests/                     # pytest test suite
 ├── Dockerfile                 # Multi-stage build
 └── docker-compose.yml

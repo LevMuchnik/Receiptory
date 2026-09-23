@@ -27,6 +27,9 @@ dev = [
     "pytest-asyncio>=0.25.0",
     "httpx>=0.28.0",
     "pytest-cov>=6.0.0",
+    # Validates the extraction schema in tests (issue #67). Already locked as a
+    # litellm dependency; named here so the tests do not lean on a transitive one.
+    "jsonschema>=4.26.0",
 ]
 
 [tool.pytest.ini_options]

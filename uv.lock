@@ -1851,6 +1851,7 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -1865,6 +1866,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28.0" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
+    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.26.0" },
     { name = "litellm", specifier = ">=1.93.0" },
     { name = "openpyxl", specifier = ">=3.1.0" },
     { name = "pillow", specifier = ">=12.3.0" },

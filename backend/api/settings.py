@@ -118,9 +118,21 @@ def patch_settings(body: SettingsUpdate, username: str = Depends(require_auth)):
     return {"message": "Settings updated"}
 
 
+# Both calls on the Settings "Test LLM" button. Without one, litellm waits up
+# to its 600s default on an endpoint that hangs, holding a worker thread.
+_TEST_LLM_TIMEOUT_S = 60
+
+
+def _redact_key(text: str, api_key: str) -> str:
+    """Provider error text with the API key masked. Gemini AI Studio carries the
+    key in the request URL (?key=...), and some litellm/httpx errors quote that
+    URL; everywhere else this API only ever shows a key's last 4 characters."""
+    return text.replace(api_key, "***" + api_key[-4:]) if api_key else text
+
+
 @router.post("/settings/test-llm")
 def test_llm(username: str = Depends(require_auth)):
-    """Test LLM connectivity by sending a minimal request."""
+    """Test LLM connectivity by sending a minimal request, then probe the extraction schema."""
     import litellm
 
     model = get_setting("llm_model")
@@ -134,14 +146,63 @@ def test_llm(username: str = Depends(require_auth)):
             api_key=api_key,
             messages=[{"role": "user", "content": "Reply with exactly: Hello from <your model name>"}],
             max_tokens=50,
+            timeout=_TEST_LLM_TIMEOUT_S,
         )
-        return {
-            "status": "ok",
-            "model": model,
-            "response": response.choices[0].message.content,
-        }
+        reply = response.choices[0].message.content
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"LLM test failed: {e}")
+        raise HTTPException(status_code=500, detail=f"LLM test failed: {_redact_key(str(e), api_key)}")
+    return {
+        "status": "ok",
+        "model": model,
+        "response": reply,
+        **_probe_extraction_schema(model, api_key),
+    }
+
+
+def _probe_extraction_schema(model: str, api_key: str) -> dict[str, str]:
+    """Whether `model` accepts the request extraction will send it (issue #67).
+
+    `schema` is one of: "supported"; "unsupported" (litellm does not list the
+    model as schema-capable, so extraction uses JSON mode); "off"
+    (llm_json_mode is off, so extraction requests no structured output at
+    all); "rejected" (the provider refused the schema, so extraction falls back
+    to JSON mode); "error" (the check itself failed for another reason).
+
+    Sends the exact response_format extraction sends (the schema with the
+    current category enum, from the helper extraction itself uses) with a
+    minimal prompt: the documented way a schema fails is a large category enum,
+    which a toy schema would not reproduce. Providers
+    validate the schema before generating, so a tiny max_tokens still surfaces
+    a rejection. reasoning_effort is deliberately NOT sent: a thinking budget
+    larger than this probe's output cap would 400 on its own and be misread as
+    a rejected schema. Never raises: a schema problem is not fatal (extraction
+    falls back), and connectivity already succeeded. Without this probe, the
+    fallback shows up only as an ERROR line in the container log.
+    """
+    import litellm
+    from backend.processing.extract import extraction_format_kwargs, is_schema_rejection
+    from backend.processing.pipeline import extraction_categories
+
+    try:
+        if not get_setting("llm_json_mode"):
+            return {"schema": "off", "schema_detail": "JSON mode is off: extraction requests no structured output."}
+        kwargs = extraction_format_kwargs(model, *extraction_categories())
+        if kwargs["response_format"]["type"] != "json_schema":
+            return {"schema": "unsupported", "schema_detail": "Structured output is not listed for this model; extraction uses JSON mode."}
+        litellm.completion(
+            model=model,
+            api_key=api_key,
+            messages=[{"role": "user", "content": "Reply with an empty extraction: every field null or empty."}],
+            max_tokens=50,
+            timeout=_TEST_LLM_TIMEOUT_S,
+            **kwargs,
+        )
+    except Exception as e:
+        detail = _redact_key(str(e), api_key)
+        if is_schema_rejection(e):
+            return {"schema": "rejected", "schema_detail": f"The model rejected the extraction schema; extraction falls back to JSON mode. {detail}"}
+        return {"schema": "error", "schema_detail": f"Could not check structured output: {detail}"}
+    return {"schema": "supported", "schema_detail": "Structured output accepted."}
 
 
 @router.get("/settings/model-info")

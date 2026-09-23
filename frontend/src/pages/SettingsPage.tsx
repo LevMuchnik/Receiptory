@@ -90,6 +90,9 @@ export default function SettingsPage() {
   const [settings, setSettings] = useState<any>({});
   const [costs, setCosts] = useState<any>(null);
   const [testResult, setTestResult] = useState<string | null>(null);
+  // Structured-output probe from the same test (issue #67). Shown on its own
+  // line and coloured by status: a fallback to JSON mode must not read as a pass.
+  const [schemaResult, setSchemaResult] = useState<{ status: string; detail: string } | null>(null);
   const [telegramStatus, setTelegramStatus] = useState<any>(null);
   const [gmailStatus, setGmailStatus] = useState<any>(null);
   const [gmailPollResult, setGmailPollResult] = useState<string | null>(null);
@@ -169,10 +172,12 @@ export default function SettingsPage() {
 
   const testLlm = async () => {
     setTestResult("Testing...");
+    setSchemaResult(null);
     try {
       const res: any = await api.post("/settings/test-llm");
       const reply = res.response || "(no content)";
       setTestResult(`Connected to ${res.model}. Response: ${reply}`);
+      setSchemaResult(res.schema ? { status: res.schema, detail: res.schema_detail || "" } : null);
     } catch (e: any) {
       setTestResult(`Failed: ${e.message}`);
     }
@@ -487,18 +492,27 @@ export default function SettingsPage() {
                   </FieldGroup>
                 </div>
               </div>
-              <div className="mt-5 flex items-center gap-3">
+              <div className="mt-5 flex flex-wrap items-center gap-3">
                 <button
                   onClick={testLlm}
-                  className="px-5 py-2 bg-primary text-white rounded-lg text-sm font-bold hover:opacity-90 transition-opacity flex items-center gap-2"
+                  className="shrink-0 px-5 py-2 bg-primary text-white rounded-lg text-sm font-bold hover:opacity-90 transition-opacity flex items-center gap-2"
                 >
                   <span className="material-symbols-outlined text-sm">cable</span>
                   Test LLM Connection
                 </button>
                 {testResult && (
-                  <p className={`text-sm ${testResult.startsWith("Failed") ? "text-[#ba1a1a]" : "text-[#007239]"}`}>{testResult}</p>
+                  <p className={`min-w-0 break-words text-sm ${testResult.startsWith("Failed") ? "text-[#ba1a1a]" : "text-[#007239]"}`}>{testResult}</p>
                 )}
               </div>
+              {schemaResult && (
+                <p
+                  className={`mt-2 break-words text-sm ${
+                    schemaResult.status === "supported" ? "text-[#007239]" : schemaResult.status === "off" ? "text-gray-500" : "text-amber-700"
+                  }`}
+                >
+                  Structured output: {schemaResult.detail}
+                </p>
+              )}
             </SectionCard>
           </div>
 

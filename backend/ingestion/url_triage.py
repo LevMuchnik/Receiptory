@@ -1,5 +1,6 @@
 """LLM-based triage to decide which URLs/attachments to ingest."""
 
+import asyncio
 import base64
 import json
 import logging
@@ -7,7 +8,7 @@ import re
 from dataclasses import dataclass
 
 from backend.config import get_setting, resolve_llm_api_key
-from backend.processing.extract import litellm_completion, reasoning_effort_kwargs
+from backend.processing.extract import complete_with_schema_fallback, reasoning_effort_kwargs, response_format_kwargs, strict_object_schema
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,89 @@ def _strip_code_fences(text: str) -> str:
     return text.strip()
 
 
+_JSON_DECODER = json.JSONDecoder()
+# Each triage call is a blocking HTTP request run in a worker thread. Without a
+# timeout litellm waits up to 600s on a provider that hangs.
+_TRIAGE_TIMEOUT_S = 60
+
+
+def _parse_selection(raw: str, key: str) -> list | None:
+    """The model's pick: `{"<key>": [...]}` as the schema asks, or a bare list
+    from a model that ignored it. None when the reply is JSON but neither;
+    raises when the reply does not start with JSON at all (the caller keeps
+    everything either way).
+
+    Only the LEADING JSON value is read. Without a schema, Gemini can append
+    prose after complete JSON (issue #10), and a strict json.loads would call
+    that "Extra data" and fall back to keeping every link.
+    """
+    text = _strip_code_fences(raw)
+    parsed, end = _JSON_DECODER.raw_decode(text)
+    trailing = text[end:].strip()
+    if trailing:
+        logger.warning("LLM triage reply had trailing data after the JSON; ignored: %.200s", trailing)
+    if isinstance(parsed, dict):
+        parsed = parsed.get(key)
+    return parsed if isinstance(parsed, list) else None
+
+
+def _llm_select(content: str | list[dict], key: str, allowed: list[str], label: str) -> list[str]:
+    """Ask the model which of `allowed` to keep. Any failure keeps them all.
+
+    The one path all three triage calls share: settings, the call, the schema,
+    parsing, and filtering to what was offered. Keeping everything on failure is
+    deliberate (issue #67 review, decision 2A): a junk document is visible and
+    costs one delete, while a dropped receipt is invisible and never arrives.
+
+    The reply is wrapped in an object (`{"<key>": [...]}`) because OpenAI's
+    json_object mode and strict schemas both require a top-level object.
+    """
+    fallback = list(allowed)
+    try:
+        model = get_setting("llm_model")
+        api_key = resolve_llm_api_key()
+        temperature = get_setting("llm_temperature")
+        reasoning_effort = get_setting("llm_reasoning_effort")
+        json_mode = get_setting("llm_json_mode")
+    except RuntimeError:
+        logger.warning("Database not available for %s settings, keeping all", label)
+        return fallback
+
+    if not model or not api_key:
+        logger.warning("LLM not configured for %s, keeping all", label)
+        return fallback
+
+    completion_kwargs: dict = dict(model=model, api_key=api_key, messages=[{"role": "user", "content": content}], temperature=temperature, timeout=_TRIAGE_TIMEOUT_S)
+    if json_mode:
+        schema = strict_object_schema({key: {"type": "array", "items": {"type": "string"}}})
+        completion_kwargs.update(response_format_kwargs(model, f"{key}_selection", schema))
+    completion_kwargs.update(reasoning_effort_kwargs(model, reasoning_effort))
+
+    try:
+        # Same one-shot json_object retry as extraction if the provider rejects
+        # the schema: otherwise a model that refuses it would turn triage into
+        # keep-everything on every message, with nothing but a log line to show.
+        response = complete_with_schema_fallback(completion_kwargs)
+        selected = _parse_selection(response.choices[0].message.content, key)
+    except Exception:
+        logger.exception("LLM %s failed, keeping all", label)
+        return fallback
+    if selected is None:
+        logger.error("LLM returned no %r list for %s, keeping all", key, label)
+        return fallback
+    # Only what was offered (the model can echo a URL it invented), each once:
+    # a URL listed twice would be fetched twice.
+    return list(dict.fromkeys(item for item in selected if isinstance(item, str) and item in allowed))
+
+
+async def _select_off_loop(content: str | list[dict], key: str, allowed: list[str], label: str) -> list[str]:
+    """_llm_select in a worker thread. The LLM call is blocking, and the Telegram
+    bot runs on FastAPI's own event loop: made inline, one message with a link
+    would stall every API request, the processing queue and the backup
+    scheduler for as long as the provider took to answer."""
+    return await asyncio.to_thread(_llm_select, content, key, allowed, label)
+
+
 async def triage_telegram_urls(message_text: str, urls: list[str]) -> list[str]:
     """Use LLM to filter URLs that are likely receipts/invoices/financial documents.
 
@@ -34,15 +118,6 @@ async def triage_telegram_urls(message_text: str, urls: list[str]) -> list[str]:
     """
     if not urls:
         return []
-
-    model = get_setting("llm_model")
-    api_key = resolve_llm_api_key()
-    temperature = get_setting("llm_temperature")
-    reasoning_effort = get_setting("llm_reasoning_effort")
-
-    if not model or not api_key:
-        logger.warning("LLM not configured for URL triage, returning all URLs")
-        return list(urls)
 
     url_list = "\n".join(f"- {u}" for u in urls)
     prompt = (
@@ -57,28 +132,11 @@ async def triage_telegram_urls(message_text: str, urls: list[str]) -> list[str]:
         "- App store links\n\n"
         f"Message text:\n{message_text}\n\n"
         f"URLs found in message:\n{url_list}\n\n"
-        "Return ONLY a JSON array of URLs to ingest (must be from the provided list). "
-        "If none are relevant, return an empty array. No explanation, just JSON."
+        'Return ONLY a JSON object of the form {"urls": [...]} listing the URLs to ingest '
+        '(each must be from the provided list). If none are relevant, return {"urls": []}. '
+        "No explanation, just JSON."
     )
-
-    try:
-        response = litellm_completion(
-            model=model,
-            api_key=api_key,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-            **reasoning_effort_kwargs(model, reasoning_effort),
-        )
-        raw = response.choices[0].message.content
-        parsed = json.loads(_strip_code_fences(raw))
-        if not isinstance(parsed, list):
-            logger.error("LLM returned non-list for telegram triage: %s", type(parsed))
-            return list(urls)
-        # Only return URLs that were in the input list
-        return [u for u in parsed if u in urls]
-    except Exception:
-        logger.exception("LLM triage failed for telegram URLs, returning all")
-        return list(urls)
+    return await _select_off_loop(prompt, "urls", urls, "telegram URL triage")
 
 
 async def triage_email_urls(
@@ -94,21 +152,6 @@ async def triage_email_urls(
     """
     if not urls:
         return []
-
-    fallback = list(urls)
-
-    try:
-        model = get_setting("llm_model")
-        api_key = resolve_llm_api_key()
-        temperature = get_setting("llm_temperature")
-        reasoning_effort = get_setting("llm_reasoning_effort")
-    except RuntimeError:
-        logger.warning("Database not available for URL triage settings, returning all URLs")
-        return fallback
-
-    if not model or not api_key:
-        logger.warning("LLM not configured for URL triage, returning all URLs")
-        return fallback
 
     truncated_body = body_text[:3000] if body_text else ""
     url_list = "\n".join(f"- {u}" for u in urls)
@@ -131,27 +174,11 @@ async def triage_email_urls(
         f"Email subject: {subject}\n"
         f"Email body (truncated):\n{truncated_body}\n\n"
         f"URLs found in email:\n{url_list}\n\n"
-        "Return ONLY a JSON array of URLs to fetch (must be from the provided list). "
-        "If none are relevant, return an empty array. No explanation, just JSON."
+        'Return ONLY a JSON object of the form {"urls": [...]} listing the URLs to fetch '
+        '(each must be from the provided list). If none are relevant, return {"urls": []}. '
+        "No explanation, just JSON."
     )
-
-    try:
-        response = litellm_completion(
-            model=model,
-            api_key=api_key,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-            **reasoning_effort_kwargs(model, reasoning_effort),
-        )
-        raw = response.choices[0].message.content
-        parsed = json.loads(_strip_code_fences(raw))
-        if not isinstance(parsed, list):
-            logger.error("LLM returned non-list for URL triage: %s", type(parsed))
-            return fallback
-        return [u for u in parsed if u in urls]
-    except Exception:
-        logger.exception("LLM URL triage failed, returning all URLs")
-        return fallback
+    return await _select_off_loop(prompt, "urls", urls, "email URL triage")
 
 
 async def classify_email_documents(
@@ -169,22 +196,6 @@ async def classify_email_documents(
     """
     if not documents:
         return []
-
-    all_identifiers = [d.identifier for d in documents]
-    fallback = list(all_identifiers)
-
-    try:
-        model = get_setting("llm_model")
-        api_key = resolve_llm_api_key()
-        temperature = get_setting("llm_temperature")
-        reasoning_effort = get_setting("llm_reasoning_effort")
-    except RuntimeError:
-        logger.warning("Database not available for document classification settings, returning all")
-        return fallback
-
-    if not model or not api_key:
-        logger.warning("LLM not configured for document classification, returning all")
-        return fallback
 
     truncated_body = body_text[:3000] if body_text else ""
 
@@ -208,8 +219,9 @@ async def classify_email_documents(
         f"Email body (truncated):\n{truncated_body}\n\n"
         f"Documents to classify:\n{doc_descriptions}\n\n"
         "Each document's first page is attached as an image (in the same order as listed above).\n\n"
-        "Return ONLY a JSON array of identifiers (from the list above) that are real financial documents. "
-        "If none qualify, return an empty array. No explanation, just JSON."
+        'Return ONLY a JSON object of the form {"identifiers": [...]} listing the identifiers '
+        '(from the list above) that are real financial documents. If none qualify, return '
+        '{"identifiers": []}. No explanation, just JSON.'
     )
 
     content: list[dict] = [{"type": "text", "text": prompt}]
@@ -220,21 +232,4 @@ async def classify_email_documents(
             "image_url": {"url": f"data:image/png;base64,{b64}"},
         })
 
-    try:
-        response = litellm_completion(
-            model=model,
-            api_key=api_key,
-            messages=[{"role": "user", "content": content}],
-            temperature=temperature,
-            **reasoning_effort_kwargs(model, reasoning_effort),
-        )
-        raw = response.choices[0].message.content
-        parsed = json.loads(_strip_code_fences(raw))
-        if not isinstance(parsed, list):
-            logger.error("LLM returned non-list for document classification: %s", type(parsed))
-            return fallback
-        # Only return identifiers that were in the input
-        return [i for i in parsed if i in all_identifiers]
-    except Exception:
-        logger.exception("LLM document classification failed, returning all")
-        return fallback
+    return await _select_off_loop(content, "identifiers", [d.identifier for d in documents], "email document classification")
