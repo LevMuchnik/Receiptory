@@ -12,6 +12,8 @@ FROM node:24-bookworm
 # Dev tools for the Claude Code CLI.
 # jq: required by gstack skills for JSONL task artifacts, review-log, and the
 # review-readiness dashboard; without it those writes silently no-op.
+# tmux: keeps a session (claude, a shell) running between `docker exec` attaches,
+# e.g. `docker exec -it claude-dev tmux new -A -s dev`.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       ripgrep \
@@ -19,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
       jq \
+      tmux \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker CLI + Compose v2 plugin ONLY (no daemon) from Docker's official repo.

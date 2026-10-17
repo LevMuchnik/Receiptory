@@ -16,7 +16,7 @@ the same for Claude Code.
 ## What's here
 
 - **`Dockerfile.claude`** — a lightweight `node:24` image with the Claude Code CLI,
-  `git`, `ripgrep`, and the Docker *client* + Compose v2 plugin (client-only, no
+  `git`, `ripgrep`, `tmux`, and the Docker *client* + Compose v2 plugin (client-only, no
   daemon; drives the host daemon via the mounted socket).
 - **`docker-compose.claude.yml`** — runs that image as a `claude-dev` container,
   bind-mounting the repo and persisting Claude's auth.
@@ -35,6 +35,10 @@ Docker tab):
 ```bash
 docker exec -it claude-dev claude
 ```
+
+To keep the session running when you disconnect, start it in tmux instead:
+`docker exec -it claude-dev tmux new -A -s dev` creates the `dev` session or
+reattaches to it. The session opens a shell; run `claude` there.
 
 On first run, authenticate once:
 
