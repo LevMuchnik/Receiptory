@@ -72,7 +72,27 @@ Deferred items captured during planning and review. Organized by component, sort
 
 ## Ingestion
 
-_No open items. The triage hardening landed in #67; see Completed._
+### Locate originals with `find_original` everywhere
+
+**What:** Make the pipeline, notifications and page images find `storage/originals/<hash>*` with `atomic.find_original` instead of guessing the extension from `original_filename`.
+
+**Why:** Four writers store the extension four ways: `api/upload.py:36` stores none for a dotless name, `telegram.py:107` and `gmail.py:170,517` fall back to `.bin`, `gmail.py:348` does not lowercase. Three readers guess `.pdf`: `processing/pipeline.py:59`, `notifications/notifier.py:70`, `api/documents.py` `serve_page`. A dotless upload ("receipt") is stored as `originals/<hash>`, and the pipeline then looks for `<hash>.pdf` and fails the document.
+
+**Pros:**
+- One lookup for every reader; the download (#69) already uses it
+- Removes a failure that would surface only as an unexplained failed document
+
+**Cons:**
+- Touches the processing pipeline and notifications, so it needs its own tests
+
+**Context:**
+- Found in the #69 eng review (2026-10-12). 376/376 originals resolve today (read-only scan), so this is latent.
+- `find_original` moved from `backup/verify.py` to `atomic.py` in #69 and rejects a malformed hash (D4 there); readers switching to it inherit that check.
+- Where to start: replace the `splitext(...) or ".pdf"` + `get_file_path("original", ...)` pairs with `find_original(os.path.join(data_dir, "storage"), file_hash)`; add a dotless and a `.bin` original to the pipeline tests.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** #69 landed (moves `find_original` to `atomic.py`)
 
 ## Scanner
 
