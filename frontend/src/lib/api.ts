@@ -136,6 +136,11 @@ export const api = {
     return res.json();
   },
   listScannerTestFrames: () => request<{ frames: ScannerTestFrame[] }>("/scanner/test-frames"),
+  // A plain link target, not a fetch: the browser sends the session cookie and
+  // the server's Content-Disposition: attachment names the saved file, so the
+  // download works on the phone without any blob handling.
+  originalFileUrl: (id: number | string) =>
+    `${API_BASE}/documents/${encodeURIComponent(String(id))}/file/original`,
   scannerTestFrameImageUrl: (id: number) => `${API_BASE}/scanner/test-frames/${id}/image`,
   patchScannerTestFrame: (id: number, body: { ground_truth_json?: string; notes?: string }) =>
     request<{ updated: number }>(`/scanner/test-frames/${id}`, {

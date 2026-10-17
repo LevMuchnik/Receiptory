@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import PageViewer from "@/components/PageViewer";
 import MetadataForm from "@/components/MetadataForm";
 
@@ -152,6 +152,14 @@ export default function DocumentDetailPage() {
             <span className="material-symbols-outlined text-sm">refresh</span>
             Reprocess
           </Button>
+          <a
+            href={api.originalFileUrl(doc.id)}
+            download
+            className={buttonVariants({ variant: "outline", className: "flex items-center gap-1.5" })}
+          >
+            <span className="material-symbols-outlined text-sm">download</span>
+            Download original
+          </a>
           <Button
             variant="destructive"
             onClick={handleDelete}

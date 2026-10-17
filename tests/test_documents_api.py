@@ -240,3 +240,107 @@ def test_batch_reprocess_by_ids_clears_the_reason(authed_client, db_path):
     with get_connection() as conn:
         row = conn.execute("SELECT review_reason FROM documents WHERE id = ?", (doc_id,)).fetchone()
     assert row["review_reason"] is None
+
+
+# --- GET /documents/{id}/file/{original,converted} (issue #69) ---
+
+_H = "ab" * 32
+
+
+def _put_original(tmp_data_dir, name, data=b"%PDF-1.4 original bytes"):
+    path = tmp_data_dir / "storage" / "originals" / name
+    path.write_bytes(data)
+    return data
+
+
+def test_download_original_is_an_attachment_named_after_the_filed_copy(authed_client, db_path, tmp_data_dir):
+    data = _put_original(tmp_data_dir, f"{_H}.jpg", b"\xff\xd8\xff jpeg bytes")
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, file_hash=_H, original_filename="scan_1791552248041.jpg",
+                             stored_filename="2026-10-01-30009-abababab.pdf")
+    resp = authed_client.get(f"/api/documents/{doc_id}/file/original")
+    assert resp.status_code == 200
+    assert resp.content == data
+    assert resp.headers["content-type"] == "image/jpeg"
+    assert resp.headers["content-disposition"] == 'attachment; filename="2026-10-01-30009-abababab.jpg"'
+
+
+def test_download_original_without_a_filed_name_uses_the_cleaned_original_name(authed_client, db_path, tmp_data_dir):
+    _put_original(tmp_data_dir, f"{_H}.pdf")
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, file_hash=_H, status="pending",
+                             original_filename="attachment; filename=0a6fef7c.pdf")
+    resp = authed_client.get(f"/api/documents/{doc_id}/file/original")
+    assert resp.headers["content-disposition"] == 'attachment; filename="0a6fef7c.pdf"'
+
+
+def test_download_original_encodes_a_hebrew_name(authed_client, db_path, tmp_data_dir):
+    _put_original(tmp_data_dir, f"{_H}.pdf")
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, file_hash=_H, status="pending", original_filename="קבלה.pdf")
+    resp = authed_client.get(f"/api/documents/{doc_id}/file/original")
+    assert resp.headers["content-disposition"] == "attachment; filename*=utf-8''%D7%A7%D7%91%D7%9C%D7%94.pdf"
+
+
+@pytest.mark.parametrize("on_disk,original,expected_name", [
+    # telegram.py / gmail.py fall back to .bin for an unknown type
+    (f"{_H}.bin", "photo.jpg", "photo.bin"),
+    # api/upload.py stores a dotless upload with no extension at all
+    (_H, "receipt", "receipt"),
+])
+def test_download_original_finds_extensions_the_name_does_not_predict(
+    authed_client, db_path, tmp_data_dir, on_disk, original, expected_name
+):
+    data = _put_original(tmp_data_dir, on_disk)
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, file_hash=_H, status="pending", original_filename=original)
+    resp = authed_client.get(f"/api/documents/{doc_id}/file/original")
+    assert resp.status_code == 200
+    assert resp.content == data
+    assert resp.headers["content-type"] == "application/octet-stream"
+    assert resp.headers["content-disposition"] == f'attachment; filename="{expected_name}"'
+
+
+def test_download_original_missing_on_disk_is_404(authed_client, db_path):
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, file_hash=_H)
+    assert authed_client.get(f"/api/documents/{doc_id}/file/original").status_code == 404
+
+
+def test_download_original_refuses_a_traversal_hash(authed_client, db_path, tmp_data_dir):
+    """A restored or tampered row must not turn the download into a file read
+    outside originals/, even when the target exists."""
+    (tmp_data_dir / "secret.pdf").write_bytes(b"not a document")
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, file_hash="../../secret", original_filename="x.pdf")
+    resp = authed_client.get(f"/api/documents/{doc_id}/file/original")
+    assert resp.status_code == 404
+    assert b"not a document" not in resp.content
+
+
+def test_download_original_unknown_document_is_404(authed_client):
+    assert authed_client.get("/api/documents/999/file/original").status_code == 404
+
+
+def test_download_original_requires_a_session(app, db_path, tmp_data_dir):
+    _put_original(tmp_data_dir, f"{_H}.pdf")
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, file_hash=_H)
+    assert TestClient(app).get(f"/api/documents/{doc_id}/file/original").status_code == 401
+
+
+def test_converted_file_is_still_served_inline(authed_client, db_path, tmp_data_dir):
+    (tmp_data_dir / "storage" / "converted" / f"{_H}.pdf").write_bytes(b"%PDF converted")
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, file_hash=_H, original_filename="photo.jpg")
+    resp = authed_client.get(f"/api/documents/{doc_id}/file/converted")
+    assert resp.status_code == 200
+    assert resp.content == b"%PDF converted"
+    assert resp.headers["content-type"] == "application/pdf"
+    assert "content-disposition" not in resp.headers
+
+
+def test_unknown_file_type_is_400(authed_client, db_path):
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, file_hash=_H)
+    assert authed_client.get(f"/api/documents/{doc_id}/file/filed").status_code == 400

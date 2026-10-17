@@ -115,6 +115,12 @@ def remove_filed(stored_filename: str, data_dir: str) -> bool:
     return True
 
 
+# gstack-shortcut(dec-85a652a8): file_hash is joined unchecked here, and in the
+# hand-built converted/ paths in api/documents.py serve_page and
+# notifications/notifier.py. Issue #69 chose to validate the hash only in
+# atomic.find_original (the download), not in every path builder. A tampered or
+# restored row can still steer page rendering and notifications; route these
+# through find_original / a FILE_HASH_RE check when that is closed.
 def get_file_path(file_type: str, file_hash: str, ext: str, data_dir: str) -> str:
     if file_type == "original":
         return os.path.join(data_dir, "storage", "originals", f"{file_hash}{ext}")

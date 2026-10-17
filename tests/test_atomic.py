@@ -348,7 +348,8 @@ def test_this_module_stays_importable_without_pymupdf():
     code = (
         "import sys; sys.modules['fitz'] = None; "
         "import backend.backup.verify as v; "
-        "assert v._is_contained_name('a.pdf')"
+        "assert v._is_contained_name('a.pdf'); "
+        "assert v.find_original('/nonexistent', '0' * 64) is None"
     )
     r = subprocess.run(
         [sys.executable, "-c", code],
@@ -376,3 +377,46 @@ def test_the_storage_mutation_lock_is_a_real_lock():
         assert STORAGE_MUTATION_LOCK.locked()
         assert not STORAGE_MUTATION_LOCK.acquire(blocking=False), "the lock does not exclude"
     assert not STORAGE_MUTATION_LOCK.locked()
+
+
+_HASH = "ab" * 32
+
+
+@pytest.fixture
+def originals(tmp_path):
+    storage = tmp_path / "storage"
+    (storage / "originals").mkdir(parents=True)
+    return storage
+
+
+@pytest.mark.parametrize("name", [f"{_HASH}.pdf", f"{_HASH}.bin", f"{_HASH}.JPG", _HASH])
+def test_find_original_finds_every_extension_ingestion_writes(originals, name):
+    """upload.py stores no extension for a dotless name, telegram/gmail fall
+    back to .bin, one gmail path keeps the sender's case."""
+    from backend.atomic import find_original
+
+    (originals / "originals" / name).write_bytes(b"x")
+    assert find_original(str(originals), _HASH) == str(originals / "originals" / name)
+
+
+def test_find_original_returns_none_when_nothing_is_on_disk(originals):
+    from backend.atomic import find_original
+
+    (originals / "originals" / f"{'cd' * 32}.pdf").write_bytes(b"other document")
+    assert find_original(str(originals), _HASH) is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["../../etc/hostname", "/etc/hostname", _HASH.upper(), _HASH[:-1], _HASH + "0", "", None, "*"],
+)
+def test_find_original_refuses_a_hash_the_app_could_not_have_written(originals, tmp_path, bad):
+    """file_hash comes out of the database, which a restore can replace. The
+    download serves whatever this returns, so a traversal must find nothing
+    even when the file it names exists."""
+    from backend.atomic import find_original
+
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "hostname").write_text("nas")
+    (originals / "originals" / f"{_HASH}.pdf").write_bytes(b"x")
+    assert find_original(str(originals), bad) is None

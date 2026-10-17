@@ -104,3 +104,13 @@ describe("api.upload — error extraction", () => {
     }
   });
 });
+
+describe("api.originalFileUrl", () => {
+  it("points at the original-file download endpoint", () => {
+    expect(api.originalFileUrl(42)).toMatch(/\/api\/documents\/42\/file\/original$/);
+  });
+
+  it("encodes a route param so it cannot change the path", () => {
+    expect(api.originalFileUrl("1/../../x")).toMatch(/\/api\/documents\/1%2F..%2F..%2Fx\/file\/original$/);
+  });
+});

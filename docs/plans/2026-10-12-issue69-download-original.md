@@ -397,27 +397,27 @@ Approval readiness: PASS (R1 ← D2 A, R2 ← D3 A, R3 ← D4 A, R4 ← D5 A, R5
 Synthesized from this review's findings. Each task derives from a specific
 finding above. Run with Claude Code or Codex; checkbox as you ship.
 
-- [ ] **T1 (P1, human: ~1h / CC: ~10min)** — atomic — move `_find_original` to `atomic.find_original`, reject a non-hex hash
+- [x] **T1 (P1, human: ~1h / CC: ~10min)** — atomic — move `_find_original` to `atomic.find_original`, reject a non-hex hash
   - Surfaced by: Scope Challenge S2/S3 (D3 A, D4 A)
   - Files: backend/atomic.py, backend/backup/verify.py, tests/test_atomic.py
   - Verify: `uv run pytest tests/test_atomic.py tests/test_backup.py -q` (test_backup.py:1193 unchanged)
-- [ ] **T2 (P1, human: ~1h / CC: ~10min)** — processing/filing — `download_name()` with the D2 fallbacks
+- [x] **T2 (P1, human: ~1h / CC: ~10min)** — processing/filing — `download_name()` with the D2 fallbacks
   - Surfaced by: S1 (D2 A)
   - Files: backend/processing/filing.py, tests/test_filing.py
   - Verify: `uv run pytest tests/test_filing.py -q`
-- [ ] **T3 (P1, human: ~2h / CC: ~15min)** — api/documents — `/file/original` as an attachment, located by find_original; `/file/converted` unchanged
+- [x] **T3 (P1, human: ~2h / CC: ~15min)** — api/documents — `/file/original` as an attachment, located by find_original; `/file/converted` unchanged
   - Surfaced by: A1 (D5 A)
   - Files: backend/api/documents.py, tests/test_documents_api.py
   - Verify: `uv run pytest tests/test_documents_api.py -q`
-- [ ] **T4 (P1, human: ~1h / CC: ~10min)** — frontend — "Download original" link on DocumentDetailPage, URL builder in lib/api.ts
+- [x] **T4 (P1, human: ~1h / CC: ~10min)** — frontend — "Download original" link on DocumentDetailPage, URL builder in lib/api.ts
   - Surfaced by: A2
   - Files: frontend/src/pages/DocumentDetailPage.tsx, frontend/src/lib/api.ts
   - Verify: `cd frontend && npm run build && npm test`; on the phone after deploy
-- [ ] **T5 (P2, human: ~10min / CC: ~2min)** — storage — `gstack-shortcut(dec-85a652a8)` marker at get_file_path (D4 A trail)
+- [x] **T5 (P2, human: ~10min / CC: ~2min)** — storage — `gstack-shortcut(dec-85a652a8)` marker at get_file_path (D4 A trail)
   - Surfaced by: S3 (D4 A)
   - Files: backend/storage.py
   - Verify: grep for the marker
-- [ ] **T6 (P2, human: ~15min / CC: ~3min)** — docs — CLAUDE.md atomic.py line names find_original
+- [x] **T6 (P2, human: ~15min / CC: ~3min)** — docs — CLAUDE.md atomic.py line names find_original
   - Surfaced by: Q3
   - Files: CLAUDE.md
   - Verify: read

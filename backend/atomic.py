@@ -38,16 +38,19 @@ file fsync makes the CONTENT durable; only the directory fsync makes the
 RENAME durable, which is what the crash-safety argument for rclone.conf
 actually rests on.
 
-This module is also where two things live that are not about writing at all:
-`is_contained_name` and `STORAGE_MUTATION_LOCK`. Both are here for the same
-reason -- they are needed on both sides of a boundary whose two halves must not
-import each other, and `backup/verify.py` has to keep working without PyMuPDF.
+This module is also where three things live that are not about writing at all:
+`is_contained_name`, `find_original` and `STORAGE_MUTATION_LOCK`. All are here
+for the same reason -- they are needed on both sides of a boundary whose two
+halves must not import each other, and `backup/verify.py` has to keep working
+without PyMuPDF.
 This file imports nothing but the standard library, which is what makes it the
 only place both sides can already reach. See each one's own comment.
 """
 
+import glob
 import logging
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -152,6 +155,43 @@ def is_contained_name(name: str) -> bool:
         and not os.path.isabs(name)
         and os.path.basename(name) == name
     )
+
+# The shape of documents.file_hash as the application writes it: a sha256 hex
+# digest. backup/verify.py uses the same pattern on the restore path.
+FILE_HASH_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def find_original(storage: str, file_hash: str) -> str | None:
+    """Locate storage/originals/<hash><ext>, whatever the extension turned out to be.
+
+    `storage` is <data_dir>/storage. Returns None when nothing is there, and
+    also when `file_hash` is not 64 lowercase hex: the value comes from the
+    database, and a restored or tampered row holding "../../etc/x" would
+    otherwise turn GET /documents/{id}/file/original into a read of any file
+    the app can open.
+
+    The extension cannot be derived from original_filename, because the
+    ingestion paths store it four different ways. api/upload.py uses
+    splitext(filename or ".pdf"), whose `or` guards a None filename and not a
+    missing extension, so a file uploaded as "receipt" is stored as
+    originals/<hash> with no dot at all; telegram.py and gmail.py fall back to
+    ".bin"; one gmail.py path does not lowercase. Globbing for "<hash>.*" alone
+    misses the dotless file.
+
+    Lives here, not in storage.py, so backup/verify.py can call it without
+    importing PyMuPDF (see the module docstring), and so the download and the
+    backup verifier share one lookup instead of two that can disagree.
+    """
+    if not isinstance(file_hash, str) or not FILE_HASH_RE.fullmatch(file_hash):
+        return None
+    bare = os.path.join(storage, "originals", file_hash)
+    if os.path.exists(bare):
+        return bare
+    # glob.escape: the hash is hex once validated above, but the escape keeps
+    # that a property of this function rather than one the regex has to carry.
+    matches = sorted(glob.glob(glob.escape(bare) + ".*"))
+    return matches[0] if matches else None
+
 
 # Explicit, greppable, and distinct from the `tmp*_converted.pdf` scratch that
 # normalize.py leaks into storage/converted. The backup's ignore rule drops

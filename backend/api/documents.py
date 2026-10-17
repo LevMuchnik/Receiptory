@@ -1,13 +1,16 @@
 import json
+import mimetypes
 import os
 import logging
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 
+from backend.atomic import find_original
 from backend.auth import require_auth
 from backend.database import get_connection
 from backend.processing.extract import totals_mismatch, format_totals_reason
+from backend.processing.filing import download_name
 from backend.storage import render_page, clear_page_cache, get_file_path
 from backend.config import get_setting
 from backend.models import (
@@ -349,9 +352,21 @@ def serve_file(doc_id: int, file_type: str, request: Request, username: str = De
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    ext = os.path.splitext(doc["original_filename"])[1].lower() or ".pdf"
+    if file_type == "original":
+        # The download on the document page (issue #69). find_original, not
+        # get_file_path: the extension on disk cannot be derived from
+        # original_filename, and it refuses a file_hash that is not a sha256
+        # digest, which keeps a tampered row from naming a path outside originals/.
+        path = find_original(os.path.join(data_dir, "storage"), doc["file_hash"])
+        if path is None:
+            raise HTTPException(status_code=404, detail="File not found on disk")
+        ext = os.path.splitext(path)[1].lower()
+        name = download_name(doc["stored_filename"], doc["original_filename"], doc_id, ext)
+        media_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        return FileResponse(path, filename=name, media_type=media_type)
+
     try:
-        path = get_file_path(file_type, doc["file_hash"], ext, data_dir)
+        path = get_file_path(file_type, doc["file_hash"], ".pdf", data_dir)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid file type: {file_type}")
 
