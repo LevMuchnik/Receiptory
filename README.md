@@ -44,6 +44,7 @@ Receiptory is a single-container web application that ingests receipts and invoi
 - Document browser with full-text search (SQLite FTS5), filters, sorting, and pagination
 - Document detail view with rendered page images and editable metadata, and a download of the original file exactly as it arrived
 - Custom categories with LLM-guided classification (see [sample categories](#sample-categories))
+- Foreign-currency amounts converted to your reference currency (default ILS) with Bank of Israel daily rates (ECB cross rates for currencies the BoI doesn't publish), fetched once and cached
 - Export to ZIP with category-organized PDFs, CSV, and Excel metadata
 
 **Infrastructure**

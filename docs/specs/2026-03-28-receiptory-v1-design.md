@@ -6,7 +6,7 @@ Self-hosted receipt, invoice, and document management system for self-employed p
 
 **In scope:** Web UI upload, LLM extraction pipeline, document browser with search/filter/edit, export (zip + CSV), backup to cloud, admin settings, category management, single-user auth.
 
-**Deferred to later sub-projects:** Telegram bot, Gmail adapter, watched folder, currency conversion, clarification workflow, near-duplicate detection, vendor normalization.
+**Deferred to later sub-projects:** Telegram bot, Gmail adapter, watched folder, currency conversion (since done, #72), clarification workflow, near-duplicate detection, vendor normalization.
 
 ---
 
@@ -131,8 +131,10 @@ Starter user categories (seeded): `office_supplies`, `travel`, `meals`, `utiliti
 | `tax_amount` | REAL | Tax amount |
 | `total_amount` | REAL | Total amount |
 | `currency` | TEXT | ISO 4217 code |
-| `converted_amount` | REAL | Reserved for future currency conversion |
-| `conversion_rate` | REAL | Reserved for future currency conversion |
+| `converted_amount` | REAL | `total_amount` × `conversion_rate` (#72) |
+| `conversion_rate` | REAL | One unit of `currency` in `conversion_ref`, at `receipt_date` (#72); NULL when unknown |
+| `conversion_rate_date` | TEXT | Publication date of the rate used (#72) |
+| `conversion_ref` | TEXT | Reference currency the rate converts into; stale when it differs from `reference_currency` (#72) |
 | `payment_method` | TEXT | Cash, credit card, etc. |
 | `payment_identifier` | TEXT | Card last digits, account number |
 | `language` | TEXT | Detected language code |
@@ -372,7 +374,7 @@ All settings stored in `settings` table. Precedence: environment variable (`RECE
 | `business_names` | `[]` | Business/personal names in multiple languages |
 | `business_addresses` | `[]` | Business addresses in multiple languages |
 | `business_tax_ids` | `[]` | Tax IDs for document type detection |
-| `reference_currency` | `"ILS"` | For future currency conversion |
+| `reference_currency` | `"ILS"` | Currency documents are converted into (#72: Bank of Israel rates, ECB cross for others) |
 | `llm_model` | `"gemini/gemini-3-flash-preview"` | litellm model string |
 | `llm_api_key` | `""` | API key for configured provider |
 | `llm_sleep_interval` | `0.0` | Seconds between LLM calls |
