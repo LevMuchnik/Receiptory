@@ -420,3 +420,80 @@ def test_find_original_refuses_a_hash_the_app_could_not_have_written(originals, 
     (tmp_path / "etc" / "hostname").write_text("nas")
     (originals / "originals" / f"{_HASH}.pdf").write_bytes(b"x")
     assert find_original(str(originals), bad) is None
+
+
+def test_find_original_refuses_a_hash_with_a_valid_prefix(originals):
+    """fullmatch, not match: a value that STARTS with a valid hash must not
+    reach the filesystem. Both files exist, so only the shape check stops it."""
+    from backend.atomic import find_original
+
+    (originals / "originals" / f"{_HASH}.pdf").write_bytes(b"x")
+    (originals / "originals" / f"{_HASH}.pdf.pdf").write_bytes(b"x")
+    assert find_original(str(originals), _HASH + ".pdf") is None
+    assert find_original(str(originals), _HASH + "\n") is None
+
+
+# Value: protects=find_original refuses a symlink at the bare (dotless) path as well as the globbed one; fails_when=the bare check becomes os.path.isfile, which follows links; why_new=only the .pdf (glob) link was tested; seam=none; no_claim=symlinked parent dirs
+@pytest.mark.parametrize("link_name", [f"{_HASH}.pdf", _HASH])
+def test_find_original_does_not_follow_a_symlink(originals, tmp_path, link_name):
+    """Same rule as get_filed_path and verify_backup: the storage tree holds
+    regular files. A planted link would make the download serve its target."""
+    from backend.atomic import find_original
+
+    target = tmp_path / "elsewhere.pdf"
+    target.write_bytes(b"not an original")
+    os.symlink(target, originals / "originals" / link_name)
+    assert find_original(str(originals), _HASH) is None
+
+
+def test_find_original_skips_a_directory(originals):
+    """A directory named like an original made FileResponse raise (a 500);
+    it is not an original, so the lookup reports nothing there."""
+    from backend.atomic import find_original
+
+    (originals / "originals" / _HASH).mkdir()
+    assert find_original(str(originals), _HASH) is None
+    (originals / "originals" / f"{_HASH}.jpg").write_bytes(b"x")
+    assert find_original(str(originals), _HASH) == str(originals / "originals" / f"{_HASH}.jpg")
+
+
+def test_find_original_prefers_an_extension_the_app_can_process(originals):
+    """A failed INSERT after save_original (two arrivals of the same bytes, or a
+    crash) can leave a second file for one hash. Alphabetical order would pick
+    <hash>.bin, or the dotless file, over the PDF, and processing would fail."""
+    from backend.atomic import find_original
+
+    for name in (_HASH, f"{_HASH}.bin", f"{_HASH}.jpg"):
+        (originals / "originals" / name).write_bytes(b"x")
+    # dotless and .bin sort ahead of .jpg by name; the processable one wins
+    assert find_original(str(originals), _HASH) == str(originals / "originals" / f"{_HASH}.jpg")
+    (originals / "originals" / f"{_HASH}.PDF").write_bytes(b"x")
+    # two processable candidates: the stable name order decides
+    assert find_original(str(originals), _HASH) == str(originals / "originals" / f"{_HASH}.PDF")
+    for name in (f"{_HASH}.jpg", f"{_HASH}.PDF"):
+        (originals / "originals" / name).unlink()
+    # only unprocessable ones left: still found, never dropped
+    assert find_original(str(originals), _HASH) == str(originals / "originals" / _HASH)
+
+
+def test_find_original_does_not_list_the_directory_for_a_plain_pdf(originals, monkeypatch):
+    """<hash>.pdf is 314 of 384 originals on the live install. Listing
+    originals/ for it on every page view grows with the archive on shfs."""
+    import backend.atomic as atomic
+
+    (originals / "originals" / f"{_HASH}.pdf").write_bytes(b"x")
+
+    def no_listing(*a, **k):
+        raise AssertionError("find_original listed originals/ for a plain .pdf")
+
+    monkeypatch.setattr(atomic.glob, "glob", no_listing)
+    assert atomic.find_original(str(originals), _HASH) == str(originals / "originals" / f"{_HASH}.pdf")
+
+
+def test_processable_extensions_match_what_normalize_accepts():
+    """atomic.py must stay stdlib-only, so it keeps its own copy of the list
+    normalize_file dispatches on; this pins the two together."""
+    from backend.atomic import PROCESSABLE_EXTENSIONS
+    from backend.processing.normalize import SUPPORTED_EXTENSIONS
+
+    assert PROCESSABLE_EXTENSIONS == SUPPORTED_EXTENSIONS

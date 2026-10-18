@@ -3,7 +3,7 @@ import mimetypes
 import os
 import logging
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from fastapi.responses import FileResponse, Response
 
 from backend.atomic import find_original
@@ -11,7 +11,7 @@ from backend.auth import require_auth
 from backend.database import get_connection
 from backend.processing.extract import totals_mismatch, format_totals_reason
 from backend.processing.filing import download_name
-from backend.storage import render_page, clear_page_cache, get_file_path
+from backend.storage import RENDER_ERRORS, render_page, clear_page_cache, get_converted_path
 from backend.config import get_setting
 from backend.models import (
     DocumentResponse,
@@ -353,8 +353,8 @@ def serve_file(doc_id: int, file_type: str, request: Request, username: str = De
         raise HTTPException(status_code=404, detail="Document not found")
 
     if file_type == "original":
-        # The download on the document page (issue #69). find_original, not
-        # get_file_path: the extension on disk cannot be derived from
+        # The download on the document page (issue #69). find_original: the
+        # extension on disk cannot be derived from
         # original_filename, and it refuses a file_hash that is not a sha256
         # digest, which keeps a tampered row from naming a path outside originals/.
         path = find_original(os.path.join(data_dir, "storage"), doc["file_hash"])
@@ -363,35 +363,48 @@ def serve_file(doc_id: int, file_type: str, request: Request, username: str = De
         ext = os.path.splitext(path)[1].lower()
         name = download_name(doc["stored_filename"], doc["original_filename"], doc_id, ext)
         media_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
-        return FileResponse(path, filename=name, media_type=media_type)
+        # The bytes are whatever the sender sent (an emailed .html or .svg
+        # included). The attachment disposition already keeps a browser from
+        # rendering them; nosniff and a sandbox CSP make sure that, even if one
+        # ignored it, they could never run as the app with the session cookie.
+        return FileResponse(
+            path,
+            filename=name,
+            media_type=media_type,
+            headers={"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox"},
+        )
 
-    try:
-        path = get_file_path(file_type, doc["file_hash"], ".pdf", data_dir)
-    except ValueError:
+    if file_type != "converted":
         raise HTTPException(status_code=400, detail=f"Invalid file type: {file_type}")
-
+    path = get_converted_path(doc["file_hash"], data_dir)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File not found on disk")
     return FileResponse(path)
 
 
 @router.get("/documents/{doc_id}/pages/{page_num}")
-def serve_page(doc_id: int, page_num: int, request: Request, username: str = Depends(require_auth)):
+def serve_page(
+    doc_id: int,
+    request: Request,
+    # ge=0: PyMuPDF wraps a negative index with `while pno < 0: pno += count`,
+    # which never ends for a PDF with no pages.
+    page_num: int = Path(ge=0),
+    username: str = Depends(require_auth),
+):
     data_dir = request.app.state.data_dir
     with get_connection() as conn:
         doc = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    ext = os.path.splitext(doc["original_filename"])[1].lower() or ".pdf"
     # Try converted first, fall back to original
     converted_path = os.path.join(data_dir, "storage", "converted", f"{doc['file_hash']}.pdf")
     if os.path.exists(converted_path):
         pdf_path = converted_path
     else:
-        pdf_path = get_file_path("original", doc["file_hash"], ext, data_dir)
+        pdf_path = find_original(os.path.join(data_dir, "storage"), doc["file_hash"])
 
-    if not os.path.exists(pdf_path):
+    if pdf_path is None or not os.path.exists(pdf_path):
         raise HTTPException(status_code=404, detail="PDF not found")
 
     dpi = get_setting("page_render_dpi")
@@ -400,5 +413,11 @@ def serve_page(doc_id: int, page_num: int, request: Request, username: str = Dep
         png_bytes = render_page(pdf_path, page_num, dpi=dpi, cache_dir=cache_dir, doc_id=doc_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except RENDER_ERRORS as e:
+        # find_original also returns .bin and dotless originals, which may be
+        # bytes PyMuPDF cannot draw: nothing to preview, a 404 rather than a
+        # 500. The same catch hides a damaged converted/ PDF, so it is logged.
+        logger.warning("Cannot render page %d of document %d from %s: %s", page_num, doc_id, pdf_path, e)
+        raise HTTPException(status_code=404, detail="Cannot render a page preview of this file")
 
     return Response(content=png_bytes, media_type="image/png")

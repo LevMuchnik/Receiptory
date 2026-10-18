@@ -81,7 +81,8 @@ load_dotenv(os.path.join(REPO_ROOT, ".env"))
 
 from backend.database import init_db, get_connection
 from backend.config import get_setting, resolve_llm_api_key
-from backend.storage import get_file_path, get_filed_path, render_all_pages_to_memory
+from backend.atomic import find_original
+from backend.storage import get_converted_path, get_filed_path, render_all_pages_to_memory
 from backend.processing import extract as extract_module
 from backend.processing.extract import extract_document
 from backend.processing.pipeline import estimate_cost
@@ -171,14 +172,14 @@ def resolve_pdf(doc: dict, data_dir: str) -> str | None:
             filed = None
         if filed and os.path.exists(filed):
             return filed
-    converted = get_file_path("converted", doc["file_hash"], ".pdf", data_dir)
+    converted = get_converted_path(doc["file_hash"], data_dir)
     if os.path.exists(converted):
         return converted
-    ext = os.path.splitext(doc["original_filename"])[1].lower()
-    if ext == ".pdf":
-        original = get_file_path("original", doc["file_hash"], ext, data_dir)
-        if os.path.exists(original):
-            return original
+    # Located like the app does (gmail.py can keep an upper-case .PDF), and only
+    # used when it really is a PDF.
+    original = find_original(os.path.join(data_dir, "storage"), doc["file_hash"])
+    if original and os.path.splitext(original)[1].lower() == ".pdf":
+        return original
     return None
 
 

@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 
 from backend.database import get_connection
 from backend.config import get_setting, resolve_llm_api_key
-from backend.storage import (get_file_path, save_filed, remove_filed, render_all_pages_to_memory)
+from backend.atomic import find_original
+from backend.storage import (save_filed, remove_filed, render_all_pages_to_memory)
 from backend.processing.normalize import normalize_file
 from backend.processing.extract import extract_document, totals_mismatch, format_totals_reason, ExtractionResult
 from backend.processing.filing import generate_stored_filename
@@ -56,8 +57,11 @@ def extraction_categories() -> tuple[list[dict[str, str]], list[dict[str, str]]]
 
 def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
     file_hash = doc["file_hash"]
-    original_ext = os.path.splitext(doc["original_filename"])[1].lower() or ".pdf"
-    original_path = get_file_path("original", file_hash, original_ext, data_dir)
+    # find_original, not a guess from original_filename: the ingestion paths
+    # store the extension four ways (none, .bin, upper case), see its docstring.
+    original_path = find_original(os.path.join(data_dir, "storage"), file_hash)
+    if original_path is None:
+        raise FileNotFoundError(f"Original file not found for document {doc_id}")
     norm = normalize_file(original_path, data_dir)
     pdf_path = norm.pdf_path
     page_count = norm.page_count

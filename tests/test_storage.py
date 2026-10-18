@@ -1,7 +1,8 @@
 import os
 import pytest
 from pathlib import Path
-from backend.storage import (save_original, save_converted, save_filed, get_file_path, render_page, clear_page_cache, compute_file_hash)
+from backend.atomic import find_original
+from backend.storage import (save_original, save_converted, save_filed, get_converted_path, render_page, clear_page_cache, compute_file_hash)
 
 def test_compute_file_hash(sample_pdf_path):
     h = compute_file_hash(sample_pdf_path)
@@ -13,8 +14,13 @@ def test_save_and_get_original(tmp_data_dir, sample_pdf_path):
     saved = save_original(sample_pdf_path, file_hash, ".pdf", str(tmp_data_dir))
     assert os.path.exists(saved)
     assert file_hash in saved
-    retrieved = get_file_path("original", file_hash, ".pdf", str(tmp_data_dir))
+    retrieved = find_original(os.path.join(str(tmp_data_dir), "storage"), file_hash)
     assert retrieved == saved
+
+def test_get_converted_path(tmp_data_dir, sample_pdf_path):
+    file_hash = compute_file_hash(sample_pdf_path)
+    saved = save_converted(sample_pdf_path, file_hash, str(tmp_data_dir))
+    assert get_converted_path(file_hash, str(tmp_data_dir)) == saved
 
 def test_save_filed(tmp_data_dir, sample_pdf_path):
     stored_name = "2026-01-15-INV001-abc123.pdf"

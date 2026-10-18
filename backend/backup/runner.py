@@ -91,7 +91,7 @@ def _paired_scratch(names: list[str]) -> set[str]:
     dropped the scratch only when the sizes matched, on the theory that a
     <hash>.pdf left truncated by a crashed copy made the scratch the only
     intact conversion. That theory is wrong: nothing ever READS
-    converted/<stem>_converted.pdf. get_file_path (storage.py) and serve_page
+    converted/<stem>_converted.pdf. get_converted_path (storage.py) and serve_page
     (api/documents.py) both resolve converted/<hash>.pdf and nothing else, so
     carrying the scratch into the backup rescues nothing -- the restored system
     still serves the truncated file.

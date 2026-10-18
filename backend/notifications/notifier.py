@@ -62,12 +62,11 @@ def _get_thumbnail(doc: dict) -> bytes | None:
     """Try to render the first page of a document as PNG."""
     try:
         import os
-        from backend.storage import render_page, get_file_path
+        from backend.atomic import find_original
+        from backend.storage import render_page
 
         # Find the PDF path
         file_hash = doc.get("file_hash", "")
-        original_filename = doc.get("original_filename", "")
-        ext = os.path.splitext(original_filename)[1].lower() or ".pdf"
 
         # Try to get data_dir from environment
         data_dir = os.environ.get("RECEIPTORY_DATA_DIR", "data")
@@ -76,9 +75,9 @@ def _get_thumbnail(doc: dict) -> bytes | None:
         if os.path.exists(converted_path):
             pdf_path = converted_path
         else:
-            pdf_path = get_file_path("original", file_hash, ext, data_dir)
+            pdf_path = find_original(os.path.join(data_dir, "storage"), file_hash)
 
-        if not os.path.exists(pdf_path):
+        if pdf_path is None or not os.path.exists(pdf_path):
             return None
 
         return render_page(pdf_path, page_num=0, dpi=150)
