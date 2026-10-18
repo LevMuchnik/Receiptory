@@ -97,6 +97,7 @@ export default function SettingsPage() {
   const [gmailStatus, setGmailStatus] = useState<any>(null);
   const [gmailPollResult, setGmailPollResult] = useState<string | null>(null);
   const [notifyTestResult, setNotifyTestResult] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [modelInfo, setModelInfo] = useState<any>(null);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [envKeys, setEnvKeys] = useState<string[]>([]);
@@ -165,7 +166,15 @@ export default function SettingsPage() {
   }, []);
 
   const save = async (updates: Record<string, any>) => {
-    await api.patch("/settings", { settings: updates });
+    try {
+      await api.patch("/settings", { settings: updates });
+      setSaveError(null);
+    } catch (e: any) {
+      // A rejected value (a 400, e.g. a reference currency no rate source
+      // publishes) was not saved: say why, and show the stored value again
+      // below rather than leave the rejected text looking saved.
+      setSaveError(e?.message || "The setting was not saved");
+    }
     const fresh = await api.get("/settings");
     setSettings(fresh);
   };
@@ -230,6 +239,11 @@ export default function SettingsPage() {
         <h1 className="text-3xl font-headline font-extrabold text-primary tracking-tight">System Administration</h1>
         <p className="text-muted-foreground font-medium mt-1">Configure your precision extraction engine and global connectivity.</p>
       </div>
+      {saveError && (
+        <p role="alert" className="text-sm font-medium text-destructive bg-destructive/10 rounded-lg px-4 py-2">
+          Not saved: {saveError}
+        </p>
+      )}
 
       {/* ── Tab nav ─────────────────────────────────────────────────── */}
       <div className="flex gap-1 flex-wrap bg-card rounded-xl shadow-[0_2px_8px_rgba(25,28,30,0.04)] p-1.5">

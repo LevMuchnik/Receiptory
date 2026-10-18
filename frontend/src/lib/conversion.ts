@@ -1,6 +1,7 @@
 /**
  * How a document's conversion into the reference currency (#72) reads in the
  * UI. The server already blanks a rate computed for another reference
+ * currency, and reports rate 1 for a document already in the reference
  * currency, so a non-null converted_amount here is always current.
  */
 export interface Convertible {

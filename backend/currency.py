@@ -33,6 +33,7 @@ import io
 import logging
 import math
 import re
+import time
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -47,11 +48,27 @@ BOI_URL = "https://edge.boi.gov.il/FusionEdgeServer/sdmx/v2/data/dataflow/BOI.ST
 ECB_URL = "https://data-api.ecb.europa.eu/service/data/EXR/D.{ccy}.EUR.SP00.A"
 # The RER_<CCY>_ILS series the BoI publishes (checked 2026-10-18).
 BOI_CURRENCIES = frozenset({"USD", "EUR", "GBP", "CHF", "JPY", "CAD", "AUD", "SEK", "NOK", "DKK", "ZAR", "JOD", "EGP", "LBP"})
+# The ECB's current reference rates (checked 2026-10-18; BGN ended 2025-12-31).
+ECB_CURRENCIES = frozenset({"AUD", "BRL", "CAD", "CHF", "CNY", "CZK", "DKK", "GBP", "HKD", "HUF", "IDR", "ILS", "INR",
+                            "ISK", "JPY", "KRW", "MXN", "MYR", "NOK", "NZD", "PHP", "PLN", "RON", "SEK", "SGD", "THB",
+                            "TRY", "USD", "ZAR"})
+# What reference_currency may be: a code these sources can convert into today.
+REFERENCE_CURRENCIES = frozenset({"ILS"}) | BOI_CURRENCIES | ECB_CURRENCIES
 # One fetch covers this many days before the date: no publication gap
 # (weekend plus holidays) is longer.
 LOOKBACK_DAYS = 14
-# Seconds; connecting gets less, so an unreachable site fails fast.
+# Seconds; connecting gets less, so an unreachable site fails fast. httpx
+# applies these per read, so a whole request also has a deadline and a size
+# cap: a 14-day CSV is a few KB.
 HTTP_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+REQUEST_DEADLINE_S = 20
+MAX_RESPONSE_BYTES = 1_000_000
+# After a site was unreachable, lookups that need it fail at once for this
+# long instead of each paying the timeouts (the queue, an edit); the rates
+# task retries later.
+OUTAGE_BACKOFF_S = 600
+# A window a source answered with no rates is not asked again for a day.
+EMPTY_ANSWER_TTL_S = 24 * 3600
 # The rates task: backfill, retries for unreachable sites, and recomputes
 # after a reference-currency change (owner, 2026-10-18).
 RATES_TASK_INTERVAL_S = 3 * 3600
@@ -111,17 +128,26 @@ def parse_csv(text: str) -> list[tuple[str, float]]:
 
 
 def _get_csv(url: str, params: dict) -> list[tuple[str, float]]:
+    deadline = time.monotonic() + REQUEST_DEADLINE_S
     try:
-        resp = httpx.get(url, params=params, timeout=HTTP_TIMEOUT)
+        with httpx.stream("GET", url, params=params, timeout=HTTP_TIMEOUT) as resp:
+            # Both sites answer 404 for "no observations in this window" (a
+            # holiday stretch) and for a series they do not have: that is no
+            # rate, not an outage.
+            if resp.status_code == 404:
+                return []
+            if resp.status_code != 200:
+                raise RateUnavailable(f"{url}: HTTP {resp.status_code}")
+            body, size = [], 0
+            for chunk in resp.iter_bytes():
+                size += len(chunk)
+                if size > MAX_RESPONSE_BYTES or time.monotonic() > deadline:
+                    raise RateUnavailable(f"{url}: response over {MAX_RESPONSE_BYTES} bytes or {REQUEST_DEADLINE_S}s")
+                body.append(chunk)
+            text = b"".join(body).decode(resp.encoding or "utf-8", errors="replace")
     except httpx.HTTPError as e:
         raise RateUnavailable(f"{url}: {e}") from e
-    # Both sites answer 404 for "no observations in this window" (a holiday
-    # stretch) and for a series they do not have: that is no rate, not an outage.
-    if resp.status_code == 404:
-        return []
-    if resp.status_code != 200:
-        raise RateUnavailable(f"{url}: HTTP {resp.status_code}")
-    return parse_csv(resp.text)
+    return parse_csv(text)
 
 
 def fetch_boi(ccy: str, start: str, end: str) -> list[tuple[str, float]]:
@@ -132,6 +158,33 @@ def fetch_boi(ccy: str, start: str, end: str) -> list[tuple[str, float]]:
 def fetch_ecb(ccy: str, start: str, end: str) -> list[tuple[str, float]]:
     """Units of ccy per EUR, one row per publication day in [start, end]."""
     return _get_csv(ECB_URL.format(ccy=ccy), {"startPeriod": start, "endPeriod": end, "format": "csvdata"})
+
+
+# Per process: when each source may be asked again after an outage, and the
+# windows a source answered with no rates (until when not to ask again).
+_backoff_until: dict[str, float] = {}
+_empty_until: dict[tuple, float] = {}
+
+
+def _fetch(source: str, ccy: str, start: str, end: str) -> list[tuple[str, float]]:
+    now = time.monotonic()
+    if now < _backoff_until.get(source, 0):
+        raise RateUnavailable(f"{source} was unreachable less than {OUTAGE_BACKOFF_S}s ago")
+    if now < _empty_until.get((source, ccy, start, end), 0):
+        return []
+    fetch = fetch_boi if source == "boi" else fetch_ecb
+    try:
+        rows = fetch(ccy, start, end)
+    except RateUnavailable:
+        _backoff_until[source] = time.monotonic() + OUTAGE_BACKOFF_S
+        raise
+    if not rows:
+        _empty_until[(source, ccy, start, end)] = time.monotonic() + EMPTY_ANSWER_TTL_S
+        # No publication gap is LOOKBACK_DAYS long: the code is unknown to
+        # this source, the date is before its series, or the API moved. Not
+        # cached in the database (it may be the last), so say so.
+        logger.warning("%s returned no rates for %s in %s..%s", source, ccy, start, end)
+    return rows
 
 
 def _cached(source: str, ccy: str, start: str, end: str):
@@ -166,8 +219,7 @@ def _latest(source: str, ccy: str, day: str) -> tuple[float, str] | None:
         hit = _cached(source, ccy, window, day)
         if hit:
             return hit["value"], hit["rate_date"]
-    fetch = fetch_boi if source == "boi" else fetch_ecb
-    rows = fetch(ccy, start, day)  # no connection is open here
+    rows = _fetch(source, ccy, start, day)  # no connection is open here
     if rows:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         with get_connection() as conn:
@@ -183,11 +235,6 @@ def _latest(source: str, ccy: str, day: str) -> tuple[float, str] | None:
                 "VALUES (?, ?, ?, ?, ?)",
                 (source, ccy, start, complete, now),
             )
-    else:
-        # No publication gap is LOOKBACK_DAYS long: the code is unknown to this
-        # source, the date is before its series, or the API moved. Not cached
-        # (it may be the last), so say so.
-        logger.warning("%s returned no rates for %s in %s..%s", source, ccy, start, day)
     hit = _cached(source, ccy, start, day)
     return (hit["value"], hit["rate_date"]) if hit else None
 
@@ -236,6 +283,33 @@ def rate(ccy, ref, day) -> tuple[float, str | None] | None:
     if r is None:
         return None
     return _checked(x[0] / r[0], min(x[1], r[1]))
+
+
+# The converted amount in reference currency `:ref` for SQL readers (stats,
+# #73's tax totals), table alias `d`: the stored conversion while it is for the
+# current reference, a document already in the reference currency at face
+# value, and NULL (unconverted) otherwise. effective_conversion is the same
+# rule for Python readers; keep the two together.
+CONVERTED_AMOUNT_SQL = (
+    "CASE WHEN d.conversion_ref = :ref THEN d.converted_amount "
+    "WHEN upper(trim(d.currency)) = :ref THEN d.total_amount END"
+)
+CONVERSION_COLUMNS = ("conversion_rate", "converted_amount", "conversion_rate_date", "conversion_ref")
+
+
+def effective_conversion(row, ref) -> dict:
+    """The four conversion columns as readers present them (CONVERTED_AMOUNT_SQL's rule)."""
+    if row["conversion_ref"] == ref and ref is not None:
+        return {c: row[c] for c in CONVERSION_COLUMNS}
+    if ref is not None and (row["currency"] or "").strip().upper() == ref:
+        return {"conversion_rate": 1.0, "converted_amount": row["total_amount"], "conversion_rate_date": None, "conversion_ref": ref}
+    return dict.fromkeys(CONVERSION_COLUMNS)
+
+
+def convertible(currency_value) -> bool:
+    """Whether a source publishes this currency, so a missing conversion is
+    only waiting for a rate rather than impossible."""
+    return normalize_code(currency_value) in REFERENCE_CURRENCIES
 
 
 _KEEP = object()
@@ -295,8 +369,8 @@ def apply_conversion(doc_id: int) -> str:
       code, before the series); NULL is stored;
     - 'unavailable': a site was unreachable; nothing is written, so a good rate
       survives an outage and a missing one waits for the rates task;
-    - 'superseded': the document changed (or was deleted) while the rate was
-      fetched, so this result was dropped.
+    - 'superseded': the document (or the reference) changed, or the document
+      was deleted, while the rate was fetched, so this result was dropped.
     An invalid reference_currency setting converts nothing ('no_rate', no write)."""
     ref = reference_currency()
     with get_connection() as conn:
@@ -316,6 +390,10 @@ def apply_conversion(doc_id: int) -> str:
     except RateUnavailable as e:
         logger.warning("No exchange rate for document %d (%s on %s): %s", doc_id, doc["currency"], doc["receipt_date"], e)
         return "unavailable"
+    # The reference can change while the rate is fetched (the CAS below cannot
+    # see it: an env var can set it); the new reference's pass may have run.
+    if reference_currency() != ref:
+        return "superseded"
     value, rate_date = found if found else (None, None)
     new_ref = ref if found else None
     total = doc["total_amount"]

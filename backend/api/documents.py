@@ -13,7 +13,7 @@ from backend.processing.extract import totals_mismatch, format_totals_reason
 from backend.processing.filing import download_name
 from backend.storage import RENDER_ERRORS, render_page, clear_page_cache, get_converted_path
 from backend.config import get_setting
-from backend.currency import apply_conversion, conversion_update, reference_currency
+from backend.currency import apply_conversion, conversion_update, effective_conversion, reference_currency
 from backend.models import (
     DocumentResponse,
     DocumentUpdate,
@@ -38,8 +38,10 @@ def _row_to_response(row, ref=_LOOKUP) -> dict:
         ref = reference_currency()
     # A rate computed for another reference currency is stale (#72): the
     # rates task recomputes it, and until then the document is unconverted.
-    if d.get("conversion_ref") != ref:
-        d["conversion_rate"] = d["converted_amount"] = d["conversion_rate_date"] = d["conversion_ref"] = None
+    # One already in the reference currency reads as converted at rate 1, as
+    # the dashboard counts it.
+    if "conversion_ref" in d:
+        d.update(effective_conversion(d, ref))
     # Parse JSON fields
     for field in ("line_items", "additional_fields", "edit_history"):
         if d.get(field) and isinstance(d[field], str):

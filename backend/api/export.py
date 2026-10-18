@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.auth import require_auth
 from backend.config import get_setting
-from backend.currency import reference_currency
+from backend.currency import CONVERSION_COLUMNS, convertible, effective_conversion, reference_currency
 from backend.database import get_connection
 from backend.models import ExportRequest
 from backend.storage import get_filed_path
@@ -242,11 +242,11 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
         # A conversion computed for another reference currency is stale (#72):
         # export the document as unconverted rather than mix currencies.
         ref = reference_currency()
-        _conversion = ("converted_amount", "conversion_rate", "conversion_rate_date", "conversion_ref")
+        conversions = {row["id"]: effective_conversion(row, ref) for row in rows}
 
         def _cell(row, f):
-            if f in _conversion and row["conversion_ref"] != ref:
-                return None
+            if f in CONVERSION_COLUMNS:
+                return conversions[row["id"]][f]
             return row[f] if f in row.keys() else None
 
         # Add CSV metadata
@@ -278,7 +278,15 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
 
     # Update last_exported_date
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    doc_ids = [row["id"] for row in rows if row["id"] not in omitted]
+    # A row that could convert but has no rate yet (a rate site was down) stays
+    # eligible too, so the next since_last_export run sends its converted
+    # amount; one that never can (no currency, or one no source publishes) is
+    # stamped as usual.
+    waiting = {row["id"] for row in rows
+               if conversions[row["id"]]["conversion_ref"] is None and convertible(row["currency"])}
+    if waiting:
+        logger.info("%d exported document(s) have no exchange rate yet and stay eligible for since_last_export", len(waiting))
+    doc_ids = [row["id"] for row in rows if row["id"] not in omitted and row["id"] not in waiting]
     if omitted:
         logger.warning(
             "%d document(s) had no PDF in this export and were left unstamped, "

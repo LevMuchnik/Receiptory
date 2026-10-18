@@ -41,6 +41,10 @@ def _reset_test_env(monkeypatch):
 
     monkeypatch.setattr(_currency, "fetch_boi", _offline)
     monkeypatch.setattr(_currency, "fetch_ecb", _offline)
+    # The outage backoff and the empty-answer memo are per process: one
+    # test's outage must not skip the next test's fetches.
+    monkeypatch.setattr(_currency, "_backoff_until", {})
+    monkeypatch.setattr(_currency, "_empty_until", {})
     yield
     _db_mod._db_path = None
 

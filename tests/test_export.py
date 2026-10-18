@@ -427,3 +427,31 @@ def test_export_appends_the_conversion_columns_and_writes_them_to_excel(authed_c
     rows = list(ws.iter_rows(values_only=True))
     assert list(rows[0][-4:]) == header[-4:]
     assert (300.0, 3.0, "2026-01-15", "ILS") in [tuple(r[-4:]) for r in rows[1:]]
+
+
+
+def test_since_last_export_repeats_a_row_exported_before_its_rate(authed_client, docs_with_files):
+    """Red team: an incremental export taken while a rate site is down must not
+    retire a foreign document with blank converted columns for good. A row that
+    can never convert (no currency, or one no source publishes) is stamped."""
+    with get_connection() as conn:
+        conn.execute("UPDATE documents SET currency = 'USD' WHERE file_hash = 'h1'")  # no rate yet
+        conn.execute("UPDATE documents SET currency = 'XYZ' WHERE file_hash = 'h2'")  # never converts
+    first = authed_client.post("/api/export", json={"preset": "since_last_export"})
+    assert first.status_code == 200
+    with get_connection() as conn:
+        stamped = {r["file_hash"]: r["last_exported_date"] for r in conn.execute("SELECT file_hash, last_exported_date FROM documents")}
+    assert stamped["h1"] is None and stamped["h2"] is not None
+    with get_connection() as conn:
+        conn.execute("UPDATE documents SET conversion_rate = 3.0, converted_amount = 300.0, conversion_ref = 'ILS' WHERE file_hash = 'h1'")
+    second = authed_client.post("/api/export", json={"preset": "since_last_export"})
+    rows = list(csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(second.content)).read("metadata.csv").decode("utf-8"))))
+    assert [(r["vendor_name"], r["converted_amount"]) for r in rows] == [("Vendor A", "300.0")]
+
+
+def test_export_fills_a_reference_currency_row_before_its_rate_is_stored(authed_client, docs_with_files):
+    with get_connection() as conn:
+        conn.execute("UPDATE documents SET currency = 'ILS' WHERE file_hash = 'h1'")
+    resp = authed_client.post("/api/export", json={"date_basis": "receipt", "date_from": "2026-01-01", "date_to": "2026-12-31"})
+    rows = {r["vendor_name"]: r for r in csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(resp.content)).read("metadata.csv").decode("utf-8")))}
+    assert (rows["Vendor A"]["converted_amount"], rows["Vendor A"]["conversion_rate"], rows["Vendor A"]["conversion_ref"]) == ("100.0", "1.0", "ILS")

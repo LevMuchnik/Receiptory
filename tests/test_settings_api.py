@@ -41,7 +41,7 @@ def test_patch_settings(authed_client):
     assert resp.json()["llm_model"] == "gpt-4o"
 
 
-@pytest.mark.parametrize("value", ["Shekel", "", "US"])
+@pytest.mark.parametrize("value", ["Shekel", "", "US", "XYZ", "BGN"])
 def test_reference_currency_must_be_a_currency_code(authed_client, value):
     """#72: an invalid reference would leave every conversion unusable."""
     resp = authed_client.patch("/api/settings", json={"settings": {"reference_currency": value}})
@@ -352,3 +352,10 @@ def test_a_new_reference_currency_reconverts_at_once(authed_client, monkeypatch)
     assert passes == []  # unchanged reference, or another setting: no pass
     authed_client.patch("/api/settings", json={"settings": {"reference_currency": "usd"}})
     assert passes == [1]
+
+
+
+@pytest.mark.parametrize("value,stored", [("PLN", "PLN"), (" usd ", "USD"), ("ILS", "ILS")])
+def test_a_reference_currency_a_source_publishes_is_accepted(authed_client, value, stored):
+    assert authed_client.patch("/api/settings", json={"settings": {"reference_currency": value}}).status_code == 200
+    assert authed_client.get("/api/settings").json()["reference_currency"] == stored

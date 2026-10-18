@@ -580,3 +580,32 @@ def test_a_huge_total_still_lists(authed_client, db_path):
     assert resp.json()["converted_amount"] is None
     assert authed_client.get("/api/documents").status_code == 200
     assert authed_client.get("/api/stats/dashboard").status_code == 200
+
+
+
+def test_a_reference_currency_document_reads_as_converted_before_its_rate_is_stored(authed_client, db_path):
+    """Ship review: the dashboard already counts it at face value; the page
+    must not say it is left out of the totals."""
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, currency="ILS", receipt_date="2026-10-12", total_amount=42.0)
+    for body in (authed_client.get(f"/api/documents/{doc_id}").json(), authed_client.get("/api/documents").json()["documents"][0]):
+        assert (body["conversion_rate"], body["converted_amount"], body["conversion_ref"]) == (1.0, 42.0, "ILS")
+
+
+def test_setting_a_currency_on_a_document_without_one_converts_it(authed_client, db_path, monkeypatch):
+    _boi(monkeypatch)
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, currency=None, receipt_date="2026-10-12", total_amount=10.0)
+    body = authed_client.patch(f"/api/documents/{doc_id}", json={"currency": "USD"}).json()
+    assert (body["conversion_rate"], body["converted_amount"], body["conversion_ref"]) == (3.0, 30.0, "ILS")
+
+
+def test_resaving_a_stale_reference_rate_keeps_it_hidden_and_fetches_nothing(authed_client, db_path, monkeypatch):
+    calls = []
+    _boi(monkeypatch, calls)
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, currency="USD", receipt_date="2026-10-12", total_amount=10.0, conversion_rate=0.9,
+                             converted_amount=9.0, conversion_rate_date="2026-10-12", conversion_ref="EUR")
+    body = authed_client.patch(f"/api/documents/{doc_id}", json={"currency": "USD", "receipt_date": "2026-10-12", "total_amount": 20.0}).json()
+    assert calls == []
+    assert (body["conversion_rate"], body["converted_amount"], body["conversion_ref"]) == (None, None, None)

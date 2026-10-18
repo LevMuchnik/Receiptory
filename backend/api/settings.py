@@ -112,12 +112,12 @@ def patch_settings(body: SettingsUpdate, background_tasks: BackgroundTasks, user
     reference_before = currency.reference_currency()
     settings = dict(body.settings)
     if "reference_currency" in settings:
-        # Every conversion is keyed on this code (#72): anything that is not
-        # one would leave every document unconverted. Checked before any key
-        # is written, so a rejected body saves nothing.
+        # Every conversion is keyed on this code (#72): anything the rate
+        # sources cannot convert into would leave every document unconverted.
+        # Checked before any key is written, so a rejected body saves nothing.
         code = currency.normalize_code(settings["reference_currency"])
-        if code is None:
-            raise HTTPException(status_code=400, detail="reference_currency must be a 3-letter currency code, such as ILS")
+        if code not in currency.REFERENCE_CURRENCIES:
+            raise HTTPException(status_code=400, detail="reference_currency must be a currency the Bank of Israel or the ECB publishes, such as ILS")
         settings["reference_currency"] = code
     for key, value in settings.items():
         if key not in DEFAULTS:

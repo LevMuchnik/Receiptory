@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 
 from backend.auth import require_auth
-from backend.currency import reference_currency
+from backend.currency import CONVERTED_AMOUNT_SQL, reference_currency
 from backend.database import get_connection
 
 router = APIRouter()
@@ -45,10 +45,7 @@ def dashboard_stats(
         # computed for the current reference, the amount itself for a document
         # already in it (rate 1, even before the rates task has run), and
         # nothing otherwise. Unconverted documents are counted, not summed.
-        amount = (
-            "CASE WHEN d.conversion_ref = :ref THEN d.converted_amount "
-            "WHEN upper(trim(d.currency)) = :ref THEN d.total_amount END"
-        )
+        amount = CONVERTED_AMOUNT_SQL
         expenses = conn.execute(
             f"""SELECT c.name, SUM({amount}) as total
                FROM documents d
