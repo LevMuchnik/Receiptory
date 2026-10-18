@@ -97,7 +97,7 @@ cd .claude/skills/gstack && ./setup
 - The suite needs no checked-out fixture files. `conftest.py`'s `sample_pdf_path` builds a one-page PDF with PyMuPDF into `tmp_path`; it used to read `test_documents/Receipt - esim.pdf`, and `test_documents/` is gitignored, so a fresh clone or a new worktree failed 12 tests and errored 12 more. Keep new fixtures generated, not read from disk.
 - Backend API tests use `create_app(data_dir, run_background=False)` with `TestClient`.
 
-**Frontend (vitest):** `cd frontend && npm test` (11 files, 245 tests).
+**Frontend (vitest):** `cd frontend && npm test` (11 files, 246 tests).
 
 - Config is `frontend/vitest.config.ts`: `environment: "node"`, **no jsdom**, `include: ["src/**/*.test.ts"]`. Tests live next to the module they cover (`src/lib/scanner/geometry.test.ts`, ...).
 - Pure logic only, on purpose. `ImageData`, `HTMLCanvasElement`, and `drawImage` do not exist in Node, so anything touching a canvas (`src/lib/scanner/canvas-utils.ts`) is deliberately untested — covering it means jsdom plus the native `canvas` package, which drags cairo/pango build deps into the Docker image.
