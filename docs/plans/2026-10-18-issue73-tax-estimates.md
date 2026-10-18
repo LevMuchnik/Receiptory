@@ -1,6 +1,6 @@
 # Issue #73: Taxes tab, monthly income-tax and VAT estimates
 
-**Status:** plan, Astra plan review round 1 answered; build not started · **Branch:** `issue/73-tax-estimates` · **Depends on:** #72 (currency conversion) · **Related:** #63 (misdated documents)
+**Status:** plan converged with Astra (2 rounds); build not started, Stage 0 next · **Branch:** `issue/73-tax-estimates` · **Depends on:** #72 (currency conversion) · **Related:** #63 (misdated documents)
 
 Written in a Claude Code session in the Smelter repo, from a brainstorm with the owner and Astra (gpt-6-astra). Receiptory's agent builds it, and starts with Stage 0 on the live database.
 
@@ -99,6 +99,7 @@ Migration `010` adds the two columns. It also corrects the description of the se
 ```json
 {
   "month": "2026-10",
+  "unavailable_reason": null,
   "settings": {"income_tax_rate": 45.0, "vat_frequency": "bimonthly"},
   "income_tax": {"from": "2026-09-01", "to": "2026-09-30", "base": 0.0, "amount": 0.0, "left_out": 0, "documents": []},
   "income_tax_accruing": {"from": "2026-10-01", "to": "2026-10-31", "base": 0.0, "amount": 0.0, "left_out": 0},
@@ -109,7 +110,7 @@ Migration `010` adds the two columns. It also corrects the description of the se
 
 - **`documents`:** each entry is `{id, kind, number, date, client_name, pre_vat_ils, vat_ils, counted, copy_of, related}`, where `related` holds the ids found through `referenced_numbers`, either way round.
 - **Rate not set:** `amount` is null.
-- **Reference currency:** amounts are ILS. If `reference_currency` isn't ILS, the tab says so.
+- **Reference currency:** amounts are ILS. If `reference_currency` isn't ILS, `unavailable_reason` is `"reference_currency_not_ils"`. Then every `base`, `amount` and `cap` is null and every `documents` list is empty; the month, settings and `vat.scheduled` and period are still filled in. The tab shows the reason instead of numbers.
 
 Settings get two `DEFAULTS` entries: `income_tax_rate` (a percent, default `null`) and `vat_frequency` (`"bimonthly"` or `"monthly"`, default `"bimonthly"`). Both need explicit validation:
 - `patch_settings` checks only the `DEFAULTS` allowlist.
