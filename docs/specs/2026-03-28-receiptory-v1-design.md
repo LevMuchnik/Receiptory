@@ -290,7 +290,7 @@ All under `/api/`, all require auth (httponly session cookie) except `/api/auth/
 - `DELETE /api/documents/{id}` — soft delete
 - `POST /api/documents/{id}/reprocess` — reset to `pending`, clear extracted fields
 - `POST /api/documents/batch-reprocess` — reprocess by IDs or filter
-- `GET /api/documents/{id}/file/{type}` — serve file (`original` or `converted`)
+- `GET /api/documents/{id}/file/{type}` — `original`: the submitted bytes as a download (`Content-Disposition: attachment`; named after the filed copy's stem with the stored file's own extension, else the cleaned original name, else `document-<id>`; media type from that extension, `application/octet-stream` when unknown; `nosniff` + `CSP: sandbox`; 404 when the file is missing or `file_hash` is not a sha256 digest). `converted`: the converted PDF, inline. Any other type: 400
 - `GET /api/documents/{id}/pages/{page_num}` — serve rendered page image (cached on disk)
 
 ### Export

@@ -72,27 +72,7 @@ Deferred items captured during planning and review. Organized by component, sort
 
 ## Ingestion
 
-### Locate originals with `find_original` everywhere
-
-**What:** Make the pipeline, notifications and page images find `storage/originals/<hash>*` with `atomic.find_original` instead of guessing the extension from `original_filename`.
-
-**Why:** Four writers store the extension four ways: `api/upload.py:36` stores none for a dotless name, `telegram.py:107` and `gmail.py:170,517` fall back to `.bin`, `gmail.py:348` does not lowercase. Three readers guess `.pdf`: `processing/pipeline.py:59`, `notifications/notifier.py:70`, `api/documents.py` `serve_page`. A dotless upload ("receipt") is stored as `originals/<hash>`, and the pipeline then looks for `<hash>.pdf` and fails the document.
-
-**Pros:**
-- One lookup for every reader; the download (#69) already uses it
-- Removes a failure that would surface only as an unexplained failed document
-
-**Cons:**
-- Touches the processing pipeline and notifications, so it needs its own tests
-
-**Context:**
-- Found in the #69 eng review (2026-10-12). 376/376 originals resolve today (read-only scan), so this is latent.
-- `find_original` moved from `backup/verify.py` to `atomic.py` in #69 and rejects a malformed hash (D4 there); readers switching to it inherit that check.
-- Where to start: replace the `splitext(...) or ".pdf"` + `get_file_path("original", ...)` pairs with `find_original(os.path.join(data_dir, "storage"), file_hash)`; add a dotless and a `.bin` original to the pipeline tests.
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** #69 landed (moves `find_original` to `atomic.py`)
+_No open items. Locating originals with `find_original` landed in #69; see Completed._
 
 ## Scanner
 
@@ -560,6 +540,10 @@ Deferred items captured during planning and review. Organized by component, sort
 **Depends on:** Issue #12 (parse-retry loop) landing first.
 
 ## Completed
+
+### Locate originals with `find_original` everywhere
+
+**Done 2026-10-17 in issue #69.** The download, `serve_page`, `processing/pipeline.py`, `notifications/notifier.py` and `scripts/compare_json_mode.py` all locate `storage/originals/<hash>*` with `atomic.find_original` (regular files only, malformed hash refused, `<hash>.pdf` tried before listing the folder, a processable extension preferred if two files share a hash) instead of guessing the extension from `original_filename`. An upper-case `.PDF`/`.JPG` original now processes and renders. A dotless or `.bin` original is now found, but `normalize_file` still dispatches on the suffix and fails it as "Unsupported file format", a clearer error than the old missing-file one; content sniffing in normalize would close that. The converted/ paths keep an unchecked hash (decision 85a652a8, marker at `storage.get_converted_path`, which replaced `get_file_path`; its dead extension-guessing `original` branch is gone). A preview of an original PyMuPDF cannot open is a 404, not a 500.
 
 ### Typed response_schema structured output for extraction
 
