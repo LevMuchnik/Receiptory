@@ -157,3 +157,28 @@ def test_a_comment_naming_pragma_keeps_a_migration_atomic(tmp_path, monkeypatch)
     with pytest.raises(sqlite3.OperationalError):
         database._run_migrations(db)
     assert [r[1] for r in db.execute("PRAGMA table_info(t)")] == ["a"]
+
+
+def test_migration_010_upgrades_a_schema_9_install_in_one_transaction(tmp_path):
+    """#72: a live install sits at schema 9. 010 adds the rate cache, the
+    fetched-window log and the two conversion columns, and runs wrapped (no
+    PRAGMA statement), so a failure part-way leaves schema 9 intact."""
+    import backend.database as database
+    sql = (Path(__file__).resolve().parents[1] / "migrations/010_currency_conversion.sql").read_text(encoding="utf-8")
+    assert database._UNWRAPPED_RE.search(sql) is None
+    db = sqlite3.connect(str(tmp_path / "upgrade.db"))
+    db.row_factory = sqlite3.Row
+    db.executescript(
+        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT);"
+        "CREATE TABLE documents (id INTEGER PRIMARY KEY, conversion_rate REAL, converted_amount REAL);"
+    )
+    for v in range(1, 10):
+        db.execute("INSERT INTO schema_version (version) VALUES (?)", (v,))
+    db.commit()
+    database._run_migrations(db)
+    tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"exchange_rates", "exchange_rate_fetches"} <= tables
+    columns = [r[1] for r in db.execute("PRAGMA table_info(documents)")]
+    assert {"conversion_rate_date", "conversion_ref"} <= set(columns)
+    assert [r[0] for r in db.execute("SELECT version FROM schema_version WHERE version >= 10")] == [10]
+    db.close()
