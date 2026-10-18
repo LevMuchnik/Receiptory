@@ -11,6 +11,11 @@ import pytest
 
 from backend import currency
 from backend.config import set_setting
+
+# conftest replaces both fetchers for every test; these are the real ones,
+# taken at import, for the tests of the HTTP boundary itself.
+_REAL_FETCH_BOI = currency.fetch_boi
+_REAL_FETCH_ECB = currency.fetch_ecb
 from backend.database import get_connection
 
 BOI_USD_CSV = """SERIES_CODE,FREQ,BASE_CURRENCY,COUNTER_CURRENCY,UNIT_MEASURE,DATA_TYPE,DATA_SOURCE,TIME_COLLECT,CONF_STATUS,PUB_WEBSITE,UNIT_MULT,COMMENTS,TIME_PERIOD,OBS_VALUE,RELEASE_STATUS
@@ -94,22 +99,22 @@ def sources(db_path, monkeypatch):
 
 
 def test_rate_to_ils_exact_then_cached(sources):
-    assert currency.rate_to_ils("USD", "2026-10-12") == (3.078, "2026-10-12", "boi")
+    assert currency.rate_to_ils("USD", "2026-10-12") == (3.078, "2026-10-12")
     calls = len(sources.calls)
     # rows from one fetch serve every later lookup inside the window, without HTTP
-    assert currency.rate_to_ils("USD", "2026-10-12") == (3.078, "2026-10-12", "boi")
-    assert currency.rate_to_ils("USD", "2026-10-09") == (3.055, "2026-10-09", "boi")
+    assert currency.rate_to_ils("USD", "2026-10-12") == (3.078, "2026-10-12")
+    assert currency.rate_to_ils("USD", "2026-10-09") == (3.055, "2026-10-09")
     assert len(sources.calls) == calls
 
 
 def test_weekend_takes_the_last_published_rate(sources):
     # 2026-10-10/11 have no publication: Friday's rate applies
-    assert currency.rate_to_ils("USD", "2026-10-11") == (3.055, "2026-10-09", "boi")
+    assert currency.rate_to_ils("USD", "2026-10-11") == (3.055, "2026-10-09")
 
 
 def test_future_date_is_clamped_to_today(sources):
     # a misread year: the latest rate on or before today, not "no rate forever"
-    assert currency.rate_to_ils("USD", "2027-10-12") == (3.078, "2026-10-12", "boi")
+    assert currency.rate_to_ils("USD", "2027-10-12") == (3.078, "2026-10-12")
     assert all(call[3] <= "2026-10-18" for call in sources.calls)
 
 
@@ -118,9 +123,9 @@ def test_no_rate_before_the_window(sources):
 
 
 def test_ecb_cross_rate_for_a_currency_the_boi_does_not_publish(sources):
-    rate, rate_date, source = currency.rate_to_ils("PLN", "2026-10-12")
+    rate, rate_date = currency.rate_to_ils("PLN", "2026-10-12")
     assert rate == pytest.approx(3.48 / 4.35)
-    assert (rate_date, source) == ("2026-10-12", "boi+ecb")
+    assert rate_date == "2026-10-12"
     # the BoI is never asked for a series it does not publish
     assert ("boi", "PLN") not in [c[:2] for c in sources.calls]
 
@@ -197,10 +202,14 @@ def test_contract_unreachable_source_is_null_and_reported(sources):
 
 
 def test_contract_recomputes_after_a_currency_change(sources):
+    """The writer that changes the currency clears the conversion in the same
+    UPDATE (pipeline, PATCH: tested there); apply_conversion then recomputes.
+    A stored, current rate is otherwise never refetched."""
     doc = _doc(currency="USD", receipt_date="2026-10-12", total_amount=10.0)
     currency.apply_conversion(doc)
     with get_connection() as conn:
-        conn.execute("UPDATE documents SET currency = 'ILS' WHERE id = ?", (doc,))
+        conn.execute("UPDATE documents SET currency = 'ILS', conversion_rate = NULL, converted_amount = NULL, "
+                     "conversion_rate_date = NULL, conversion_ref = NULL WHERE id = ?", (doc,))
     currency.apply_conversion(doc)
     assert _conv(doc)["conversion_rate"] == 1.0
 
@@ -219,16 +228,6 @@ def test_a_conversion_superseded_by_an_edit_writes_nothing(sources, monkeypatch)
     monkeypatch.setattr(currency, "fetch_boi", fetch_while_edited)
     assert currency.apply_conversion(doc) == "superseded"
     assert _conv(doc)["conversion_rate"] == 1.0
-
-
-def test_converted_amount_follows_an_amount_edit(sources):
-    doc = _doc(currency="USD", receipt_date="2026-10-12", total_amount=10.0)
-    currency.apply_conversion(doc)
-    with get_connection() as conn:
-        conn.execute("UPDATE documents SET total_amount = 20.0 WHERE id = ?", (doc,))
-    currency.refresh_converted_amount(doc)
-    assert _conv(doc)["converted_amount"] == 61.56
-    assert len(sources.calls) == 1
 
 
 def test_convert_pending_fills_missing_and_stale_reference(sources, monkeypatch):
@@ -254,7 +253,7 @@ def test_convert_pending_stops_at_the_first_outage(sources):
         _doc(currency="USD", receipt_date="2026-10-12", total_amount=1.0, file_hash=h * 64)
     sources.fail = True
     result = currency.convert_pending()
-    assert result == {"converted": 0, "no_rate": 0, "superseded": 0, "unavailable": 1}
+    assert result == {"converted": 0, "no_rate": 0, "superseded": 0, "unavailable": 1, "error": 0}
     assert len(sources.calls) == 1
 
 
@@ -305,3 +304,272 @@ async def test_rates_task_runs_a_pass_then_waits_three_hours(db_path, monkeypatc
         await currency.run_rates_task()
     assert len(passes) == 2
     assert sleeps == [3 * 3600, 3 * 3600]
+
+
+
+def test_parse_skips_an_absurd_unit_mult():
+    # 10**99999 would overflow the division; a row like that is not a rate
+    assert currency.parse_csv("TIME_PERIOD,OBS_VALUE,UNIT_MULT\n2026-10-14,3.1,99999\n2026-10-15,3.2,0\n") == [("2026-10-15", 3.2)]
+
+
+def test_a_date_before_1900_has_no_rate(sources):
+    assert currency.rate("USD", "ILS", "0001-01-05") is None
+    assert sources.calls == []
+
+
+def test_weekend_is_answered_from_cache_once_a_later_day_is_cached(sources):
+    currency.rate_to_ils("USD", "2026-10-12")
+    calls = len(sources.calls)
+    assert currency.rate_to_ils("USD", "2026-10-11") == (3.055, "2026-10-09")
+    assert len(sources.calls) == calls
+
+
+def test_a_failed_fetch_keeps_a_current_rate(sources):
+    """Red team: an outage during a same-currency reprocess must not erase a good rate."""
+    doc = _doc(currency="USD", receipt_date="2026-10-11", total_amount=10.0)
+    currency.apply_conversion(doc)
+    sources.fail = True
+    # the stored rate is for the current currency, date and reference: no fetch
+    assert currency.apply_conversion(doc) == "converted"
+    assert _conv(doc)["conversion_rate"] == 3.055
+
+
+def test_an_outage_does_not_overwrite_an_existing_rate(sources, monkeypatch):
+    doc = _doc(currency="USD", receipt_date="2026-10-11", total_amount=10.0,
+               conversion_rate=3.0, converted_amount=30.0, conversion_ref="USD")  # stale reference
+    sources.fail = True
+    assert currency.apply_conversion(doc) == "unavailable"
+    assert _conv(doc)["conversion_rate"] == 3.0  # left for the rates task, not blanked
+
+
+def test_the_write_checks_the_reference_it_started_from(sources, monkeypatch):
+    """Plan R2/D4: a conversion that lost a race to a newer one writes nothing."""
+    doc = _doc(currency="USD", receipt_date="2026-10-12", total_amount=10.0)
+    real = sources.fetch_boi
+
+    def fetch_while_converted(ccy, start, end):
+        with get_connection() as conn:
+            conn.execute("UPDATE documents SET conversion_rate = 9.9, converted_amount = 99.0, conversion_ref = 'ILS' WHERE id = ?", (doc,))
+        return real(ccy, start, end)
+
+    monkeypatch.setattr(currency, "fetch_boi", fetch_while_converted)
+    assert currency.apply_conversion(doc) == "superseded"
+    assert _conv(doc)["conversion_rate"] == 9.9
+
+
+def test_a_bad_document_does_not_stop_the_pass(sources, monkeypatch):
+    first = _doc(currency="USD", receipt_date="2026-10-12", total_amount=1.0, file_hash="1" * 64)
+    second = _doc(currency="USD", receipt_date="2026-10-12", total_amount=1.0, file_hash="2" * 64)
+    real = currency.apply_conversion
+
+    def flaky(doc_id):
+        if doc_id == first:
+            raise RuntimeError("database is locked")
+        return real(doc_id)
+
+    monkeypatch.setattr(currency, "apply_conversion", flaky)
+    result = currency.convert_pending()
+    assert result["error"] == 1 and result["converted"] == 1
+    assert _conv(second)["conversion_rate"] == 3.078
+
+
+def test_an_ancient_date_does_not_stop_the_pass(sources):
+    _doc(currency="USD", receipt_date="0001-01-05", total_amount=1.0, file_hash="3" * 64)
+    later = _doc(currency="USD", receipt_date="2026-10-12", total_amount=1.0, file_hash="4" * 64)
+    currency.convert_pending()
+    assert _conv(later)["conversion_rate"] == 3.078
+
+
+def test_reference_currency_documents_convert_despite_an_outage(sources):
+    _doc(currency="USD", receipt_date="2026-10-12", total_amount=1.0, file_hash="5" * 64)
+    ils = _doc(currency="ILS", receipt_date="2026-10-12", total_amount=5.0, file_hash="6" * 64)
+    sources.fail = True
+    currency.convert_pending()
+    assert _conv(ils)["conversion_rate"] == 1.0
+    assert len(sources.calls) == 1  # no second request after the outage
+
+
+def test_an_invalid_reference_setting_changes_nothing(sources):
+    doc = _doc(currency="USD", receipt_date="2026-10-12", total_amount=10.0)
+    currency.apply_conversion(doc)
+    set_setting("reference_currency", "Shekel")
+    assert currency.convert_pending() == {"converted": 0, "no_rate": 0, "superseded": 0, "unavailable": 0, "error": 0}
+    assert _conv(doc)["conversion_rate"] == 3.078
+
+
+def test_unchanged_rows_are_not_rewritten(sources):
+    """Every UPDATE fires the FTS trigger, which re-indexes the whole document."""
+    doc = _doc(currency="XYZ", receipt_date="2026-10-12", total_amount=10.0)
+    with get_connection() as conn:
+        conn.execute("CREATE TABLE upd_log (n INTEGER)")
+        conn.execute("CREATE TRIGGER count_upd AFTER UPDATE ON documents BEGIN INSERT INTO upd_log VALUES (1); END")
+    currency.convert_pending()
+    currency.convert_pending()
+    with get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM upd_log").fetchone()[0] == 0
+    assert _conv(doc)["conversion_rate"] is None
+
+
+class _Resp:
+    def __init__(self, status, text=""):
+        self.status_code, self.text = status, text
+
+
+@pytest.mark.parametrize("status,text,expected", [
+    (200, "TIME_PERIOD,OBS_VALUE,UNIT_MULT\n2026-10-15,3.103,0\n", [("2026-10-15", 3.103)]),
+    (404, "<html>error</html>", []),  # no observations in the window, or no such series
+])
+def test_http_status_classification(monkeypatch, status, text, expected):
+    monkeypatch.setattr(currency.httpx, "get", lambda url, params, timeout: _Resp(status, text))
+    assert _REAL_FETCH_BOI("USD", "2026-10-01", "2026-10-15") == expected
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+def test_other_http_errors_are_an_outage(monkeypatch, status):
+    monkeypatch.setattr(currency.httpx, "get", lambda url, params, timeout: _Resp(status))
+    with pytest.raises(currency.RateUnavailable):
+        _REAL_FETCH_ECB("PLN", "2026-10-01", "2026-10-15")
+
+
+def test_a_connection_error_is_an_outage(monkeypatch):
+    import httpx
+
+    def boom(url, params, timeout):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(currency.httpx, "get", boom)
+    with pytest.raises(currency.RateUnavailable):
+        _REAL_FETCH_BOI("USD", "2026-10-01", "2026-10-15")
+
+
+def test_each_site_gets_its_own_query(monkeypatch):
+    seen = []
+    monkeypatch.setattr(currency.httpx, "get", lambda url, params, timeout: seen.append((url, params)) or _Resp(404))
+    _REAL_FETCH_BOI("USD", "2026-10-01", "2026-10-15")
+    _REAL_FETCH_ECB("PLN", "2026-10-01", "2026-10-15")
+    assert seen[0] == (currency.BOI_URL.format(ccy="USD"), {"startperiod": "2026-10-01", "endperiod": "2026-10-15", "format": "csv"})
+    assert seen[1] == (currency.ECB_URL.format(ccy="PLN"), {"startPeriod": "2026-10-01", "endPeriod": "2026-10-15", "format": "csvdata"})
+
+
+def test_the_app_starts_the_rates_task(tmp_data_dir, db_path, monkeypatch):
+    """The backfill and every retry depend on this task alone (no settings hook)."""
+    import asyncio
+    from fastapi.testclient import TestClient
+    import backend.backup.cloud_auth as cloud_auth
+    import backend.backup.scheduler as scheduler
+    import backend.ingestion.gmail as gmail
+    import backend.ingestion.telegram as telegram
+    import backend.ingestion.watched_folder as folder
+    import backend.processing.queue as queue
+    from backend.main import create_app
+
+    started = []
+
+    async def idle(*_args):
+        await asyncio.Event().wait()
+
+    async def rates():
+        started.append(True)
+        await asyncio.Event().wait()
+
+    async def noop(*_args):
+        return None
+
+    for mod, name in [(queue, "run_queue_loop"), (scheduler, "run_backup_scheduler"), (gmail, "run_gmail_poller"), (folder, "run_watched_folder")]:
+        monkeypatch.setattr(mod, name, idle)
+    monkeypatch.setattr(telegram, "start_telegram_bot", noop)
+    monkeypatch.setattr(telegram, "stop_telegram_bot", noop)
+    monkeypatch.setattr(cloud_auth, "restore_rclone_config", lambda: None)
+    monkeypatch.setattr(currency, "run_rates_task", rates)
+    with TestClient(create_app(str(tmp_data_dir), run_background=True)):
+        pass
+    assert started == [True]
+
+
+def test_a_gap_between_two_fetches_is_fetched_not_guessed(sources):
+    """Re-review F1: two fetch windows that do not overlap leave unfetched
+    weekdays between them. A row before the date and one after it do not make
+    the gap a weekend: a backlog processed out of date order hit this."""
+    sources.boi["USD"] = {"2026-01-12": 3.1, "2026-01-15": 3.2, "2026-01-20": 3.25, "2026-02-02": 3.3}
+    currency.rate_to_ils("USD", "2026-01-12")  # caches 2025-12-29 .. 2026-01-12
+    currency.rate_to_ils("USD", "2026-02-02")  # caches 2026-01-19 .. 2026-02-02
+    assert currency.rate_to_ils("USD", "2026-01-15") == (3.2, "2026-01-15")
+
+
+def test_a_day_inside_a_fetched_window_needs_no_fetch(sources):
+    currency.rate_to_ils("USD", "2026-10-12")
+    calls = len(sources.calls)
+    # 10-10 and 10-11 are a weekend inside the window fetched for 10-12
+    assert currency.rate_to_ils("USD", "2026-10-10") == (3.055, "2026-10-09")
+    assert len(sources.calls) == calls
+
+
+def test_a_window_ending_today_is_not_remembered_as_complete(sources):
+    """Fix-delta F3: today's rate is published in the afternoon. A morning
+    fetch must not mark today as answered by yesterday's rate."""
+    sources.boi["USD"] = {"2026-10-16": 3.0}
+    assert currency.rate_to_ils("USD", "2026-10-18") == (3.0, "2026-10-16")
+    sources.boi["USD"]["2026-10-18"] = 3.1  # published later that day
+    assert currency.rate_to_ils("USD", "2026-10-18") == (3.1, "2026-10-18")
+    # the days before today in that window stay answered from the cache
+    calls = len(sources.calls)
+    assert currency.rate_to_ils("USD", "2026-10-17") == (3.0, "2026-10-16")
+    assert len(sources.calls) == calls
+
+
+def test_an_empty_answer_is_logged_and_not_remembered(sources, caplog):
+    """Re-review F7: a 14-day window with no rate means the series moved or the
+    code is unknown; say so, and never cache it as "no rate"."""
+    assert currency.rate_to_ils("CHF", "2026-10-12") is None
+    assert "no rates" in caplog.text
+    calls = len(sources.calls)
+    assert currency.rate_to_ils("CHF", "2026-10-12") is None
+    assert len(sources.calls) == calls + 1
+
+
+def test_parse_skips_values_that_are_not_a_plausible_rate():
+    """Re-review F4: a value that underflows to 0 would divide by zero in a
+    cross rate and store 0, which the contract forbids."""
+    text = ("TIME_PERIOD,OBS_VALUE,UNIT_MULT\n2026-10-12,1e-320,0\n2026-10-13,5e-7,0\n"
+            "2026-10-14,2e6,0\n2026-10-15,3.2,0\n")
+    assert currency.parse_csv(text) == [("2026-10-15", 3.2)]
+
+
+def test_a_huge_total_converts_to_null_not_infinity(sources):
+    """Re-review F3: inf in converted_amount makes every page that lists the
+    document, and the dashboard sum, fail to serialize (500)."""
+    doc = _doc(currency="USD", receipt_date="2026-10-12", total_amount=1e308)
+    assert currency.apply_conversion(doc) == "converted"
+    conv = _conv(doc)
+    assert conv["conversion_rate"] == 3.078
+    assert conv["converted_amount"] is None
+
+
+def _set_with(doc_id, **values):
+    sql, params = currency.conversion_update(**values)
+    cols = [k for k in values]
+    with get_connection() as conn:
+        conn.execute(
+            f"UPDATE documents SET {', '.join(f'{c} = ?' for c in cols)}{', ' if cols else ''}{sql} WHERE id = ?",
+            [values[c] for c in cols] + params + [doc_id],
+        )
+
+
+@pytest.mark.parametrize("values,expected", [
+    ({}, (3.0, 30.0, "2026-10-12", "ILS")),
+    ({"currency": "USD", "receipt_date": "2026-10-12"}, (3.0, 30.0, "2026-10-12", "ILS")),
+    ({"total_amount": 20.0}, (3.0, 60.0, "2026-10-12", "ILS")),
+    ({"total_amount": None}, (3.0, None, "2026-10-12", "ILS")),
+    ({"total_amount": 1e308}, (3.0, None, "2026-10-12", "ILS")),
+    ({"currency": "EUR"}, (None, None, None, None)),
+    ({"receipt_date": "2026-10-13"}, (None, None, None, None)),
+    ({"currency": None}, (None, None, None, None)),
+])
+def test_conversion_update_compares_with_the_row_it_writes(db_path, values, expected):
+    """Re-review F2: keep the conversion only while this UPDATE leaves the
+    currency and date as the row has them, never as an earlier read had them."""
+    doc = _doc(currency="USD", receipt_date="2026-10-12", total_amount=10.0, conversion_rate=3.0,
+               converted_amount=30.0, conversion_rate_date="2026-10-12", conversion_ref="ILS")
+    _set_with(doc, **values)
+    conv = _conv(doc)
+    assert (conv["conversion_rate"], conv["converted_amount"], conv["conversion_rate_date"], conv["conversion_ref"]) == expected

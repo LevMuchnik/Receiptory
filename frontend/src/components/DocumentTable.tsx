@@ -1,6 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { Checkbox } from "@/components/ui/checkbox";
-import { convertedLabel } from "@/lib/conversion";
+import { convertedLabel, formatAmount } from "@/lib/conversion";
 
 interface Document {
   id: number;
@@ -120,12 +120,17 @@ export default function DocumentTable({ documents, selected, onSelect, onSelectA
           {/* Amount */}
           <div className="col-span-2">
             <p className="font-headline font-bold text-sm">
-              {doc.total_amount != null ? doc.total_amount.toFixed(2) : "—"}
+              {doc.total_amount != null ? formatAmount(doc.total_amount) : "—"}
             </p>
             <p className="text-[10px] text-slate-400 font-medium">{doc.currency || ""}</p>
-            {convertedLabel(doc) && (
-              <p className="text-[10px] text-muted-foreground">{convertedLabel(doc)}</p>
-            )}
+            {(() => {
+              const converted = convertedLabel(doc);
+              return converted ? (
+                <p className="text-[11px] text-muted-foreground">
+                  <span className="whitespace-nowrap">{converted.amount}</span> {converted.ref}
+                </p>
+              ) : null;
+            })()}
           </div>
 
           {/* Status chip */}

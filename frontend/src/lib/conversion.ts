@@ -17,20 +17,28 @@ export function formatAmount(n: number): string {
 }
 
 function sameCurrency(doc: Convertible): boolean {
-  return !!doc.conversion_ref && (doc.currency || "").trim().toUpperCase() === doc.conversion_ref;
+  // Rate 1 means the server matched the currency to the reference, aliases
+  // included (the model can write "NIS" for ILS).
+  if (!doc.conversion_ref) return false;
+  return doc.conversion_rate === 1 || (doc.currency || "").trim().toUpperCase() === doc.conversion_ref;
 }
 
-/** "≈ 307.80 ILS" under a foreign amount in the documents table, else null. */
-export function convertedLabel(doc: Convertible): string | null {
+/** The converted amount under a foreign amount in the documents table, split
+ *  so the number never breaks across lines in a narrow column; else null. */
+export function convertedLabel(doc: Convertible): { amount: string; ref: string } | null {
   if (doc.converted_amount == null || !doc.conversion_ref || sameCurrency(doc)) return null;
-  return `≈ ${formatAmount(doc.converted_amount)} ${doc.conversion_ref}`;
+  return { amount: `≈ ${formatAmount(doc.converted_amount)}`, ref: doc.conversion_ref };
 }
 
-/** The read-only line on the document page: the conversion, or "No rate yet". */
+/** The read-only line on the document page: the conversion with the rate's
+ *  direction and date, or why the document is missing from converted totals. */
 export function conversionDetail(doc: Convertible): string | null {
   if (doc.total_amount == null || !doc.currency || sameCurrency(doc)) return null;
-  if (doc.converted_amount == null || doc.conversion_rate == null) return "No rate yet";
+  if (doc.converted_amount == null || doc.conversion_rate == null || !doc.conversion_ref) {
+    return "No exchange rate yet: not included in converted totals";
+  }
   const rate = Number(doc.conversion_rate.toPrecision(4));
-  const when = doc.conversion_rate_date ? ` (${doc.conversion_rate_date})` : "";
-  return `≈ ${formatAmount(doc.converted_amount)} ${doc.conversion_ref} at ${rate}${when}`;
+  const code = doc.currency.trim().toUpperCase();
+  const when = doc.conversion_rate_date ? `, rate of ${doc.conversion_rate_date}` : "";
+  return `≈ ${formatAmount(doc.converted_amount)} ${doc.conversion_ref} (1 ${code} = ${rate} ${doc.conversion_ref}${when})`;
 }

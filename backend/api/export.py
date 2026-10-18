@@ -64,9 +64,10 @@ EXPORT_CSV_FIELDS = [
     "id", "document_type", "original_filename", "stored_filename", "receipt_date",
     "vendor_name", "vendor_tax_id", "vendor_receipt_id", "client_name", "client_tax_id",
     "description", "subtotal", "tax_amount", "total_amount", "currency",
-    "converted_amount", "conversion_rate", "conversion_rate_date", "conversion_ref",
     "payment_method", "payment_identifier", "language", "status",
     "submission_date", "submission_channel", "category_name",
+    # Appended (#72), so a sheet reading earlier columns by position keeps working.
+    "converted_amount", "conversion_rate", "conversion_rate_date", "conversion_ref",
 ]
 
 

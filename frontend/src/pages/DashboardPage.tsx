@@ -207,7 +207,7 @@ export default function DashboardPage() {
               </h3>
               {stats.unconverted_count > 0 && (
                 <p className="text-xs text-muted-foreground">
-                  {stats.unconverted_count} document{stats.unconverted_count === 1 ? "" : "s"} not included: no exchange rate yet
+                  {stats.unconverted_count} document{stats.unconverted_count === 1 ? "" : "s"} not included (no currency or exchange rate yet)
                 </p>
               )}
             </div>

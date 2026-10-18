@@ -410,3 +410,20 @@ def test_export_has_the_converted_columns(authed_client, docs_with_files, monkey
     assert (a["converted_amount"], a["conversion_rate"], a["conversion_rate_date"], a["conversion_ref"]) == ("300.0", "3.0", "2026-01-15", "ILS")
     # computed for another reference: stale, so not exported as a conversion
     assert (b["converted_amount"], b["conversion_rate"], b["conversion_ref"]) == ("", "", "")
+
+
+
+def test_export_appends_the_conversion_columns_and_writes_them_to_excel(authed_client, docs_with_files):
+    """New columns go last, so a sheet that reads the export by position keeps working."""
+    import openpyxl
+    with get_connection() as conn:
+        conn.execute("UPDATE documents SET currency = 'USD', conversion_rate = 3.0, converted_amount = 300.0, "
+                     "conversion_rate_date = '2026-01-15', conversion_ref = 'ILS' WHERE file_hash = 'h1'")
+    resp = authed_client.post("/api/export", json={"date_basis": "receipt", "date_from": "2026-01-01", "date_to": "2026-12-31"})
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    header = next(csv.reader(io.StringIO(zf.read("metadata.csv").decode("utf-8"))))
+    assert header[-4:] == ["converted_amount", "conversion_rate", "conversion_rate_date", "conversion_ref"]
+    ws = openpyxl.load_workbook(io.BytesIO(zf.read("metadata.xlsx"))).active
+    rows = list(ws.iter_rows(values_only=True))
+    assert list(rows[0][-4:]) == header[-4:]
+    assert (300.0, 3.0, "2026-01-15", "ILS") in [tuple(r[-4:]) for r in rows[1:]]

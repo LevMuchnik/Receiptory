@@ -20,7 +20,12 @@ today, so a misread future year still converts.
 
 Never call the network while holding a database connection: apply_conversion
 reads a snapshot, fetches with no connection open, then writes only if the
-currency and date are still the ones it read.
+currency, date and stored conversion are still the ones it read. Whoever
+writes a document's currency or date adds conversion_update()'s SET clauses
+to that UPDATE (pipeline, PATCH): they keep the conversion only while the row
+keeps its currency and date, so a stored rate is always for the current
+currency and date, and a failed conversion leaves NULL for the rates task,
+never the old currency's rate.
 """
 import asyncio
 import csv
@@ -45,13 +50,24 @@ BOI_CURRENCIES = frozenset({"USD", "EUR", "GBP", "CHF", "JPY", "CAD", "AUD", "SE
 # One fetch covers this many days before the date: no publication gap
 # (weekend plus holidays) is longer.
 LOOKBACK_DAYS = 14
-HTTP_TIMEOUT = 10.0
+# Seconds; connecting gets less, so an unreachable site fails fast.
+HTTP_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 # The rates task: backfill, retries for unreachable sites, and recomputes
 # after a reference-currency change (owner, 2026-10-18).
 RATES_TASK_INTERVAL_S = 3 * 3600
 _ISRAEL = ZoneInfo("Asia/Jerusalem")
 _CODE_RE = re.compile(r"[A-Z]{3}")
 _DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+# Neither source publishes anything older, and date arithmetic near year 1
+# overflows: an earlier receipt_date is a misread, not a rate to look up.
+_EARLIEST_DATE = "1900-01-01"
+# A rate outside this range is a parsing accident, not a currency (LBP, the
+# smallest per unit, is about 4e-5 ILS); one that underflows to 0 would divide
+# by zero in a cross rate.
+_MIN_RATE, _MAX_RATE = 1e-6, 1e6
+# Beyond this a converted amount is a misread, and the product of a huge total
+# and a rate can overflow to inf, which JSON cannot carry.
+_MAX_AMOUNT = 1e15
 _ALIASES = {"NIS": "ILS", "₪": "ILS", 'ש"ח': "ILS", "ש״ח": "ILS", "שח": "ILS", "$": "USD", "€": "EUR", "£": "GBP"}
 
 
@@ -85,9 +101,12 @@ def parse_csv(text: str) -> list[tuple[str, float]]:
         except ValueError:
             continue
         period = (rec.get("TIME_PERIOD") or "").strip()
-        if not _DATE_RE.fullmatch(period) or not math.isfinite(value) or value <= 0:
+        # A real UNIT_MULT is 0-2; anything wild would overflow the division.
+        if not _DATE_RE.fullmatch(period) or not math.isfinite(value) or not 0 <= mult <= 9:
             continue
-        rows.append((period, value / 10**mult))
+        per_unit = value / 10**mult
+        if _MIN_RATE <= per_unit <= _MAX_RATE:
+            rows.append((period, per_unit))
     return rows
 
 
@@ -125,15 +144,28 @@ def _cached(source: str, ccy: str, start: str, end: str):
 
 
 def _latest(source: str, ccy: str, day: str) -> tuple[float, str] | None:
-    """The latest published value on or before `day`, from the cache or one
-    fetch of the LOOKBACK_DAYS window. Raises RateUnavailable."""
+    """The latest published value on or before `day`. From the cache when it
+    holds `day` itself, or when `day` lies in a window that was fetched (every
+    rate published in it is cached, so the latest cached one in it is the
+    latest published); otherwise from one fetch of the LOOKBACK_DAYS window.
+    Cached rows on both sides of `day` prove nothing: two fetches that do not
+    overlap leave unfetched days between them. Raises RateUnavailable."""
+    start = (date.fromisoformat(day) - timedelta(days=LOOKBACK_DAYS)).isoformat()
     with get_connection() as conn:
-        row = conn.execute(
+        exact = conn.execute(
             "SELECT value FROM exchange_rates WHERE source = ? AND currency = ? AND rate_date = ?", (source, ccy, day)
         ).fetchone()
-    if row:
-        return row["value"], day
-    start = (date.fromisoformat(day) - timedelta(days=LOOKBACK_DAYS)).isoformat()
+        if exact:
+            return exact["value"], day
+        window = conn.execute(
+            "SELECT MIN(start_date) AS start FROM exchange_rate_fetches "
+            "WHERE source = ? AND currency = ? AND start_date <= ? AND end_date >= ?",
+            (source, ccy, day, day),
+        ).fetchone()["start"]
+    if window:
+        hit = _cached(source, ccy, window, day)
+        if hit:
+            return hit["value"], hit["rate_date"]
     fetch = fetch_boi if source == "boi" else fetch_ecb
     rows = fetch(ccy, start, day)  # no connection is open here
     if rows:
@@ -143,37 +175,53 @@ def _latest(source: str, ccy: str, day: str) -> tuple[float, str] | None:
                 "INSERT OR IGNORE INTO exchange_rates (source, currency, rate_date, value, fetched_at) VALUES (?, ?, ?, ?, ?)",
                 [(source, ccy, d, v, now) for d, v in rows],
             )
+            # Today's rate may not be published yet: the window is complete
+            # only up to yesterday.
+            complete = min(day, (today_israel() - timedelta(days=1)).isoformat())
+            conn.execute(
+                "INSERT OR IGNORE INTO exchange_rate_fetches (source, currency, start_date, end_date, fetched_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (source, ccy, start, complete, now),
+            )
+    else:
+        # No publication gap is LOOKBACK_DAYS long: the code is unknown to this
+        # source, the date is before its series, or the API moved. Not cached
+        # (it may be the last), so say so.
+        logger.warning("%s returned no rates for %s in %s..%s", source, ccy, start, day)
     hit = _cached(source, ccy, start, day)
     return (hit["value"], hit["rate_date"]) if hit else None
 
 
-def rate_to_ils(ccy: str, day: str) -> tuple[float, str, str] | None:
-    """(ILS per unit of ccy, publication date, source) on or before `day`,
-    clamped to today. None when no rate exists; raises RateUnavailable."""
+def rate_to_ils(ccy: str, day: str) -> tuple[float, str] | None:
+    """(ILS per unit of ccy, publication date) on or before `day`, clamped to
+    today. None when no rate exists; raises RateUnavailable."""
     day = min(day, today_israel().isoformat())
     if ccy == "ILS":
-        return 1.0, day, "identity"
+        return 1.0, day
     if ccy in BOI_CURRENCIES:
-        hit = _latest("boi", ccy, day)
-        return (hit[0], hit[1], "boi") if hit else None
+        return _latest("boi", ccy, day)
     per_eur = _latest("ecb", ccy, day)
     if per_eur is None:
         return None
     eur = _latest("boi", "EUR", day)
     if eur is None:
         return None
-    return eur[0] / per_eur[0], min(eur[1], per_eur[1]), "boi+ecb"
+    return _checked(eur[0] / per_eur[0], min(eur[1], per_eur[1]))
 
 
-def rate(ccy, ref, day) -> tuple[float, str | None, str] | None:
-    """(rate per unit of ccy in ref, publication date, source), or None.
+def _checked(value: float, rate_date: str) -> tuple[float, str] | None:
+    return (value, rate_date) if _MIN_RATE <= value <= _MAX_RATE else None
+
+
+def rate(ccy, ref, day) -> tuple[float, str | None] | None:
+    """(rate per unit of ccy in ref, publication date), or None.
     Raises RateUnavailable when a site could not be reached."""
     ccy, ref = normalize_code(ccy), normalize_code(ref)
     if ccy is None or ref is None:
         return None
     if ccy == ref:
-        return 1.0, None, "identity"
-    if not isinstance(day, str) or not _DATE_RE.fullmatch(day):
+        return 1.0, None
+    if not isinstance(day, str) or not _DATE_RE.fullmatch(day) or day < _EARLIEST_DATE:
         return None
     try:
         date.fromisoformat(day)
@@ -187,79 +235,144 @@ def rate(ccy, ref, day) -> tuple[float, str | None, str] | None:
     r = rate_to_ils(ref, day)
     if r is None:
         return None
-    return x[0] / r[0], min(x[1], r[1]), x[2] if x[2] == r[2] else f"{x[2]}/{r[2]}"
+    return _checked(x[0] / r[0], min(x[1], r[1]))
+
+
+_KEEP = object()
+
+
+def conversion_update(currency=_KEEP, receipt_date=_KEEP, total_amount=_KEEP) -> tuple[str, list]:
+    """SET clauses (and their parameters, in order) for an UPDATE that writes
+    these columns: they keep the stored conversion while the UPDATE leaves the
+    row's currency and date as they are, re-multiplied by the new total, and
+    clear it otherwise. They compare with the row being written (SET
+    expressions read the old row), never with an earlier read, so a write that
+    raced an edit cannot keep the edit's rate on another currency. A column
+    left out keeps its value."""
+    params = []
+
+    def val(column, value):
+        if value is _KEEP:
+            return column
+        params.append(value)
+        return "?"
+
+    def same():
+        return f"currency IS {val('currency', currency)} AND receipt_date IS {val('receipt_date', receipt_date)}"
+
+    clauses = [f"{col} = CASE WHEN {same()} THEN {col} END"
+               for col in ("conversion_rate", "conversion_rate_date", "conversion_ref")]
+    # abs() of NULL is NULL and of inf fails the bound: both store NULL
+    clauses.append(
+        f"converted_amount = CASE WHEN {same()} AND abs({val('total_amount', total_amount)} * conversion_rate) < {_MAX_AMOUNT:.0e} "
+        f"THEN ROUND({val('total_amount', total_amount)} * conversion_rate, 2) END"
+    )
+    return ", ".join(clauses), params
+
+
+def _converted(total, value):
+    if total is None or value is None or not abs(total * value) < _MAX_AMOUNT:
+        return None
+    return round(total * value, 2)
 
 
 def reference_currency() -> str | None:
     return normalize_code(get_setting("reference_currency"))
 
 
+def needs_network(currency_value, ref) -> bool:
+    """Whether converting this currency into ref can need a rate site."""
+    code = normalize_code(currency_value)
+    return code is not None and ref is not None and code != ref
+
+
 def apply_conversion(doc_id: int) -> str:
-    """Compute and store one document's conversion. Returns 'converted',
-    'no_rate', 'unavailable' (a site was unreachable; the rate is left NULL
-    for the rates task to retry) or 'superseded' (the currency or date changed
-    while the rate was fetched, so this result was dropped)."""
+    """Compute and store one document's conversion. Returns:
+    - 'converted': stored, or already current (a stored rate whose
+      conversion_ref is the reference is never refetched: every write of the
+      currency or date clears it, see conversion_update);
+    - 'no_rate': none exists (no currency, foreign without a date, unknown
+      code, before the series); NULL is stored;
+    - 'unavailable': a site was unreachable; nothing is written, so a good rate
+      survives an outage and a missing one waits for the rates task;
+    - 'superseded': the document changed (or was deleted) while the rate was
+      fetched, so this result was dropped.
+    An invalid reference_currency setting converts nothing ('no_rate', no write)."""
     ref = reference_currency()
     with get_connection() as conn:
-        doc = conn.execute("SELECT currency, receipt_date FROM documents WHERE id = ?", (doc_id,)).fetchone()
+        doc = conn.execute(
+            "SELECT currency, receipt_date, total_amount, conversion_rate, conversion_rate_date, conversion_ref, "
+            "converted_amount FROM documents WHERE id = ?",
+            (doc_id,),
+        ).fetchone()
     if doc is None:
         return "superseded"
-    status = "converted"
+    if ref is None:
+        return "no_rate"
+    if doc["conversion_rate"] is not None and doc["conversion_ref"] == ref:
+        return "converted"
     try:
         found = rate(doc["currency"], ref, doc["receipt_date"])
     except RateUnavailable as e:
         logger.warning("No exchange rate for document %d (%s on %s): %s", doc_id, doc["currency"], doc["receipt_date"], e)
-        found, status = None, "unavailable"
-    if found is None and status == "converted":
-        status = "no_rate"
-    value, rate_date = (found[0], found[1]) if found else (None, None)
+        return "unavailable"
+    value, rate_date = found if found else (None, None)
+    new_ref = ref if found else None
+    total = doc["total_amount"]
+    converted = _converted(total, value)
+    if (value, rate_date, new_ref, converted) == (doc["conversion_rate"], doc["conversion_rate_date"], doc["conversion_ref"], doc["converted_amount"]):
+        return "converted" if found else "no_rate"  # unchanged: no write, no FTS re-index
     with get_connection() as conn:
         cur = conn.execute(
-            "UPDATE documents SET conversion_rate = ?, conversion_rate_date = ?, conversion_ref = ?, "
-            "converted_amount = CASE WHEN ? IS NULL OR total_amount IS NULL THEN NULL ELSE ROUND(total_amount * ?, 2) END "
-            "WHERE id = ? AND currency IS ? AND receipt_date IS ?",
-            (value, rate_date, ref if found else None, value, value, doc_id, doc["currency"], doc["receipt_date"]),
+            "UPDATE documents SET conversion_rate = ?, conversion_rate_date = ?, conversion_ref = ?, converted_amount = ? "
+            "WHERE id = ? AND currency IS ? AND receipt_date IS ? AND total_amount IS ? "
+            "AND conversion_rate IS ? AND conversion_ref IS ?",
+            (value, rate_date, new_ref, converted, doc_id, doc["currency"], doc["receipt_date"], total,
+             doc["conversion_rate"], doc["conversion_ref"]),
         )
         if cur.rowcount == 0:
             return "superseded"
-    return status
-
-
-def refresh_converted_amount(doc_id: int) -> None:
-    """After an amount-only edit: the stored rate still applies."""
-    with get_connection() as conn:
-        conn.execute(
-            "UPDATE documents SET converted_amount = CASE WHEN conversion_rate IS NULL OR total_amount IS NULL THEN NULL "
-            "ELSE ROUND(total_amount * conversion_rate, 2) END WHERE id = ?",
-            (doc_id,),
-        )
+    return "converted" if found else "no_rate"
 
 
 def convert_pending() -> dict:
-    """One pass of the rates task: documents with a currency and no usable
-    rate (none yet, or computed for another reference). The first unreachable
-    site ends the pass; the next pass retries."""
+    """One pass of the rates task over documents with a currency and no usable
+    rate (none yet, or computed for another reference). After the first
+    unreachable site the pass keeps going only for documents that need no
+    site (already in the reference currency); the next pass retries the rest.
+    One document that raises is logged and skipped. An invalid
+    reference_currency setting makes the pass a no-op."""
+    counts = {"converted": 0, "no_rate": 0, "superseded": 0, "unavailable": 0, "error": 0}
     ref = reference_currency()
+    if ref is None:
+        logger.warning("reference_currency is not a currency code; exchange-rate pass skipped")
+        return counts
     with get_connection() as conn:
-        ids = [r["id"] for r in conn.execute(
-            "SELECT id FROM documents WHERE is_deleted = 0 AND currency IS NOT NULL "
+        docs = conn.execute(
+            "SELECT id, currency FROM documents WHERE is_deleted = 0 AND currency IS NOT NULL "
             "AND (conversion_rate IS NULL OR conversion_ref IS NOT ?) ORDER BY id",
             (ref,),
-        )]
-    counts = {"converted": 0, "no_rate": 0, "superseded": 0, "unavailable": 0}
-    for doc_id in ids:
-        status = apply_conversion(doc_id)
+        ).fetchall()
+    offline = False
+    for doc in docs:
+        if offline and needs_network(doc["currency"], ref):
+            continue
+        try:
+            status = apply_conversion(doc["id"])
+        except Exception:
+            logger.exception("Exchange rate for document %d failed", doc["id"])
+            status = "error"
         counts[status] += 1
-        if status == "unavailable":
-            break
+        offline = offline or status == "unavailable"
     return counts
 
 
 async def run_rates_task() -> None:
     """Runs convert_pending at startup and then every RATES_TASK_INTERVAL_S,
-    in a worker thread: a hung rate site must not block the event loop, and
-    this task is separate from the processing queue so it never delays a
-    receipt."""
+    in a worker thread: a hung rate site must not block the event loop. The
+    pipeline and a PATCH also convert their one document inline, which an
+    unreachable site can delay by up to the HTTP timeouts per request; this
+    task retries whatever they left unconverted."""
     logger.info("Exchange-rate task started")
     while True:
         try:

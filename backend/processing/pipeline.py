@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone
 
 from backend.database import get_connection
-from backend.currency import apply_conversion
+from backend.currency import apply_conversion, conversion_update
 from backend.config import get_setting, resolve_llm_api_key
 from backend.atomic import find_original
 from backend.storage import (save_filed, remove_filed, render_all_pages_to_memory)
@@ -138,9 +138,16 @@ def _run_pipeline(doc_id: int, doc: dict, data_dir: str) -> None:
                 elif cat_row:
                     category_id = cat_row["id"]
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # #72: the stored conversion survives only if this write leaves the
+    # currency and date as the row has them now (not as `doc`, read before the
+    # LLM call, had them: an edit may have landed since). Then it is kept (a
+    # rate-site outage during a reprocess must not erase it) and re-multiplied;
+    # otherwise it is cleared, so a failed conversion below leaves NULL for the
+    # rates task, never another currency's rate.
+    conv_sql, conv_params = conversion_update(ext.currency, ext.receipt_date, ext.total_amount)
     with get_connection() as conn:
-        conn.execute("""UPDATE documents SET document_type = ?, stored_filename = ?, page_count = ?, receipt_date = ?, document_title = ?, vendor_name = ?, vendor_tax_id = ?, vendor_receipt_id = ?, client_name = ?, client_tax_id = ?, description = ?, line_items = ?, subtotal = ?, tax_amount = ?, total_amount = ?, currency = ?, payment_method = ?, payment_identifier = ?, language = ?, additional_fields = ?, raw_extracted_text = ?, category_id = ?, status = ?, review_reason = ?, extraction_confidence = ?, processing_model = ?, processing_tokens_in = ?, processing_tokens_out = ?, processing_cost_usd = ?, processing_date = ?, processing_attempts = processing_attempts + 1, processing_error = NULL, updated_at = ? WHERE id = ?""",
-            (doc_type, stored_filename, page_count, ext.receipt_date, ext.document_title, ext.vendor_name, ext.vendor_tax_id, ext.vendor_receipt_id, ext.client_name, ext.client_tax_id, ext.description, json.dumps(ext.line_items) if ext.line_items else None, ext.subtotal, ext.tax_amount, ext.total_amount, ext.currency, ext.payment_method, ext.payment_identifier, ext.language, json.dumps(ext.additional_fields) if ext.additional_fields else None, ext.raw_extracted_text, category_id, status, review_reason, ext.extraction_confidence, llm_result.model, llm_result.tokens_in, llm_result.tokens_out, estimate_cost(llm_result.model, llm_result.tokens_in, llm_result.tokens_out), now, now, doc_id))
+        conn.execute("""UPDATE documents SET document_type = ?, stored_filename = ?, page_count = ?, receipt_date = ?, document_title = ?, vendor_name = ?, vendor_tax_id = ?, vendor_receipt_id = ?, client_name = ?, client_tax_id = ?, description = ?, line_items = ?, subtotal = ?, tax_amount = ?, total_amount = ?, currency = ?, payment_method = ?, payment_identifier = ?, language = ?, additional_fields = ?, raw_extracted_text = ?, category_id = ?, status = ?, review_reason = ?, extraction_confidence = ?, processing_model = ?, processing_tokens_in = ?, processing_tokens_out = ?, processing_cost_usd = ?, processing_date = ?, processing_attempts = processing_attempts + 1, processing_error = NULL, updated_at = ?, """ + conv_sql + " WHERE id = ?",
+            (doc_type, stored_filename, page_count, ext.receipt_date, ext.document_title, ext.vendor_name, ext.vendor_tax_id, ext.vendor_receipt_id, ext.client_name, ext.client_tax_id, ext.description, json.dumps(ext.line_items) if ext.line_items else None, ext.subtotal, ext.tax_amount, ext.total_amount, ext.currency, ext.payment_method, ext.payment_identifier, ext.language, json.dumps(ext.additional_fields) if ext.additional_fields else None, ext.raw_extracted_text, category_id, status, review_reason, ext.extraction_confidence, llm_result.model, llm_result.tokens_in, llm_result.tokens_out, estimate_cost(llm_result.model, llm_result.tokens_in, llm_result.tokens_out), now, now, *conv_params, doc_id))
     _drop_superseded_filed_copy(doc_id, previous_filename, stored_filename, data_dir)
     # After the commit above: a rate fetch never runs inside a write
     # transaction, and a failure here never fails the document (#72). The rates

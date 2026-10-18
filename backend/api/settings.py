@@ -1,6 +1,6 @@
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 from backend.auth import require_auth
 from backend.config import (
@@ -106,15 +106,31 @@ def settings_env_overrides(username: str = Depends(require_auth)):
 
 
 @router.patch("/settings")
-def patch_settings(body: SettingsUpdate, username: str = Depends(require_auth)):
+def patch_settings(body: SettingsUpdate, background_tasks: BackgroundTasks, username: str = Depends(require_auth)):
+    from backend import currency
     from backend.config import DEFAULTS
-    for key, value in body.settings.items():
+    reference_before = currency.reference_currency()
+    settings = dict(body.settings)
+    if "reference_currency" in settings:
+        # Every conversion is keyed on this code (#72): anything that is not
+        # one would leave every document unconverted. Checked before any key
+        # is written, so a rejected body saves nothing.
+        code = currency.normalize_code(settings["reference_currency"])
+        if code is None:
+            raise HTTPException(status_code=400, detail="reference_currency must be a 3-letter currency code, such as ILS")
+        settings["reference_currency"] = code
+    for key, value in settings.items():
         if key not in DEFAULTS:
             continue  # Reject unknown setting keys
         if key == "auth_password_hash":
             import bcrypt
             value = bcrypt.hashpw(value.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
         set_setting(key, value)
+    if currency.reference_currency() != reference_before:
+        # Every stored rate is now for the old reference: reconvert after the
+        # response instead of showing everything unconverted until the next
+        # rates pass, up to 3 hours away.
+        background_tasks.add_task(currency.convert_pending)
     return {"message": "Settings updated"}
 
 

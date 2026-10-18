@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import os
 import logging
@@ -59,6 +60,14 @@ def _get_current_version(conn: sqlite3.Connection) -> int:
         return -1
 
 
+# A statement (not a comment) that keeps a migration out of the one-transaction
+# wrapper. A trigger's BEGIN ... END is not a transaction and does not match.
+_UNWRAPPED_RE = re.compile(
+    r"^\s*(PRAGMA\b|COMMIT\b|END\s+TRANSACTION\b|BEGIN(\s+(DEFERRED|IMMEDIATE|EXCLUSIVE))?(\s+TRANSACTION)?\s*;)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
 def _run_migrations(conn: sqlite3.Connection) -> None:
     current = _get_current_version(conn)
     migration_files = sorted(MIGRATIONS_DIR.glob("*.sql"))
@@ -68,7 +77,20 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             continue
         logger.info(f"Applying migration {path.name}")
         sql = path.read_text(encoding="utf-8")
-        conn.executescript(sql)
-        conn.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
-        conn.commit()
+        if _UNWRAPPED_RE.search(sql):
+            # PRAGMA foreign_keys is a no-op inside a transaction (005 turns it
+            # off around a table rebuild), and a script with its own BEGIN or
+            # COMMIT cannot nest in ours, so such a script runs unwrapped.
+            conn.executescript(sql)
+            conn.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
+            conn.commit()
+        else:
+            # The script and its version row in one transaction: a failure (or
+            # a crash) mid-script applies nothing, instead of leaving half the
+            # DDL behind and failing every later start on "duplicate column".
+            try:
+                conn.executescript(f"BEGIN;\n{sql}\n;\nINSERT INTO schema_version (version) VALUES ({version});\nCOMMIT;")
+            except Exception:
+                conn.rollback()
+                raise
         logger.info(f"Migration {path.name} applied successfully")

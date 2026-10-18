@@ -204,6 +204,8 @@ class DashboardStats(BaseModel):
     total_expenses_by_category: list[dict]
     pending_review_count: int
     recent_activity: list[dict]
+    reference_currency: str | None = None
+    unconverted_count: int = 0
 
 
 class ProcessingCosts(BaseModel):

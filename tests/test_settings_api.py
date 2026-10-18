@@ -41,6 +41,19 @@ def test_patch_settings(authed_client):
     assert resp.json()["llm_model"] == "gpt-4o"
 
 
+@pytest.mark.parametrize("value", ["Shekel", "", "US"])
+def test_reference_currency_must_be_a_currency_code(authed_client, value):
+    """#72: an invalid reference would leave every conversion unusable."""
+    resp = authed_client.patch("/api/settings", json={"settings": {"reference_currency": value}})
+    assert resp.status_code == 400
+    assert authed_client.get("/api/settings").json()["reference_currency"] == "ILS"
+
+
+def test_reference_currency_is_stored_as_its_code(authed_client):
+    assert authed_client.patch("/api/settings", json={"settings": {"reference_currency": " usd "}}).status_code == 200
+    assert authed_client.get("/api/settings").json()["reference_currency"] == "USD"
+
+
 def test_queue_status(authed_client):
     resp = authed_client.get("/api/queue/status")
     assert resp.status_code == 200
@@ -319,3 +332,23 @@ def test_test_llm_masks_the_api_key_in_error_text(authed_client):
     resp, _ = _test_llm(authed_client, [_reply(), litellm.BadRequestError(message="schema rejected, url ...?key=test-key", model="m", llm_provider="gemini")])
     assert resp.json()["schema"] == "rejected"
     assert "test-key" not in resp.json()["schema_detail"]
+
+
+def test_a_rejected_body_saves_nothing(authed_client):
+    """Fix-delta F4: validation runs before the first key is written."""
+    resp = authed_client.patch("/api/settings", json={"settings": {"backup_retention_daily": 9, "reference_currency": "Shekel"}})
+    assert resp.status_code == 400
+    assert authed_client.get("/api/settings").json()["backup_retention_daily"] != 9
+
+
+def test_a_new_reference_currency_reconverts_at_once(authed_client, monkeypatch):
+    """Re-review F9: otherwise every document reads as unconverted until the
+    next rates pass, up to 3 hours later."""
+    from backend import currency
+    passes = []
+    monkeypatch.setattr(currency, "convert_pending", lambda: passes.append(1))
+    authed_client.patch("/api/settings", json={"settings": {"reference_currency": "ILS"}})
+    authed_client.patch("/api/settings", json={"settings": {"backup_retention_daily": 5}})
+    assert passes == []  # unchanged reference, or another setting: no pass
+    authed_client.patch("/api/settings", json={"settings": {"reference_currency": "usd"}})
+    assert passes == [1]

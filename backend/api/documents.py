@@ -13,7 +13,7 @@ from backend.processing.extract import totals_mismatch, format_totals_reason
 from backend.processing.filing import download_name
 from backend.storage import RENDER_ERRORS, render_page, clear_page_cache, get_converted_path
 from backend.config import get_setting
-from backend.currency import apply_conversion, reference_currency, refresh_converted_amount
+from backend.currency import apply_conversion, conversion_update, reference_currency
 from backend.models import (
     DocumentResponse,
     DocumentUpdate,
@@ -39,7 +39,7 @@ def _row_to_response(row, ref=_LOOKUP) -> dict:
     # A rate computed for another reference currency is stale (#72): the
     # rates task recomputes it, and until then the document is unconverted.
     if d.get("conversion_ref") != ref:
-        d["conversion_rate"] = d["converted_amount"] = d["conversion_rate_date"] = None
+        d["conversion_rate"] = d["converted_amount"] = d["conversion_rate_date"] = d["conversion_ref"] = None
     # Parse JSON fields
     for field in ("line_items", "additional_fields", "edit_history"):
         if d.get(field) and isinstance(d[field], str):
@@ -283,6 +283,18 @@ def edit_document(doc_id: int, update: DocumentUpdate, username: str = Depends(r
             "timestamp": now,
         })
 
+    # #72: a stored conversion is only valid for the currency and date it was
+    # computed for. conversion_update compares with the row this UPDATE writes:
+    # a changed currency or date clears it (a failed reconversion below then
+    # leaves NULL, never the old rate); a changed total is re-multiplied.
+    conv_sql, conv_params = conversion_update(
+        **{k: changes[k] for k in ("currency", "receipt_date", "total_amount") if k in changes})
+    set_clauses.append(conv_sql)
+    extra_values.extend(conv_params)
+    # The form re-sends every field on each save, so only a value that differs
+    # from the stored one needs a rate fetched now.
+    reconvert = any(k in changes and changes[k] != existing[k] for k in ("currency", "receipt_date"))
+
     values = list(changes.values()) + [json.dumps(history), now] + extra_values + [doc_id]
 
     with get_connection() as conn:
@@ -291,19 +303,12 @@ def edit_document(doc_id: int, update: DocumentUpdate, username: str = Depends(r
             values,
         )
 
-    # #72, after the commit: a rate fetch never runs inside a write transaction.
-    # The form re-sends every field on each save, so compare with the stored
-    # values; an amount-only edit reuses the stored rate.
-    def _changed(field):
-        return field in changes and changes[field] != existing[field]
-
-    try:
-        if _changed("currency") or _changed("receipt_date"):
+    # After the commit: a rate fetch never runs inside a write transaction.
+    if reconvert:
+        try:
             apply_conversion(doc_id)
-        elif _changed("total_amount"):
-            refresh_converted_amount(doc_id)
-    except Exception:
-        logger.exception(f"Document {doc_id}: currency conversion failed")
+        except Exception:
+            logger.exception(f"Document {doc_id}: currency conversion failed")
 
     with get_connection() as conn:
         row = conn.execute(

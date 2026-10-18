@@ -1,3 +1,4 @@
+import pytest
 import sqlite3
 from pathlib import Path
 from backend.database import init_db, get_connection, _get_current_version
@@ -124,3 +125,35 @@ def test_migration_008_applies_through_runner_on_upgrade(tmp_path):
     assert db.execute("SELECT COUNT(*) AS c FROM schema_version WHERE version=9").fetchone()["c"] == 1
     assert "review_reason" in [r[1] for r in db.execute("PRAGMA table_info(documents)")]
     db.close()
+
+
+
+def test_a_failed_migration_applies_nothing(tmp_path, monkeypatch):
+    """Review #72: a crash or error mid-migration must not leave half the DDL
+    applied without its version row, or the next start fails on
+    'duplicate column name' for good."""
+    import backend.database as database
+    mig = tmp_path / "migrations"
+    mig.mkdir()
+    (mig / "001_base.sql").write_text("CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT);\nCREATE TABLE t (a INTEGER);\n")
+    (mig / "002_two_steps.sql").write_text("ALTER TABLE t ADD COLUMN b INTEGER;\nALTER TABLE missing ADD COLUMN c INTEGER;\n")
+    monkeypatch.setattr(database, "MIGRATIONS_DIR", mig)
+    db = sqlite3.connect(str(tmp_path / "m.db"))
+    with pytest.raises(sqlite3.OperationalError):
+        database._run_migrations(db)
+    assert [r[1] for r in db.execute("PRAGMA table_info(t)")] == ["a"]
+    assert [r[0] for r in db.execute("SELECT version FROM schema_version")] == [1]
+
+
+def test_a_comment_naming_pragma_keeps_a_migration_atomic(tmp_path, monkeypatch):
+    """Re-review F10: only a PRAGMA statement runs a script unwrapped."""
+    import backend.database as database
+    mig = tmp_path / "migrations"
+    mig.mkdir()
+    (mig / "001_base.sql").write_text("CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT);\nCREATE TABLE t (a INTEGER);\n")
+    (mig / "002_two_steps.sql").write_text("-- no pragma needed here\nALTER TABLE t ADD COLUMN b INTEGER;\nALTER TABLE missing ADD COLUMN c INTEGER;\n")
+    monkeypatch.setattr(database, "MIGRATIONS_DIR", mig)
+    db = sqlite3.connect(str(tmp_path / "m.db"))
+    with pytest.raises(sqlite3.OperationalError):
+        database._run_migrations(db)
+    assert [r[1] for r in db.execute("PRAGMA table_info(t)")] == ["a"]
