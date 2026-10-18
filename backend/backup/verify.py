@@ -31,13 +31,11 @@ A row captured in the snapshot therefore always has its bytes on disk already,
 so a document arriving mid-backup cannot make a good backup look broken.
 """
 
-import glob
 import hashlib
 import os
-import re
 import sqlite3
 
-from backend.atomic import is_contained_name
+from backend.atomic import FILE_HASH_RE, find_original, is_contained_name
 
 _HASH_CHUNK = 1 << 20
 
@@ -53,7 +51,7 @@ _MAX_LISTED = 5
 # check a row naming "/etc/hostname" verified clean and counted as a restorable
 # file. The schema has no CHECK constraint, so the invariant does not survive
 # an imported database on its own.
-_HASH_RE = re.compile(r"[0-9a-f]{64}")
+_HASH_RE = FILE_HASH_RE
 
 
 class BackupVerificationError(RuntimeError):
@@ -112,25 +110,6 @@ def schema_version(conn: sqlite3.Connection) -> int | None:
         return conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
     except sqlite3.Error:
         return None
-
-
-def _find_original(storage: str, file_hash: str) -> str | None:
-    """Locate originals/<hash><ext>, whatever the extension turned out to be.
-
-    api/upload.py derives the extension with splitext(filename or ".pdf"), whose
-    `or` guards a None filename and not a missing one, so a file uploaded as
-    "receipt" is stored as originals/<hash> with no dot at all. Globbing for
-    "<hash>.*" alone misses it, and treating that as damage on every run would
-    have made one odd upload look like permanent corruption.
-    """
-    bare = os.path.join(storage, "originals", file_hash)
-    if os.path.exists(bare):
-        return bare
-    # glob.escape: the hash is validated as hex before this is called, but the
-    # escape keeps that a belt-and-braces property of this function rather than
-    # an invariant a future caller has to remember.
-    matches = sorted(glob.glob(glob.escape(bare) + ".*"))
-    return matches[0] if matches else None
 
 
 def verify_backup(backup_dir: str) -> dict:
@@ -225,7 +204,7 @@ def verify_backup(backup_dir: str) -> dict:
     for row in rows:
         file_hash = row["file_hash"]
         if file_hash:
-            found = _find_original(storage, file_hash)
+            found = find_original(storage, file_hash)
             if not found:
                 problems.append(f"document {row['id']}: original missing")
             elif _sha256(found) != file_hash:

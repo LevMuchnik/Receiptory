@@ -72,7 +72,7 @@ Deferred items captured during planning and review. Organized by component, sort
 
 ## Ingestion
 
-_No open items. The triage hardening landed in #67; see Completed._
+_No open items. Locating originals with `find_original` landed in #69; see Completed._
 
 ## Scanner
 
@@ -540,6 +540,10 @@ _No open items. The triage hardening landed in #67; see Completed._
 **Depends on:** Issue #12 (parse-retry loop) landing first.
 
 ## Completed
+
+### Locate originals with `find_original` everywhere
+
+**Done 2026-10-17 in issue #69.** The download, `serve_page`, `processing/pipeline.py`, `notifications/notifier.py` and `scripts/compare_json_mode.py` all locate `storage/originals/<hash>*` with `atomic.find_original` (regular files only, malformed hash refused, `<hash>.pdf` tried before listing the folder, a processable extension preferred if two files share a hash) instead of guessing the extension from `original_filename`. An upper-case `.PDF`/`.JPG` original now processes and renders. A dotless or `.bin` original is now found, but `normalize_file` still dispatches on the suffix and fails it as "Unsupported file format", a clearer error than the old missing-file one; content sniffing in normalize would close that. The converted/ paths keep an unchecked hash (decision 85a652a8, marker at `storage.get_converted_path`, which replaced `get_file_path`; its dead extension-guessing `original` branch is gone). A preview of an original PyMuPDF cannot open is a 404, not a 500.
 
 ### Typed response_schema structured output for extraction
 

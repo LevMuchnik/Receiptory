@@ -10,13 +10,23 @@
 # (mounted as $HOME) so it survives container and host restarts.
 #
 # Tear down with:  docker compose -f docker-compose.claude.yml down
+#
+# Start the app stack (docker-compose.yml) first: this container joins its
+# receiptory_default network to reach the app at http://receiptory:8484.
+
+# Own project name, so the app stack doesn't list this container as an orphan
+# (and `docker compose up --remove-orphans` there can't kill a live session).
+name: claude-dev
 
 services:
   claude-dev:
     build:
       context: .
       dockerfile: Dockerfile.claude
+    image: receiptory-claude-dev
     container_name: claude-dev
+    networks:
+      - receiptory
     # The repo is mounted at the SAME absolute path it has on the host.
     # This matters: when Claude rebuilds the app with `docker compose up -d --build`,
     # the CLI runs in this container but the host daemon (via the mounted socket)
@@ -44,3 +54,8 @@ services:
     # Keep it running so you can `docker exec` in whenever you want to work.
     command: ["sleep", "infinity"]
     restart: unless-stopped
+
+networks:
+  receiptory:
+    name: receiptory_default
+    external: true

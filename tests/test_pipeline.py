@@ -523,3 +523,36 @@ def test_pipeline_passes_expense_and_issued_categories_the_right_way_round(mock_
     kwargs = mock_extract.call_args.kwargs
     assert kwargs["expense_categories"] == expense and kwargs["issued_categories"] == issued
     assert "zz_e" in {c["name"] for c in expense} and "zz_i" in {c["name"] for c in issued}
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_process_document_finds_an_original_whose_extension_kept_its_case(mock_extract, setup_db, sample_pdf_path):
+    """gmail.py can store originals/<hash>.PDF. The pipeline used to look for the
+    lower-cased extension of original_filename and failed the document with a
+    missing-file error; it now locates the original the way the download does."""
+    import shutil
+    from backend.storage import compute_file_hash
+
+    mock_extract.return_value = MOCK_LLM_RESULT
+    file_hash = compute_file_hash(sample_pdf_path)
+    shutil.copy(sample_pdf_path, f"{setup_db}/storage/originals/{file_hash}.PDF")
+    with get_connection() as conn:
+        conn.execute("INSERT INTO documents (original_filename, file_hash, file_size_bytes, status, submission_channel) VALUES (?, ?, ?, 'pending', 'gmail')", ("SCAN.PDF", file_hash, 1234))
+        doc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    process_document(doc_id, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT status, processing_error FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    assert doc["status"] == "processed", doc["processing_error"]
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_process_document_with_no_original_on_disk_fails_with_a_clear_error(mock_extract, setup_db):
+    with get_connection() as conn:
+        conn.execute("INSERT INTO documents (original_filename, file_hash, file_size_bytes, status, submission_channel) VALUES (?, ?, ?, 'pending', 'web_upload')", ("gone.pdf", "cd" * 32, 1))
+        doc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    process_document(doc_id, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT status, processing_error FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    assert doc["status"] == "failed"
+    assert "Original file not found" in doc["processing_error"]
+    mock_extract.assert_not_called()

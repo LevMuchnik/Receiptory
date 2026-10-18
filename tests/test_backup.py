@@ -1880,7 +1880,7 @@ def test_converted_scratch_is_dropped_even_when_its_partner_differs(
 
     An earlier version kept the scratch when the sizes differed, on the theory
     that a <hash>.pdf truncated by a crashed copy made the scratch the only
-    intact conversion. Nothing ever READS <stem>_converted.pdf -- get_file_path
+    intact conversion. Nothing ever READS <stem>_converted.pdf -- get_converted_path
     and serve_page resolve <hash>.pdf and nothing else -- so carrying it would
     have rescued nothing while costing a stat per file. Detecting a truncated
     conversion is verification's job (issue #51).

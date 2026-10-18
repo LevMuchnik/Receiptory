@@ -29,6 +29,14 @@ From the repo directory on the NAS (`/mnt/user/appdata/Receiptory`):
 docker compose -f docker-compose.claude.yml up -d --build
 ```
 
+The container joins the app stack's `receiptory_default` network to reach the app
+at `http://receiptory:8484`, so start the app (`docker compose up -d`) at least once
+first: until that network exists, this `up` fails. A `docker compose down` of the app
+stack cannot remove the network while `claude-dev` is still attached to it. If the
+network was removed while `claude-dev` was stopped and the container then fails to
+start with "network not found", recreate it from the host:
+`docker compose -f docker-compose.claude.yml up -d --force-recreate`.
+
 Start an interactive session (or use the container's `>_` console in the UNRAID
 Docker tab):
 

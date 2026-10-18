@@ -638,3 +638,20 @@ def test_the_report_shows_what_each_tree_actually_sent():
     report = compare_results(base, cand)
     assert report["output_modes"] == {"base": {"None": 2}, "cand": {"json_object": 2}}
     assert "output modes" in format_report(report)
+
+
+def test_resolve_pdf_finds_a_pdf_original_whose_extension_kept_its_case(tmp_path):
+    """gmail.py can store originals/<hash>.PDF. The harness built the path from
+    original_filename's lower-cased extension and silently skipped the
+    document; it now locates the original like the app does."""
+    from scripts.compare_json_mode import resolve_pdf
+
+    h = "ab" * 32
+    (tmp_path / "storage" / "originals").mkdir(parents=True)
+    pdf = tmp_path / "storage" / "originals" / f"{h}.PDF"
+    pdf.write_bytes(b"%PDF-1.4")
+    doc = {"stored_filename": None, "file_hash": h, "original_filename": "SCAN.PDF"}
+    assert resolve_pdf(doc, str(tmp_path)) == str(pdf)
+    doc["original_filename"] = "photo.jpg"  # a non-PDF original is still not used
+    (tmp_path / "storage" / "originals" / f"{h}.PDF").rename(tmp_path / "storage" / "originals" / f"{h}.jpg")
+    assert resolve_pdf(doc, str(tmp_path)) is None

@@ -115,12 +115,23 @@ def remove_filed(stored_filename: str, data_dir: str) -> bool:
     return True
 
 
-def get_file_path(file_type: str, file_hash: str, ext: str, data_dir: str) -> str:
-    if file_type == "original":
-        return os.path.join(data_dir, "storage", "originals", f"{file_hash}{ext}")
-    elif file_type == "converted":
-        return os.path.join(data_dir, "storage", "converted", f"{file_hash}.pdf")
-    raise ValueError(f"Unknown file type: {file_type}")
+# gstack-shortcut(dec-85a652a8): file_hash is joined unchecked here, and in the
+# hand-built converted/ paths in api/documents.py serve_page and
+# notifications/notifier.py. Originals are never located here: every reader of
+# originals/ goes through atomic.find_original, which refuses a malformed hash
+# (issue #69); the converted/ lookups do not. A tampered or restored row can
+# still steer which converted PDF the page viewer and notifications render; add
+# a FILE_HASH_RE check here and route those two paths through it when that is
+# closed.
+def get_converted_path(file_hash: str, data_dir: str) -> str:
+    return os.path.join(data_dir, "storage", "converted", f"{file_hash}.pdf")
+
+
+# What render_page raises on bytes it cannot draw. fitz.open raises
+# FileDataError (a RuntimeError) on unreadable bytes, but a file that opens and
+# then fails to decode (JPEG magic and nothing after it) raises FzErrorLibrary
+# from doc[0], and that subclasses FzErrorBase, not RuntimeError.
+RENDER_ERRORS = (RuntimeError, fitz.mupdf.FzErrorBase)
 
 
 def get_pdf_page_count(pdf_path: str) -> int:
@@ -138,9 +149,10 @@ def render_page(pdf_path: str, page_num: int, dpi: int = 200, cache_dir: str | N
                 return f.read()
 
     doc = fitz.open(pdf_path)
-    if page_num >= len(doc):
+    page_count = len(doc)
+    if page_num >= page_count:
         doc.close()
-        raise ValueError(f"Page {page_num} does not exist (document has {len(doc)} pages)")
+        raise ValueError(f"Page {page_num} does not exist (document has {page_count} pages)")
     page = doc[page_num]
     mat = fitz.Matrix(dpi / 72, dpi / 72)
     pix = page.get_pixmap(matrix=mat)

@@ -38,16 +38,19 @@ file fsync makes the CONTENT durable; only the directory fsync makes the
 RENAME durable, which is what the crash-safety argument for rclone.conf
 actually rests on.
 
-This module is also where two things live that are not about writing at all:
-`is_contained_name` and `STORAGE_MUTATION_LOCK`. Both are here for the same
-reason -- they are needed on both sides of a boundary whose two halves must not
-import each other, and `backup/verify.py` has to keep working without PyMuPDF.
+This module is also where three things live that are not about writing at all:
+`is_contained_name`, `find_original` and `STORAGE_MUTATION_LOCK`. All are here
+for the same reason -- they are needed on both sides of a boundary whose two
+halves must not import each other, and `backup/verify.py` has to keep working
+without PyMuPDF.
 This file imports nothing but the standard library, which is what makes it the
 only place both sides can already reach. See each one's own comment.
 """
 
+import glob
 import logging
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -152,6 +155,75 @@ def is_contained_name(name: str) -> bool:
         and not os.path.isabs(name)
         and os.path.basename(name) == name
     )
+
+# The shape of documents.file_hash as the application writes it: a sha256 hex
+# digest. backup/verify.py uses the same pattern on the restore path.
+FILE_HASH_RE = re.compile(r"[0-9a-f]{64}")
+
+# The extensions processing/normalize.py turns into a PDF (its
+# SUPPORTED_EXTENSIONS). Copied, not imported: normalize imports fitz and PIL,
+# and this module must stay stdlib-only for backup/verify.py.
+# test_atomic.py::test_processable_extensions_match_what_normalize_accepts
+# pins the two together.
+PROCESSABLE_EXTENSIONS = frozenset({
+    ".jpg", ".jpeg", ".png", ".tiff", ".tif", ".heic", ".heif", ".webp",
+    ".html", ".htm", ".pdf",
+})
+
+
+def find_original(storage: str, file_hash: str) -> str | None:
+    """Locate storage/originals/<hash><ext>, whatever the extension turned out to be.
+
+    `storage` is <data_dir>/storage. Returns None when nothing is there, and
+    also when `file_hash` is not 64 lowercase hex: the value comes from the
+    database, and a restored or tampered row holding "../../etc/x" would
+    otherwise turn GET /documents/{id}/file/original into a read of any file
+    the app can open.
+
+    The extension cannot be derived from original_filename, because the
+    ingestion paths store it four different ways. api/upload.py uses
+    splitext(filename or ".pdf"), whose `or` guards a None filename and not a
+    missing extension, so a file uploaded as "receipt" is stored as
+    originals/<hash> with no dot at all; telegram.py and gmail.py fall back to
+    ".bin"; one gmail.py path does not lowercase. Globbing for "<hash>.*" alone
+    misses the dotless file.
+
+    Only a regular file counts. A symlink is refused for the same reason
+    get_filed_path refuses one and verify_backup rejects a backup holding one:
+    the download would serve whatever it points at. A directory is not an
+    original either, and FileResponse would raise on it (a 500, not a 404).
+
+    Lives here, not in storage.py, so backup/verify.py can call it without
+    importing PyMuPDF (see the module docstring), and so every reader of
+    originals/ shares one lookup instead of guesses that can disagree.
+    """
+    if not isinstance(file_hash, str) or not FILE_HASH_RE.fullmatch(file_hash):
+        return None
+    bare = os.path.join(storage, "originals", file_hash)
+    # Fast path: <hash>.pdf is most of the archive (314 of 384 on the live
+    # install), and the glob below lists all of originals/ on every call, a
+    # cost that grows with the archive on the shfs mount.
+    if _is_regular_file(bare + ".pdf"):
+        return bare + ".pdf"
+    # glob.escape: the hash is hex once validated above, but the escape keeps
+    # that a property of this function rather than one the regex has to carry.
+    candidates = [p for p in [bare, *glob.glob(glob.escape(bare) + ".*")] if _is_regular_file(p)]
+    if not candidates:
+        return None
+    # Normally there is one. A second can be left by an INSERT that lost a race
+    # after save_original wrote its file (two arrivals of the same bytes under
+    # different extensions), or by a crash between the two. Prefer an extension
+    # the pipeline can process over .bin or no extension; then by name, so the
+    # pick is stable.
+    return min(
+        candidates,
+        key=lambda p: (os.path.splitext(p)[1].lower() not in PROCESSABLE_EXTENSIONS, p),
+    )
+
+
+def _is_regular_file(path: str) -> bool:
+    return os.path.isfile(path) and not os.path.islink(path)
+
 
 # Explicit, greppable, and distinct from the `tmp*_converted.pdf` scratch that
 # normalize.py leaks into storage/converted. The backup's ignore rule drops

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { api } from "./api";
+import { api, MissingOriginalError } from "./api";
 
 /**
  * `api.upload` error extraction.
@@ -101,6 +101,126 @@ describe("api.upload — error extraction", () => {
     ]) {
       stubFetch({ ok: false, statusText: "Bad Request", json: async () => ({ detail }) });
       await expect(api.upload([png()])).rejects.not.toThrow("[object Object]");
+    }
+  });
+});
+
+describe("api.originalFileUrl", () => {
+  it("points at the original-file download endpoint", () => {
+    expect(api.originalFileUrl(42)).toMatch(/\/api\/documents\/42\/file\/original$/);
+  });
+
+  it("encodes a route param so it cannot change the path", () => {
+    expect(api.originalFileUrl("1/../../x")).toMatch(/\/api\/documents\/1%2F..%2F..%2Fx\/file\/original$/);
+  });
+});
+
+/**
+ * `api.downloadOriginal`: a plain link cannot see a 401 or a 404, so the file
+ * is asked for with HEAD through `request()` first (which sends an expired
+ * session to /login like every other call), and a missing original is
+ * reported to the page. The download then goes through a temporary
+ * `<a download>`, not a navigation: a failed download (500) must not replace
+ * the app with a raw JSON page. `window` and `document` here are plain
+ * objects, not a DOM.
+ */
+describe("api.downloadOriginal", () => {
+  function stubBrowser() {
+    const location = { pathname: "/documents/42", href: "", assign: vi.fn() };
+    const anchors: { href: string; download: string; click: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn> }[] = [];
+    const appendChild = vi.fn();
+    vi.stubGlobal("window", { location });
+    vi.stubGlobal("document", {
+      createElement: vi.fn(() => {
+        const a = { href: "", download: "", rel: "", style: {}, click: vi.fn(), remove: vi.fn() };
+        anchors.push(a);
+        return a;
+      }),
+      body: { appendChild },
+    });
+    return { location, anchors, appendChild };
+  }
+
+  it("downloads through a temporary link once HEAD finds the file", async () => {
+    const { location, anchors, appendChild } = stubBrowser();
+    const fetchSpy = stubFetch({ ok: true, status: 200, headers: new Headers({ "content-type": "application/pdf" }) });
+    await api.downloadOriginal(42);
+    expect(fetchSpy.mock.calls[0][0]).toBe(api.originalFileUrl(42));
+    expect(fetchSpy.mock.calls[0][1].method).toBe("HEAD");
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].href).toBe(api.originalFileUrl(42));
+    expect(anchors[0].download).toBe("");
+    expect(appendChild).toHaveBeenCalledWith(anchors[0]);
+    expect(anchors[0].click).toHaveBeenCalledOnce();
+    expect(anchors[0].remove).toHaveBeenCalledOnce();
+    // never a navigation: a failed download must not replace the app
+    expect(location.assign).not.toHaveBeenCalled();
+  });
+
+  it("sends an expired session to /login instead of a failed download", async () => {
+    const { location, anchors } = stubBrowser();
+    stubFetch({ ok: false, status: 401, json: async () => ({ detail: "Not authenticated" }) });
+    await expect(api.downloadOriginal(42)).rejects.toThrow("Unauthorized");
+    expect(anchors).toHaveLength(0);
+    expect(location.href).toBe("/login");
+  });
+
+  it("reports a missing original instead of starting a download that will fail", async () => {
+    const { location, anchors } = stubBrowser();
+    // HEAD has no body, so request() falls back to statusText for the message
+    stubFetch({ ok: false, status: 404, statusText: "Not Found", json: async () => { throw new SyntaxError("empty"); } });
+    await expect(api.downloadOriginal(42)).rejects.toBeInstanceOf(MissingOriginalError);
+    expect(anchors).toHaveLength(0);
+    expect(location.href).toBe("");
+  });
+
+  // Value: protects=a non-401, non-404 HTTP failure of the HEAD check (e.g. 500) still starts the download; fails_when=the catch is narrowed to network errors (TypeError) so an HTTP error rethrows; why_new=only a rejected fetch was tested; seam=none; no_claim=what the browser shows for the failed download
+  it("still starts the download when the HEAD check returns a server error", async () => {
+    const { location, anchors } = stubBrowser();
+    stubFetch({ ok: false, status: 500, statusText: "Internal Server Error", json: async () => ({ detail: "boom" }) });
+    await api.downloadOriginal(42);
+    expect(anchors[0].click).toHaveBeenCalledOnce();
+    expect(location.href).toBe("");
+  });
+
+  it("tells an expired session apart by its status, not by the error text", async () => {
+    // a 500 whose detail happens to read "Unauthorized" is not a 401
+    const { location, anchors } = stubBrowser();
+    stubFetch({ ok: false, status: 500, json: async () => ({ detail: "Unauthorized" }) });
+    await api.downloadOriginal(42);
+    expect(anchors[0].click).toHaveBeenCalledOnce();
+    expect(location.href).toBe("");
+  });
+
+  it("still starts the download when the check fails for another reason", async () => {
+    const { anchors } = stubBrowser();
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+    await api.downloadOriginal(42);
+    expect(anchors[0].click).toHaveBeenCalledOnce();
+  });
+
+  it("starts the download anyway when the HEAD check stalls", async () => {
+    // A hung HEAD must not keep the button pending until the tab closes.
+    vi.useFakeTimers();
+    try {
+      const { anchors } = stubBrowser();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          (_url: string, init: RequestInit) =>
+            new Promise((_resolve, reject) => {
+              init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+            }),
+        ),
+      );
+      const done = api.downloadOriginal(42);
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(anchors).toHaveLength(0); // still waiting on the check
+      await vi.advanceTimersByTimeAsync(1);
+      await done;
+      expect(anchors[0].click).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
     }
   });
 });
