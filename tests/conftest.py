@@ -31,6 +31,16 @@ def _reset_test_env(monkeypatch):
         monkeypatch.setenv(key, "")
     # Ensure DEV mode is on for tests (prevents static file mount from intercepting API routes)
     monkeypatch.setenv("RECEIPTORY_DEV", "1")
+    # No test reaches a rate site (#72). Converting a foreign-currency document
+    # anywhere in the suite gets "unavailable" unless the test supplies rates by
+    # replacing these two (tests/test_currency.py's FakeSources).
+    from backend import currency as _currency
+
+    def _offline(*_args):
+        raise _currency.RateUnavailable("network disabled in tests")
+
+    monkeypatch.setattr(_currency, "fetch_boi", _offline)
+    monkeypatch.setattr(_currency, "fetch_ecb", _offline)
     yield
     _db_mod._db_path = None
 

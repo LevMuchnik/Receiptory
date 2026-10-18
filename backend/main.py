@@ -62,7 +62,9 @@ def create_app(data_dir: str | None = None, run_background: bool = True) -> Fast
             backup_task = asyncio.create_task(run_backup_scheduler(data_dir))
             gmail_task = asyncio.create_task(run_gmail_poller(data_dir))
             folder_task = asyncio.create_task(run_watched_folder(data_dir))
-            background_tasks.extend([queue_task, backup_task, gmail_task, folder_task])
+            from backend.currency import run_rates_task
+            rates_task = asyncio.create_task(run_rates_task())
+            background_tasks.extend([queue_task, backup_task, gmail_task, folder_task, rates_task])
             await start_telegram_bot(data_dir)
 
         app.state.data_dir = data_dir
