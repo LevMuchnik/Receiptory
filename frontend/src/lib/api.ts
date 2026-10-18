@@ -40,6 +40,18 @@ function detailToMessage(detail: unknown): string {
   return "";
 }
 
+/**
+ * What request() throws for a 401, after sending the user to /login. Callers
+ * that must tell an expired session from other failures check the class, not
+ * the message: a 500 whose detail happens to read "Unauthorized" is not one.
+ */
+export class UnauthorizedError extends Error {
+  constructor() {
+    super("Unauthorized");
+    this.name = "UnauthorizedError";
+  }
+}
+
 async function request<T>(path: string, options: RequestInit & { skipAuthRedirect?: boolean } = {}): Promise<T> {
   const { skipAuthRedirect, ...fetchOptions } = options;
   const headers: Record<string, string> = { ...fetchOptions.headers as Record<string, string> };
@@ -56,7 +68,7 @@ async function request<T>(path: string, options: RequestInit & { skipAuthRedirec
     if (!skipAuthRedirect && !window.location.pathname.startsWith("/login")) {
       window.location.href = "/login";
     }
-    throw new Error("Unauthorized");
+    throw new UnauthorizedError();
   }
 
   if (!res.ok) {
@@ -68,6 +80,32 @@ async function request<T>(path: string, options: RequestInit & { skipAuthRedirec
     return res.json();
   }
   return res as unknown as T;
+}
+
+function originalFileUrl(id: number | string): string {
+  return `${API_BASE}/documents/${encodeURIComponent(String(id))}/file/original`;
+}
+
+// How long downloadOriginal waits on the session check before downloading
+// anyway, so a stalled request cannot hold the button pending.
+const SESSION_CHECK_TIMEOUT_MS = 10_000;
+
+/**
+ * Start a download without navigating. A temporary <a download> turns a failed
+ * response (a 404 for a missing original, a 500) into a failed download; a
+ * navigation would replace the app with the raw JSON error body. Under
+ * `npm run dev` the API is another origin, where browsers ignore `download`
+ * and navigate anyway; production serves /api from the page's own origin.
+ */
+function triggerDownload(url: string): void {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "";
+  a.rel = "noopener";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 export const api = {
@@ -136,11 +174,26 @@ export const api = {
     return res.json();
   },
   listScannerTestFrames: () => request<{ frames: ScannerTestFrame[] }>("/scanner/test-frames"),
-  // A plain link target, not a fetch: the browser sends the session cookie and
-  // the server's Content-Disposition: attachment names the saved file, so the
-  // download works on the phone without any blob handling.
-  originalFileUrl: (id: number | string) =>
-    `${API_BASE}/documents/${encodeURIComponent(String(id))}/file/original`,
+  originalFileUrl,
+  // The browser fetches the file itself (the session cookie rides along and the
+  // server's Content-Disposition: attachment names it), so the download works
+  // on the phone without blob handling. A download cannot see a 401, though:
+  // an expired session would just show a failed download. So the session is
+  // checked through request() first, which sends a 401 to /login like every
+  // other call, and only then is the download started. Any other failure of
+  // the check still starts it, so the browser reports the real problem.
+  downloadOriginal: async (id: number | string) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), SESSION_CHECK_TIMEOUT_MS);
+    try {
+      await request("/auth/me", { signal: controller.signal });
+    } catch (e) {
+      if (e instanceof UnauthorizedError) throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+    triggerDownload(originalFileUrl(id));
+  },
   scannerTestFrameImageUrl: (id: number) => `${API_BASE}/scanner/test-frames/${id}/image`,
   patchScannerTestFrame: (id: number, body: { ground_truth_json?: string; notes?: string }) =>
     request<{ updated: number }>(`/scanner/test-frames/${id}`, {

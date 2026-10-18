@@ -20,6 +20,9 @@ export default function DocumentDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const [doc, setDoc] = useState<any>(null);
+  // The session check before a download is a round trip; without this a second
+  // tap during it would start a second download.
+  const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
     if (id) api.get(`/documents/${id}`).then(setDoc);
@@ -155,7 +158,27 @@ export default function DocumentDetailPage() {
           <a
             href={api.originalFileUrl(doc.id)}
             download
-            className={buttonVariants({ variant: "outline", className: "flex items-center gap-1.5" })}
+            aria-disabled={downloading || undefined}
+            onClick={(e) => {
+              // Plain clicks go through the session check. Modified clicks
+              // (new tab, the browser's own download) and long-press / "save
+              // link as" keep the href's native behaviour.
+              if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+              e.preventDefault();
+              if (downloading) return;
+              setDownloading(true);
+              api
+                .downloadOriginal(doc.id)
+                // Rejects only for an expired session, already sent to /login.
+                .catch(() => {})
+                .finally(() => setDownloading(false));
+            }}
+            className={buttonVariants({
+              variant: "outline",
+              // Dimmed only: pointer-events-none would also block a long-press
+              // "save link" while the check is pending. onClick drops the repeat tap.
+              className: downloading ? "opacity-50" : undefined,
+            })}
           >
             <span className="material-symbols-outlined text-sm">download</span>
             Download original
