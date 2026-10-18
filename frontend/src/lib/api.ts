@@ -52,6 +52,24 @@ export class UnauthorizedError extends Error {
   }
 }
 
+/** What request() throws for any other non-2xx response. */
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+/** What downloadOriginal throws when the document's original is not in storage. */
+export class MissingOriginalError extends Error {
+  constructor() {
+    super("The original file is missing from storage");
+    this.name = "MissingOriginalError";
+  }
+}
+
 async function request<T>(path: string, options: RequestInit & { skipAuthRedirect?: boolean } = {}): Promise<T> {
   const { skipAuthRedirect, ...fetchOptions } = options;
   const headers: Record<string, string> = { ...fetchOptions.headers as Record<string, string> };
@@ -73,7 +91,7 @@ async function request<T>(path: string, options: RequestInit & { skipAuthRedirec
 
   if (!res.ok) {
     const error = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(detailToMessage(error.detail) || "Request failed");
+    throw new ApiError(detailToMessage(error.detail) || "Request failed", res.status);
   }
 
   if (res.headers.get("content-type")?.includes("application/json")) {
@@ -86,7 +104,7 @@ function originalFileUrl(id: number | string): string {
   return `${API_BASE}/documents/${encodeURIComponent(String(id))}/file/original`;
 }
 
-// How long downloadOriginal waits on the session check before downloading
+// How long downloadOriginal waits on its HEAD check before downloading
 // anyway, so a stalled request cannot hold the button pending.
 const SESSION_CHECK_TIMEOUT_MS = 10_000;
 
@@ -177,18 +195,25 @@ export const api = {
   originalFileUrl,
   // The browser fetches the file itself (the session cookie rides along and the
   // server's Content-Disposition: attachment names it), so the download works
-  // on the phone without blob handling. A download cannot see a 401, though:
-  // an expired session would just show a failed download. So the session is
-  // checked through request() first, which sends a 401 to /login like every
-  // other call, and only then is the download started. Any other failure of
-  // the check still starts it, so the browser reports the real problem.
+  // on the phone without blob handling. A download cannot see a 401 or a 404,
+  // though: both would just show a failed download in the browser's tray. So
+  // the file is asked for with HEAD through request() first, which sends a 401
+  // to /login like every other call; a 404 becomes MissingOriginalError for the
+  // page to show. Any other failure of the check still starts the download, so
+  // the browser reports the real problem.
   downloadOriginal: async (id: number | string) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), SESSION_CHECK_TIMEOUT_MS);
     try {
-      await request("/auth/me", { signal: controller.signal });
+      await request(`/documents/${encodeURIComponent(String(id))}/file/original`, {
+        method: "HEAD",
+        signal: controller.signal,
+      });
     } catch (e) {
       if (e instanceof UnauthorizedError) throw e;
+      if (e instanceof ApiError && e.status === 404) throw new MissingOriginalError();
+      // Anything else (a 500, a timeout, offline): try the download anyway;
+      // the browser reports its own failure.
     } finally {
       clearTimeout(timer);
     }

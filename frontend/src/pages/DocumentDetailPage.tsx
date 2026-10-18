@@ -1,6 +1,6 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { api } from "@/lib/api";
+import { api, MissingOriginalError } from "@/lib/api";
 import { Button, buttonVariants } from "@/components/ui/button";
 import PageViewer from "@/components/PageViewer";
 import MetadataForm from "@/components/MetadataForm";
@@ -20,11 +20,18 @@ export default function DocumentDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const [doc, setDoc] = useState<any>(null);
-  // The session check before a download is a round trip; without this a second
+  // The HEAD check before a download is a round trip; without this a second
   // tap during it would start a second download.
   const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  // Prev/next reuse this component, so a check still in flight for the last
+  // document must not mark the new one pending or missing.
+  const shownId = useRef(id);
 
   useEffect(() => {
+    shownId.current = id;
+    setDownloading(false);
+    setDownloadError(null);
     if (id) api.get(`/documents/${id}`).then(setDoc);
   }, [id]);
 
@@ -160,18 +167,24 @@ export default function DocumentDetailPage() {
             download
             aria-disabled={downloading || undefined}
             onClick={(e) => {
-              // Plain clicks go through the session check. Modified clicks
+              // Plain clicks go through the HEAD check (session, file present). Modified clicks
               // (new tab, the browser's own download) and long-press / "save
               // link as" keep the href's native behaviour.
               if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
               e.preventDefault();
               if (downloading) return;
               setDownloading(true);
+              setDownloadError(null);
+              const forId = id;
               api
                 .downloadOriginal(doc.id)
-                // Rejects only for an expired session, already sent to /login.
-                .catch(() => {})
-                .finally(() => setDownloading(false));
+                // The other rejection is an expired session, already sent to /login.
+                .catch((err) => {
+                  if (shownId.current === forId && err instanceof MissingOriginalError) setDownloadError(err.message);
+                })
+                .finally(() => {
+                  if (shownId.current === forId) setDownloading(false);
+                });
             }}
             className={buttonVariants({
               variant: "outline",
@@ -193,6 +206,13 @@ export default function DocumentDetailPage() {
           </Button>
         </div>
       </div>
+
+      {downloadError && (
+        <div role="alert" className="flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-[#ffdad6] text-[#93000a]">
+          <span className="material-symbols-outlined text-sm">error</span>
+          {downloadError}
+        </div>
+      )}
 
       {/* ── Split view ──────────────────────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

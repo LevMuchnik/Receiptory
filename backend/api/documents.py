@@ -344,7 +344,11 @@ def batch_reprocess(body: BatchReprocessRequest, request: Request, username: str
     return {"message": f"Queued {count} documents for reprocessing"}
 
 
+# HEAD too: the download button asks HEAD first, so a missing original is
+# reported in the app rather than only as a failed download (FileResponse
+# sends the headers alone).
 @router.get("/documents/{doc_id}/file/{file_type}")
+@router.head("/documents/{doc_id}/file/{file_type}")
 def serve_file(doc_id: int, file_type: str, request: Request, username: str = Depends(require_auth)):
     data_dir = request.app.state.data_dir
     with get_connection() as conn:

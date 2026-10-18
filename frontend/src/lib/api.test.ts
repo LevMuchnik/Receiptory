@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { api } from "./api";
+import { api, MissingOriginalError } from "./api";
 
 /**
  * `api.upload` error extraction.
@@ -116,12 +116,13 @@ describe("api.originalFileUrl", () => {
 });
 
 /**
- * `api.downloadOriginal`: a plain link cannot see a 401, so the session is
- * checked through `request()` first (which sends an expired session to
- * /login like every other call). The download then goes through a temporary
- * `<a download>`, not a navigation: a failed download (404, 500) must not
- * replace the app with a raw JSON page. `window` and `document` here are
- * plain objects, not a DOM.
+ * `api.downloadOriginal`: a plain link cannot see a 401 or a 404, so the file
+ * is asked for with HEAD through `request()` first (which sends an expired
+ * session to /login like every other call), and a missing original is
+ * reported to the page. The download then goes through a temporary
+ * `<a download>`, not a navigation: a failed download (500) must not replace
+ * the app with a raw JSON page. `window` and `document` here are plain
+ * objects, not a DOM.
  */
 describe("api.downloadOriginal", () => {
   function stubBrowser() {
@@ -140,11 +141,12 @@ describe("api.downloadOriginal", () => {
     return { location, anchors, appendChild };
   }
 
-  it("downloads through a temporary link once the session is confirmed", async () => {
+  it("downloads through a temporary link once HEAD finds the file", async () => {
     const { location, anchors, appendChild } = stubBrowser();
-    const fetchSpy = stubFetch({ ok: true, status: 200, json: async () => ({ username: "admin" }) });
+    const fetchSpy = stubFetch({ ok: true, status: 200, headers: new Headers({ "content-type": "application/pdf" }) });
     await api.downloadOriginal(42);
-    expect(fetchSpy.mock.calls[0][0]).toMatch(/\/api\/auth\/me$/);
+    expect(fetchSpy.mock.calls[0][0]).toBe(api.originalFileUrl(42));
+    expect(fetchSpy.mock.calls[0][1].method).toBe("HEAD");
     expect(anchors).toHaveLength(1);
     expect(anchors[0].href).toBe(api.originalFileUrl(42));
     expect(anchors[0].download).toBe("");
@@ -163,8 +165,17 @@ describe("api.downloadOriginal", () => {
     expect(location.href).toBe("/login");
   });
 
-  // Value: protects=a non-401 HTTP failure of /auth/me (e.g. 500) still starts the download; fails_when=the catch is narrowed to network errors (TypeError) so an HTTP error rethrows; why_new=only a rejected fetch was tested; seam=none; no_claim=what the browser shows for the failed download
-  it("still starts the download when the session check returns a server error", async () => {
+  it("reports a missing original instead of starting a download that will fail", async () => {
+    const { location, anchors } = stubBrowser();
+    // HEAD has no body, so request() falls back to statusText for the message
+    stubFetch({ ok: false, status: 404, statusText: "Not Found", json: async () => { throw new SyntaxError("empty"); } });
+    await expect(api.downloadOriginal(42)).rejects.toBeInstanceOf(MissingOriginalError);
+    expect(anchors).toHaveLength(0);
+    expect(location.href).toBe("");
+  });
+
+  // Value: protects=a non-401, non-404 HTTP failure of the HEAD check (e.g. 500) still starts the download; fails_when=the catch is narrowed to network errors (TypeError) so an HTTP error rethrows; why_new=only a rejected fetch was tested; seam=none; no_claim=what the browser shows for the failed download
+  it("still starts the download when the HEAD check returns a server error", async () => {
     const { location, anchors } = stubBrowser();
     stubFetch({ ok: false, status: 500, statusText: "Internal Server Error", json: async () => ({ detail: "boom" }) });
     await api.downloadOriginal(42);
@@ -188,8 +199,8 @@ describe("api.downloadOriginal", () => {
     expect(anchors[0].click).toHaveBeenCalledOnce();
   });
 
-  it("starts the download anyway when the session check stalls", async () => {
-    // A hung /auth/me must not keep the button pending until the tab closes.
+  it("starts the download anyway when the HEAD check stalls", async () => {
+    // A hung HEAD must not keep the button pending until the tab closes.
     vi.useFakeTimers();
     try {
       const { anchors } = stubBrowser();

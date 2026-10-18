@@ -329,6 +329,31 @@ def test_download_original_requires_a_session(app, db_path, tmp_data_dir):
     assert TestClient(app).get(f"/api/documents/{doc_id}/file/original").status_code == 401
 
 
+def test_head_of_the_original_answers_without_the_bytes(authed_client, db_path, tmp_data_dir):
+    """The download button asks HEAD first, so a missing original can be shown
+    in the app instead of only as a failed download in the browser's tray."""
+    _put_original(tmp_data_dir, f"{_H}.pdf")
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, file_hash=_H, stored_filename="2026-10-01-30009-abababab.pdf")
+    resp = authed_client.head(f"/api/documents/{doc_id}/file/original")
+    assert resp.status_code == 200
+    assert resp.headers["content-disposition"] == 'attachment; filename="2026-10-01-30009-abababab.pdf"'
+    assert resp.content == b""
+
+
+def test_head_of_a_missing_original_is_404(authed_client, db_path):
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, file_hash=_H)
+    assert authed_client.head(f"/api/documents/{doc_id}/file/original").status_code == 404
+
+
+def test_head_of_the_original_requires_a_session(app, db_path, tmp_data_dir):
+    _put_original(tmp_data_dir, f"{_H}.pdf")
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, file_hash=_H)
+    assert TestClient(app).head(f"/api/documents/{doc_id}/file/original").status_code == 401
+
+
 def test_converted_file_is_still_served_inline(authed_client, db_path, tmp_data_dir):
     (tmp_data_dir / "storage" / "converted" / f"{_H}.pdf").write_bytes(b"%PDF converted")
     with get_connection() as conn:
