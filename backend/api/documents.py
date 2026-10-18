@@ -13,6 +13,7 @@ from backend.processing.extract import totals_mismatch, format_totals_reason
 from backend.processing.filing import download_name
 from backend.storage import RENDER_ERRORS, render_page, clear_page_cache, get_converted_path
 from backend.config import get_setting
+from backend.currency import apply_conversion, reference_currency, refresh_converted_amount
 from backend.models import (
     DocumentResponse,
     DocumentUpdate,
@@ -24,9 +25,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _row_to_response(row) -> dict:
-    """Convert a sqlite3.Row to a DocumentResponse-compatible dict."""
+_LOOKUP = object()
+
+
+def _row_to_response(row, ref=_LOOKUP) -> dict:
+    """Convert a sqlite3.Row to a DocumentResponse-compatible dict.
+
+    `ref` is the current reference currency; list endpoints pass it once
+    instead of a settings read per row."""
     d = dict(row)
+    if ref is _LOOKUP:
+        ref = reference_currency()
+    # A rate computed for another reference currency is stale (#72): the
+    # rates task recomputes it, and until then the document is unconverted.
+    if d.get("conversion_ref") != ref:
+        d["conversion_rate"] = d["converted_amount"] = d["conversion_rate_date"] = None
     # Parse JSON fields
     for field in ("line_items", "additional_fields", "edit_history"):
         if d.get(field) and isinstance(d[field], str):
@@ -136,8 +149,9 @@ def list_documents(
             params + [page_size, offset],
         ).fetchall()
 
+    ref = reference_currency()
     return DocumentListResponse(
-        documents=[_row_to_response(r) for r in rows],
+        documents=[_row_to_response(r, ref) for r in rows],
         total=total,
         page=page,
         page_size=page_size,
@@ -158,6 +172,7 @@ def list_duplicates(username: str = Depends(require_auth)):
         ).fetchall()
 
     groups = []
+    ref = reference_currency()
     for row in rows:
         ids = [int(x) for x in row["ids"].split(",")]
         with get_connection() as conn:
@@ -168,7 +183,7 @@ def list_duplicates(username: str = Depends(require_auth)):
         groups.append({
             "receipt_date": row["receipt_date"],
             "vendor_receipt_id": row["vendor_receipt_id"],
-            "documents": [_row_to_response(d) for d in docs],
+            "documents": [_row_to_response(d, ref) for d in docs],
         })
     return groups
 
@@ -275,6 +290,22 @@ def edit_document(doc_id: int, update: DocumentUpdate, username: str = Depends(r
             f"UPDATE documents SET {', '.join(set_clauses)} WHERE id = ?",
             values,
         )
+
+    # #72, after the commit: a rate fetch never runs inside a write transaction.
+    # The form re-sends every field on each save, so compare with the stored
+    # values; an amount-only edit reuses the stored rate.
+    def _changed(field):
+        return field in changes and changes[field] != existing[field]
+
+    try:
+        if _changed("currency") or _changed("receipt_date"):
+            apply_conversion(doc_id)
+        elif _changed("total_amount"):
+            refresh_converted_amount(doc_id)
+    except Exception:
+        logger.exception(f"Document {doc_id}: currency conversion failed")
+
+    with get_connection() as conn:
         row = conn.execute(
             "SELECT d.*, c.name as category_name, c.section as category_section FROM documents d LEFT JOIN categories c ON d.category_id = c.id WHERE d.id = ?",
             (doc_id,),

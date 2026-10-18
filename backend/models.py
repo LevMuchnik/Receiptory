@@ -94,6 +94,8 @@ class DocumentResponse(BaseModel):
     currency: str | None
     converted_amount: float | None
     conversion_rate: float | None
+    conversion_rate_date: str | None = None
+    conversion_ref: str | None = None
     payment_method: str | None
     payment_identifier: str | None
     language: str | None

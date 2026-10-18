@@ -395,3 +395,18 @@ def test_two_categories_never_share_an_export_folder(authed_client, docs_with_fi
     names = zipfile.ZipFile(io.BytesIO(resp.content)).namelist()
     folders = {n.rsplit("/", 1)[0] for n in names if n.endswith(".pdf")}
     assert len(folders) == 2, f"two categories collapsed into one folder: {folders}"
+
+
+def test_export_has_the_converted_columns(authed_client, docs_with_files, monkeypatch):
+    """#72: the export carries the conversion, and only for the current reference."""
+    with get_connection() as conn:
+        conn.execute("UPDATE documents SET currency = 'USD', conversion_rate = 3.0, converted_amount = 300.0, "
+                     "conversion_rate_date = '2026-01-15', conversion_ref = 'ILS' WHERE file_hash = 'h1'")
+        conn.execute("UPDATE documents SET currency = 'EUR', conversion_rate = 0.9, converted_amount = 180.0, "
+                     "conversion_rate_date = '2026-01-20', conversion_ref = 'USD' WHERE file_hash = 'h2'")
+    resp = authed_client.post("/api/export", json={"date_basis": "receipt", "date_from": "2026-01-01", "date_to": "2026-12-31"})
+    rows = {r["vendor_name"]: r for r in csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(resp.content)).read("metadata.csv").decode("utf-8")))}
+    a, b = rows["Vendor A"], rows["Vendor B"]
+    assert (a["converted_amount"], a["conversion_rate"], a["conversion_rate_date"], a["conversion_ref"]) == ("300.0", "3.0", "2026-01-15", "ILS")
+    # computed for another reference: stale, so not exported as a conversion
+    assert (b["converted_amount"], b["conversion_rate"], b["conversion_ref"]) == ("", "", "")

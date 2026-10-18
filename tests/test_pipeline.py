@@ -556,3 +556,42 @@ def test_process_document_with_no_original_on_disk_fails_with_a_clear_error(mock
     assert doc["status"] == "failed"
     assert "Original file not found" in doc["processing_error"]
     mock_extract.assert_not_called()
+
+
+def _boi_usd(monkeypatch):
+    from backend import currency
+    monkeypatch.setattr(currency, "fetch_boi", lambda ccy, start, end: [("2026-01-15", 3.6)] if ccy == "USD" else [])
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_processing_stores_the_conversion(mock_extract, pending_doc, setup_db, monkeypatch):
+    """#72: a foreign-currency receipt carries its rate into the reference currency."""
+    _boi_usd(monkeypatch)
+    usd = ExtractionResult(**{**MOCK_EXTRACTION.__dict__, "currency": "USD"})
+    mock_extract.return_value = LLMExtractionResult(extraction=usd, tokens_in=1, tokens_out=1, model="m")
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT status, conversion_rate, converted_amount, conversion_ref FROM documents WHERE id = ?", (pending_doc,)).fetchone()
+    assert doc["status"] == "processed"
+    assert (doc["conversion_rate"], doc["converted_amount"], doc["conversion_ref"]) == (3.6, 105.3, "ILS")
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_processing_survives_an_unreachable_rate_site(mock_extract, pending_doc, setup_db):
+    """conftest blocks the rate sites: the receipt is still processed, rate NULL."""
+    usd = ExtractionResult(**{**MOCK_EXTRACTION.__dict__, "currency": "USD"})
+    mock_extract.return_value = LLMExtractionResult(extraction=usd, tokens_in=1, tokens_out=1, model="m")
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT status, conversion_rate FROM documents WHERE id = ?", (pending_doc,)).fetchone()
+    assert doc["status"] == "processed"
+    assert doc["conversion_rate"] is None
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_processing_a_reference_currency_receipt_is_rate_one(mock_extract, pending_doc, setup_db):
+    mock_extract.return_value = MOCK_LLM_RESULT
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT conversion_rate, converted_amount FROM documents WHERE id = ?", (pending_doc,)).fetchone()
+    assert (doc["conversion_rate"], doc["converted_amount"]) == (1.0, 29.25)

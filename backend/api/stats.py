@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 
 from backend.auth import require_auth
+from backend.currency import reference_currency
 from backend.database import get_connection
 
 router = APIRouter()
@@ -31,24 +32,39 @@ def dashboard_stats(
             "(c.section IS NULL OR c.section != 'issued')",
             "d.document_type != 'issued_invoice'",
         ]
-        params: list = []
+        params: dict = {"ref": reference_currency()}
         if date_from:
-            expense_conditions.append("d.receipt_date >= ?")
-            params.append(date_from)
+            expense_conditions.append("d.receipt_date >= :date_from")
+            params["date_from"] = date_from
         if date_to:
-            expense_conditions.append("d.receipt_date <= ?")
-            params.append(date_to)
+            expense_conditions.append("d.receipt_date <= :date_to")
+            params["date_to"] = date_to
 
         where = " AND ".join(expense_conditions)
+        # In the reference currency (#72): the stored conversion when it was
+        # computed for the current reference, the amount itself for a document
+        # already in it (rate 1, even before the rates task has run), and
+        # nothing otherwise. Unconverted documents are counted, not summed.
+        amount = (
+            "CASE WHEN d.conversion_ref = :ref THEN d.converted_amount "
+            "WHEN upper(trim(d.currency)) = :ref THEN d.total_amount END"
+        )
         expenses = conn.execute(
-            f"""SELECT c.name, SUM(d.total_amount) as total
+            f"""SELECT c.name, SUM({amount}) as total
                FROM documents d
                LEFT JOIN categories c ON d.category_id = c.id
                WHERE {where}
                GROUP BY c.name
+               HAVING total IS NOT NULL
                ORDER BY total DESC""",
             params,
         ).fetchall()
+        unconverted = conn.execute(
+            f"""SELECT COUNT(*) as c FROM documents d
+               LEFT JOIN categories c ON d.category_id = c.id
+               WHERE {where} AND ({amount}) IS NULL""",
+            params,
+        ).fetchone()["c"]
 
         recent = conn.execute(
             """SELECT id, original_filename, status, submission_channel, submission_date
@@ -60,6 +76,8 @@ def dashboard_stats(
         "processed_this_month": processed,
         "pending_review_count": pending_review,
         "total_expenses_by_category": [{"category": r["name"], "total": r["total"]} for r in expenses],
+        "reference_currency": params["ref"],
+        "unconverted_count": unconverted,
         "recent_activity": [dict(r) for r in recent],
     }
 

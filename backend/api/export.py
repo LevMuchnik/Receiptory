@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.auth import require_auth
 from backend.config import get_setting
+from backend.currency import reference_currency
 from backend.database import get_connection
 from backend.models import ExportRequest
 from backend.storage import get_filed_path
@@ -63,6 +64,7 @@ EXPORT_CSV_FIELDS = [
     "id", "document_type", "original_filename", "stored_filename", "receipt_date",
     "vendor_name", "vendor_tax_id", "vendor_receipt_id", "client_name", "client_tax_id",
     "description", "subtotal", "tax_amount", "total_amount", "currency",
+    "converted_amount", "conversion_rate", "conversion_rate_date", "conversion_ref",
     "payment_method", "payment_identifier", "language", "status",
     "submission_date", "submission_channel", "category_name",
 ]
@@ -236,12 +238,22 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
                         "omitted from the export", row["id"], stored
                     )
 
+        # A conversion computed for another reference currency is stale (#72):
+        # export the document as unconverted rather than mix currencies.
+        ref = reference_currency()
+        _conversion = ("converted_amount", "conversion_rate", "conversion_rate_date", "conversion_ref")
+
+        def _cell(row, f):
+            if f in _conversion and row["conversion_ref"] != ref:
+                return None
+            return row[f] if f in row.keys() else None
+
         # Add CSV metadata
         csv_buf = io.StringIO()
         writer = csv.DictWriter(csv_buf, fieldnames=EXPORT_CSV_FIELDS)
         writer.writeheader()
         for row in rows:
-            writer.writerow({f: row[f] for f in EXPORT_CSV_FIELDS if f in row.keys()})
+            writer.writerow({f: _cell(row, f) for f in EXPORT_CSV_FIELDS})
         zf.writestr("metadata.csv", csv_buf.getvalue())
 
         # Add Excel metadata
@@ -252,7 +264,7 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
             ws.title = "Documents"
             ws.append(EXPORT_CSV_FIELDS)
             for row in rows:
-                ws.append([row[f] if f in row.keys() else None for f in EXPORT_CSV_FIELDS])
+                ws.append([_cell(row, f) for f in EXPORT_CSV_FIELDS])
             # Auto-size columns
             for col in ws.columns:
                 max_len = max((len(str(cell.value or "")) for cell in col), default=10)
