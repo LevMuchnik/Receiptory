@@ -7,6 +7,8 @@ interface DashboardData {
   processed_this_month: number;
   pending_review_count: number;
   total_expenses_by_category: { category: string; total: number }[];
+  reference_currency: string | null;
+  unconverted_count: number;
   recent_activity: { id: number; original_filename: string; status: string; submission_date: string }[];
 }
 
@@ -199,7 +201,16 @@ export default function DashboardPage() {
         {/* Expense Distribution chart */}
         <div className="lg:col-span-8 bg-card rounded-xl shadow-[0_2px_8px_rgba(25,28,30,0.04)] p-6 relative overflow-hidden">
           <div className="flex justify-between items-center mb-6 flex-wrap gap-3">
-            <h3 className="font-bold font-headline text-primary">Expense Distribution</h3>
+            <div>
+              <h3 className="font-bold font-headline text-primary">
+                Expense Distribution{stats.reference_currency ? ` (${stats.reference_currency})` : ""}
+              </h3>
+              {stats.unconverted_count > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  {stats.unconverted_count} document{stats.unconverted_count === 1 ? "" : "s"} not included (no currency or exchange rate yet)
+                </p>
+              )}
+            </div>
             <div className="flex items-center gap-2 flex-wrap">
               {(
                 [

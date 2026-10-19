@@ -487,3 +487,125 @@ def test_page_of_a_corrupt_converted_pdf_is_404_and_logged(authed_client, db_pat
     assert resp.status_code == 404
     assert resp.json()["detail"] == "Cannot render a page preview of this file"
     assert any(f"document {doc_id}" in r.getMessage() and "converted" in r.getMessage() for r in caplog.records)
+
+
+
+def _boi(monkeypatch, calls=None):
+    from backend import currency
+
+    def fetch(ccy, start, end):
+        if calls is not None:
+            calls.append(ccy)
+        return {"USD": [("2026-10-12", 3.0)], "EUR": [("2026-10-12", 3.5)]}.get(ccy, [])
+
+    monkeypatch.setattr(currency, "fetch_boi", fetch)
+
+
+def test_edit_currency_recomputes_the_conversion(authed_client, db_path, monkeypatch):
+    """#72 contract (4): a currency or date edit recomputes the rate."""
+    _boi(monkeypatch)
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, currency="ILS", receipt_date="2026-10-12", total_amount=10.0)
+    resp = authed_client.patch(f"/api/documents/{doc_id}", json={"currency": "USD"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert (body["conversion_rate"], body["converted_amount"], body["conversion_ref"]) == (3.0, 30.0, "ILS")
+    resp = authed_client.patch(f"/api/documents/{doc_id}", json={"currency": "EUR"})
+    assert resp.json()["conversion_rate"] == 3.5
+    # the derived conversion columns are not edits
+    assert not [h for h in resp.json()["edit_history"] if h["field"].startswith("conver")]
+
+
+def test_edit_amount_only_reuses_the_stored_rate(authed_client, db_path, monkeypatch):
+    calls = []
+    _boi(monkeypatch, calls)
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, currency="USD", receipt_date="2026-10-12", total_amount=10.0)
+    authed_client.patch(f"/api/documents/{doc_id}", json={"currency": "USD", "receipt_date": "2026-10-12", "total_amount": 10.0})
+    # the form re-sends every field: nothing changed, so no fetch
+    assert calls == []
+    with get_connection() as conn:
+        conn.execute("UPDATE documents SET conversion_rate = 3.0, conversion_ref = 'ILS' WHERE id = ?", (doc_id,))
+    resp = authed_client.patch(f"/api/documents/{doc_id}", json={"currency": "USD", "receipt_date": "2026-10-12", "total_amount": 20.0})
+    assert resp.json()["converted_amount"] == 60.0
+    assert calls == []
+
+
+def test_a_rate_for_another_reference_is_not_shown(authed_client, db_path, monkeypatch):
+    """#72 R3: a rate computed for an old reference currency is stale."""
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, currency="USD", receipt_date="2026-10-12", total_amount=10.0,
+                             conversion_rate=3.0, converted_amount=30.0, conversion_ref="ILS", conversion_rate_date="2026-10-12")
+    assert authed_client.get(f"/api/documents/{doc_id}").json()["conversion_rate"] == 3.0
+    monkeypatch.setenv("RECEIPTORY_REFERENCE_CURRENCY", "EUR")
+    for body in (authed_client.get(f"/api/documents/{doc_id}").json(), authed_client.get("/api/documents").json()["documents"][0]):
+        assert (body["conversion_rate"], body["converted_amount"], body["conversion_rate_date"], body["conversion_ref"]) == (None, None, None, None)
+
+
+
+def test_edit_date_recomputes_the_conversion(authed_client, db_path, monkeypatch):
+    """The common fix for a misread year (#63) is a date-only edit."""
+    from backend import currency
+    monkeypatch.setattr(currency, "fetch_boi", lambda ccy, s, e: [r for r in [("2026-10-01", 3.5), ("2026-10-12", 3.0)] if s <= r[0] <= e])
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, currency="USD", receipt_date="2026-10-12", total_amount=10.0,
+                             conversion_rate=3.0, converted_amount=30.0, conversion_ref="ILS", conversion_rate_date="2026-10-12")
+    body = authed_client.patch(f"/api/documents/{doc_id}", json={"currency": "USD", "receipt_date": "2026-10-01", "total_amount": 10.0}).json()
+    assert (body["conversion_rate"], body["conversion_rate_date"], body["converted_amount"]) == (3.5, "2026-10-01", 35.0)
+
+
+def test_edit_currency_with_a_failing_conversion_leaves_no_stale_rate(authed_client, db_path, monkeypatch):
+    import backend.api.documents as documents_api
+
+    def boom(doc_id):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(documents_api, "apply_conversion", boom)
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, currency="USD", receipt_date="2026-10-12", total_amount=10.0,
+                             conversion_rate=3.0, converted_amount=30.0, conversion_ref="ILS", conversion_rate_date="2026-10-12")
+    resp = authed_client.patch(f"/api/documents/{doc_id}", json={"currency": "EUR"})
+    assert resp.status_code == 200  # the edit is saved; the rates task converts later
+    assert (resp.json()["currency"], resp.json()["conversion_rate"], resp.json()["converted_amount"]) == ("EUR", None, None)
+
+
+def test_a_huge_total_still_lists(authed_client, db_path):
+    """Re-review F3: a finite total times a rate above 1 overflowed to inf in
+    SQL, and JSON cannot carry inf: every page listing the document was a 500."""
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, currency="USD", receipt_date="2026-10-12", total_amount=10.0,
+                             conversion_rate=3.0, converted_amount=30.0, conversion_ref="ILS", conversion_rate_date="2026-10-12")
+    resp = authed_client.patch(f"/api/documents/{doc_id}", json={"total_amount": 1e308})
+    assert resp.status_code == 200
+    assert resp.json()["converted_amount"] is None
+    assert authed_client.get("/api/documents").status_code == 200
+    assert authed_client.get("/api/stats/dashboard").status_code == 200
+
+
+
+def test_a_reference_currency_document_reads_as_converted_before_its_rate_is_stored(authed_client, db_path):
+    """Ship review: the dashboard already counts it at face value; the page
+    must not say it is left out of the totals."""
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, currency="ILS", receipt_date="2026-10-12", total_amount=42.0)
+    for body in (authed_client.get(f"/api/documents/{doc_id}").json(), authed_client.get("/api/documents").json()["documents"][0]):
+        assert (body["conversion_rate"], body["converted_amount"], body["conversion_ref"]) == (1.0, 42.0, "ILS")
+
+
+def test_setting_a_currency_on_a_document_without_one_converts_it(authed_client, db_path, monkeypatch):
+    _boi(monkeypatch)
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, currency=None, receipt_date="2026-10-12", total_amount=10.0)
+    body = authed_client.patch(f"/api/documents/{doc_id}", json={"currency": "USD"}).json()
+    assert (body["conversion_rate"], body["converted_amount"], body["conversion_ref"]) == (3.0, 30.0, "ILS")
+
+
+def test_resaving_a_stale_reference_rate_keeps_it_hidden_and_fetches_nothing(authed_client, db_path, monkeypatch):
+    calls = []
+    _boi(monkeypatch, calls)
+    with get_connection() as conn:
+        doc_id = _insert_doc(conn, currency="USD", receipt_date="2026-10-12", total_amount=10.0, conversion_rate=0.9,
+                             converted_amount=9.0, conversion_rate_date="2026-10-12", conversion_ref="EUR")
+    body = authed_client.patch(f"/api/documents/{doc_id}", json={"currency": "USD", "receipt_date": "2026-10-12", "total_amount": 20.0}).json()
+    assert calls == []
+    assert (body["conversion_rate"], body["converted_amount"], body["conversion_ref"]) == (None, None, None)

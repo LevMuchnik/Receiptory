@@ -13,6 +13,7 @@ from backend.processing.extract import totals_mismatch, format_totals_reason
 from backend.processing.filing import download_name
 from backend.storage import RENDER_ERRORS, render_page, clear_page_cache, get_converted_path
 from backend.config import get_setting
+from backend.currency import apply_conversion, conversion_update, effective_conversion, reference_currency
 from backend.models import (
     DocumentResponse,
     DocumentUpdate,
@@ -24,9 +25,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _row_to_response(row) -> dict:
-    """Convert a sqlite3.Row to a DocumentResponse-compatible dict."""
+_LOOKUP = object()
+
+
+def _row_to_response(row, ref=_LOOKUP) -> dict:
+    """Convert a sqlite3.Row to a DocumentResponse-compatible dict.
+
+    `ref` is the current reference currency; list endpoints pass it once
+    instead of a settings read per row."""
     d = dict(row)
+    if ref is _LOOKUP:
+        ref = reference_currency()
+    # A rate computed for another reference currency is stale (#72): the
+    # rates task recomputes it, and until then the document is unconverted.
+    # One already in the reference currency reads as converted at rate 1, as
+    # the dashboard counts it.
+    if "conversion_ref" in d:
+        d.update(effective_conversion(d, ref))
     # Parse JSON fields
     for field in ("line_items", "additional_fields", "edit_history"):
         if d.get(field) and isinstance(d[field], str):
@@ -136,8 +151,9 @@ def list_documents(
             params + [page_size, offset],
         ).fetchall()
 
+    ref = reference_currency()
     return DocumentListResponse(
-        documents=[_row_to_response(r) for r in rows],
+        documents=[_row_to_response(r, ref) for r in rows],
         total=total,
         page=page,
         page_size=page_size,
@@ -158,6 +174,7 @@ def list_duplicates(username: str = Depends(require_auth)):
         ).fetchall()
 
     groups = []
+    ref = reference_currency()
     for row in rows:
         ids = [int(x) for x in row["ids"].split(",")]
         with get_connection() as conn:
@@ -168,7 +185,7 @@ def list_duplicates(username: str = Depends(require_auth)):
         groups.append({
             "receipt_date": row["receipt_date"],
             "vendor_receipt_id": row["vendor_receipt_id"],
-            "documents": [_row_to_response(d) for d in docs],
+            "documents": [_row_to_response(d, ref) for d in docs],
         })
     return groups
 
@@ -268,6 +285,18 @@ def edit_document(doc_id: int, update: DocumentUpdate, username: str = Depends(r
             "timestamp": now,
         })
 
+    # #72: a stored conversion is only valid for the currency and date it was
+    # computed for. conversion_update compares with the row this UPDATE writes:
+    # a changed currency or date clears it (a failed reconversion below then
+    # leaves NULL, never the old rate); a changed total is re-multiplied.
+    conv_sql, conv_params = conversion_update(
+        **{k: changes[k] for k in ("currency", "receipt_date", "total_amount") if k in changes})
+    set_clauses.append(conv_sql)
+    extra_values.extend(conv_params)
+    # The form re-sends every field on each save, so only a value that differs
+    # from the stored one needs a rate fetched now.
+    reconvert = any(k in changes and changes[k] != existing[k] for k in ("currency", "receipt_date"))
+
     values = list(changes.values()) + [json.dumps(history), now] + extra_values + [doc_id]
 
     with get_connection() as conn:
@@ -275,6 +304,15 @@ def edit_document(doc_id: int, update: DocumentUpdate, username: str = Depends(r
             f"UPDATE documents SET {', '.join(set_clauses)} WHERE id = ?",
             values,
         )
+
+    # After the commit: a rate fetch never runs inside a write transaction.
+    if reconvert:
+        try:
+            apply_conversion(doc_id)
+        except Exception:
+            logger.exception(f"Document {doc_id}: currency conversion failed")
+
+    with get_connection() as conn:
         row = conn.execute(
             "SELECT d.*, c.name as category_name, c.section as category_section FROM documents d LEFT JOIN categories c ON d.category_id = c.id WHERE d.id = ?",
             (doc_id,),

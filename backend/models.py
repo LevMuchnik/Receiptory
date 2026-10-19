@@ -94,6 +94,8 @@ class DocumentResponse(BaseModel):
     currency: str | None
     converted_amount: float | None
     conversion_rate: float | None
+    conversion_rate_date: str | None = None
+    conversion_ref: str | None = None
     payment_method: str | None
     payment_identifier: str | None
     language: str | None
@@ -202,6 +204,8 @@ class DashboardStats(BaseModel):
     total_expenses_by_category: list[dict]
     pending_review_count: int
     recent_activity: list[dict]
+    reference_currency: str | None = None
+    unconverted_count: int = 0
 
 
 class ProcessingCosts(BaseModel):

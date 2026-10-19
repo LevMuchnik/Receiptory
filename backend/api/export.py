@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.auth import require_auth
 from backend.config import get_setting
+from backend.currency import CONVERSION_COLUMNS, effective_conversion, reference_currency
 from backend.database import get_connection
 from backend.models import ExportRequest
 from backend.storage import get_filed_path
@@ -65,6 +66,8 @@ EXPORT_CSV_FIELDS = [
     "description", "subtotal", "tax_amount", "total_amount", "currency",
     "payment_method", "payment_identifier", "language", "status",
     "submission_date", "submission_channel", "category_name",
+    # Appended (#72), so a sheet reading earlier columns by position keeps working.
+    "converted_amount", "conversion_rate", "conversion_rate_date", "conversion_ref",
 ]
 
 
@@ -236,12 +239,22 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
                         "omitted from the export", row["id"], stored
                     )
 
+        # A conversion computed for another reference currency is stale (#72):
+        # export the document as unconverted rather than mix currencies.
+        ref = reference_currency()
+        conversions = {row["id"]: effective_conversion(row, ref) for row in rows}
+
+        def _cell(row, f):
+            if f in CONVERSION_COLUMNS:
+                return conversions[row["id"]][f]
+            return row[f] if f in row.keys() else None
+
         # Add CSV metadata
         csv_buf = io.StringIO()
         writer = csv.DictWriter(csv_buf, fieldnames=EXPORT_CSV_FIELDS)
         writer.writeheader()
         for row in rows:
-            writer.writerow({f: row[f] for f in EXPORT_CSV_FIELDS if f in row.keys()})
+            writer.writerow({f: _cell(row, f) for f in EXPORT_CSV_FIELDS})
         zf.writestr("metadata.csv", csv_buf.getvalue())
 
         # Add Excel metadata
@@ -252,7 +265,7 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
             ws.title = "Documents"
             ws.append(EXPORT_CSV_FIELDS)
             for row in rows:
-                ws.append([row[f] if f in row.keys() else None for f in EXPORT_CSV_FIELDS])
+                ws.append([_cell(row, f) for f in EXPORT_CSV_FIELDS])
             # Auto-size columns
             for col in ws.columns:
                 max_len = max((len(str(cell.value or "")) for cell in col), default=10)
@@ -265,6 +278,9 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
 
     # Update last_exported_date
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Every delivered document is stamped, converted or not (owner,
+    # 2026-10-19): the accountant works from the documents; a conversion is
+    # an extra column, never a reason to hold one back or send it twice.
     doc_ids = [row["id"] for row in rows if row["id"] not in omitted]
     if omitted:
         logger.warning(

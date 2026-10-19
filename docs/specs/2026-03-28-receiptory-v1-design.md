@@ -6,7 +6,7 @@ Self-hosted receipt, invoice, and document management system for self-employed p
 
 **In scope:** Web UI upload, LLM extraction pipeline, document browser with search/filter/edit, export (zip + CSV), backup to cloud, admin settings, category management, single-user auth.
 
-**Deferred to later sub-projects:** Telegram bot, Gmail adapter, watched folder, currency conversion, clarification workflow, near-duplicate detection, vendor normalization.
+**Deferred to later sub-projects:** Telegram bot, Gmail adapter, watched folder, currency conversion (since done, #72), clarification workflow, near-duplicate detection, vendor normalization.
 
 ---
 
@@ -131,8 +131,10 @@ Starter user categories (seeded): `office_supplies`, `travel`, `meals`, `utiliti
 | `tax_amount` | REAL | Tax amount |
 | `total_amount` | REAL | Total amount |
 | `currency` | TEXT | ISO 4217 code |
-| `converted_amount` | REAL | Reserved for future currency conversion |
-| `conversion_rate` | REAL | Reserved for future currency conversion |
+| `converted_amount` | REAL | `total_amount` × `conversion_rate` (#72) |
+| `conversion_rate` | REAL | One unit of `currency` in `conversion_ref`, at `receipt_date` (#72); NULL when unknown |
+| `conversion_rate_date` | TEXT | Publication date of the rate used (#72) |
+| `conversion_ref` | TEXT | Reference currency the rate converts into; stale when it differs from `reference_currency` (#72) |
 | `payment_method` | TEXT | Cash, credit card, etc. |
 | `payment_identifier` | TEXT | Card last digits, account number |
 | `language` | TEXT | Detected language code |
@@ -163,7 +165,7 @@ Starter user categories (seeded): `office_supplies`, `travel`, `meals`, `utiliti
 
 ### `documents_fts` (FTS5 virtual table)
 
-Indexed columns: `raw_extracted_text`, `vendor_name`, `description`, `document_title`.
+Indexed columns: `raw_extracted_text`, `vendor_name`, `description`, `document_title`, `original_filename` (migration 003). The update trigger fires only for an UPDATE that writes one of them (migration 011).
 
 ### `backups`
 
@@ -237,6 +239,10 @@ Background asyncio task started via FastAPI lifespan. Processes documents sequen
 - Record processing metadata (model, tokens, cost, timestamp)
 - Insert into FTS5 index
 
+**8. Currency conversion** (#72)
+- After the database update commits, `currency.apply_conversion` stores the rate into `reference_currency`
+- A rate-site failure never fails the document: the rate stays NULL and the rates task retries it
+
 ---
 
 ## Backup System
@@ -294,7 +300,7 @@ All under `/api/`, all require auth (httponly session cookie) except `/api/auth/
 - `GET /api/documents/{id}/pages/{page_num}` — serve rendered page image (cached on disk)
 
 ### Export
-- `POST /api/export` — accepts filter criteria + presets (`since_last_export`, `month`, `date_range`, `full_year`). Returns zip: `category/yyyy-mm-dd-vendor_receipt_id-hash.pdf` + `metadata.csv`. Updates `last_exported_date`.
+- `POST /api/export` — accepts filter criteria + presets (`since_last_export`, `month`, `date_range`, `full_year`). Returns zip: `category/yyyy-mm-dd-vendor_receipt_id-hash.pdf` + `metadata.csv` (conversion columns appended, #72). Updates `last_exported_date`.
 
 ### Categories
 - `GET /api/categories` — list (excludes soft-deleted unless `?include_deleted=true`)
@@ -304,7 +310,7 @@ All under `/api/`, all require auth (httponly session cookie) except `/api/auth/
 
 ### Settings
 - `GET /api/settings` — all settings (API keys masked)
-- `PATCH /api/settings` — update settings
+- `PATCH /api/settings` — update settings; 400 for a `reference_currency` neither rate source publishes, before any key is saved (#72)
 
 ### Backup
 - `POST /api/backup/trigger` — trigger manual backup
@@ -316,7 +322,7 @@ All under `/api/`, all require auth (httponly session cookie) except `/api/auth/
 - `GET /api/queue/status` — depth, current document, recent completions/failures
 
 ### Stats
-- `GET /api/stats/dashboard` — documents this month, expenses by category, pending review count, recent activity
+- `GET /api/stats/dashboard` — documents this month, expenses by category, pending review count, recent activity. Expenses are in `reference_currency` (returned with them); documents without a current rate are counted in `unconverted_count`, not summed (#72)
 - `GET /api/stats/processing-costs` — tokens and cost by model and time period
 
 ### Logs
@@ -372,7 +378,7 @@ All settings stored in `settings` table. Precedence: environment variable (`RECE
 | `business_names` | `[]` | Business/personal names in multiple languages |
 | `business_addresses` | `[]` | Business addresses in multiple languages |
 | `business_tax_ids` | `[]` | Tax IDs for document type detection |
-| `reference_currency` | `"ILS"` | For future currency conversion |
+| `reference_currency` | `"ILS"` | Currency documents are converted into (#72: Bank of Israel rates, ECB cross for others) |
 | `llm_model` | `"gemini/gemini-3-flash-preview"` | litellm model string |
 | `llm_api_key` | `""` | API key for configured provider |
 | `llm_sleep_interval` | `0.0` | Seconds between LLM calls |

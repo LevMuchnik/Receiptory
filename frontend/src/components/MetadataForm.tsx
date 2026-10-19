@@ -6,6 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
+import { conversionDetail } from "@/lib/conversion";
 
 interface Category { id: number; name: string; section: string | null; is_system: boolean; }
 
@@ -136,6 +137,10 @@ export default function MetadataForm({ doc, onSave }: Props) {
           <div><Label>Payment Method</Label><Input value={form.payment_method} onChange={(e) => update("payment_method", e.target.value)} /></div>
           <div><Label>Payment ID (last digits, etc.)</Label><Input value={form.payment_identifier} onChange={(e) => update("payment_identifier", e.target.value)} /></div>
         </div>
+        {/* The saved document's conversion, not the unsaved form's (#72) */}
+        {conversionDetail(doc) && (
+          <p className="mt-2 text-xs text-muted-foreground">{conversionDetail(doc)}</p>
+        )}
       </details>
 
       {/* Line items (read-only) */}

@@ -556,3 +556,123 @@ def test_process_document_with_no_original_on_disk_fails_with_a_clear_error(mock
     assert doc["status"] == "failed"
     assert "Original file not found" in doc["processing_error"]
     mock_extract.assert_not_called()
+
+
+def _boi_usd(monkeypatch):
+    from backend import currency
+    monkeypatch.setattr(currency, "fetch_boi", lambda ccy, start, end: [("2026-01-15", 3.6)] if ccy == "USD" else [])
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_processing_stores_the_conversion(mock_extract, pending_doc, setup_db, monkeypatch):
+    """#72: a foreign-currency receipt carries its rate into the reference currency."""
+    _boi_usd(monkeypatch)
+    usd = ExtractionResult(**{**MOCK_EXTRACTION.__dict__, "currency": "USD"})
+    mock_extract.return_value = LLMExtractionResult(extraction=usd, tokens_in=1, tokens_out=1, model="m")
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT status, conversion_rate, converted_amount, conversion_ref FROM documents WHERE id = ?", (pending_doc,)).fetchone()
+    assert doc["status"] == "processed"
+    assert (doc["conversion_rate"], doc["converted_amount"], doc["conversion_ref"]) == (3.6, 105.3, "ILS")
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_processing_survives_an_unreachable_rate_site(mock_extract, pending_doc, setup_db):
+    """conftest blocks the rate sites: the receipt is still processed, rate NULL."""
+    usd = ExtractionResult(**{**MOCK_EXTRACTION.__dict__, "currency": "USD"})
+    mock_extract.return_value = LLMExtractionResult(extraction=usd, tokens_in=1, tokens_out=1, model="m")
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT status, conversion_rate FROM documents WHERE id = ?", (pending_doc,)).fetchone()
+    assert doc["status"] == "processed"
+    assert doc["conversion_rate"] is None
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_processing_a_reference_currency_receipt_is_rate_one(mock_extract, pending_doc, setup_db):
+    mock_extract.return_value = MOCK_LLM_RESULT
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT conversion_rate, converted_amount FROM documents WHERE id = ?", (pending_doc,)).fetchone()
+    assert (doc["conversion_rate"], doc["converted_amount"]) == (1.0, 29.25)
+
+
+
+def _converted_usd(doc_id):
+    with get_connection() as conn:
+        conn.execute("UPDATE documents SET status = 'pending', currency = 'USD', receipt_date = '2026-01-15', "
+                     "conversion_rate = 3.6, converted_amount = 105.3, conversion_rate_date = '2026-01-15', "
+                     "conversion_ref = 'ILS' WHERE id = ?", (doc_id,))
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_reprocess_into_a_new_currency_never_keeps_the_old_rate(mock_extract, pending_doc, setup_db, monkeypatch):
+    """Review #72: the new currency commits before the conversion runs; if that
+    conversion fails, the old currency's rate must not survive as current."""
+    import backend.processing.pipeline as pl
+    _converted_usd(pending_doc)
+    eur = ExtractionResult(**{**MOCK_EXTRACTION.__dict__, "currency": "EUR"})
+    mock_extract.return_value = LLMExtractionResult(extraction=eur, tokens_in=1, tokens_out=1, model="m")
+
+    def boom(doc_id):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(pl, "apply_conversion", boom)
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT status, currency, conversion_rate, converted_amount, conversion_ref FROM documents WHERE id = ?", (pending_doc,)).fetchone()
+    assert doc["status"] == "processed"  # the conversion failure never fails the document
+    assert (doc["currency"], doc["conversion_rate"], doc["converted_amount"], doc["conversion_ref"]) == ("EUR", None, None, None)
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_reprocess_during_an_outage_keeps_a_current_rate(mock_extract, pending_doc, setup_db):
+    """Red team: same currency and date, rate sites down (conftest): keep the rate.
+    A changed total is re-multiplied by the kept rate."""
+    _converted_usd(pending_doc)
+    usd = ExtractionResult(**{**MOCK_EXTRACTION.__dict__, "currency": "USD", "total_amount": 30.0})
+    mock_extract.return_value = LLMExtractionResult(extraction=usd, tokens_in=1, tokens_out=1, model="m")
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT conversion_rate, converted_amount, conversion_ref FROM documents WHERE id = ?", (pending_doc,)).fetchone()
+    assert (doc["conversion_rate"], doc["converted_amount"], doc["conversion_ref"]) == (3.6, 108.0, "ILS")
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_an_edit_during_extraction_never_leaves_its_rate_on_another_currency(mock_extract, pending_doc, setup_db):
+    """Re-review F2: the pipeline read the document before the LLM call. An
+    edit to EUR (with its EUR rate) lands while the model runs; the model says
+    USD, as the stale read did. The EUR rate must not stay on a USD document."""
+    _converted_usd(pending_doc)
+    usd = ExtractionResult(**{**MOCK_EXTRACTION.__dict__, "currency": "USD", "receipt_date": "2026-01-15"})
+
+    def extract_while_edited(*args, **kwargs):
+        with get_connection() as conn:
+            conn.execute("UPDATE documents SET currency = 'EUR', conversion_rate = 3.9, converted_amount = 114.08, "
+                         "conversion_ref = 'ILS' WHERE id = ?", (pending_doc,))
+        return LLMExtractionResult(extraction=usd, tokens_in=1, tokens_out=1, model="m")
+
+    mock_extract.side_effect = extract_while_edited
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT currency, conversion_rate, converted_amount FROM documents WHERE id = ?", (pending_doc,)).fetchone()
+    # conftest blocks the rate sites, so the reconversion is left to the rates task
+    assert (doc["currency"], doc["conversion_rate"], doc["converted_amount"]) == ("USD", None, None)
+
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_a_reprocess_refetches_a_rate_computed_for_another_reference(mock_extract, pending_doc, setup_db, monkeypatch):
+    """State-machine review: same currency and date keep the stored rate in the
+    UPDATE, but one computed for another reference is recomputed right away."""
+    _boi_usd(monkeypatch)
+    with get_connection() as conn:
+        conn.execute("UPDATE documents SET status = 'pending', currency = 'USD', receipt_date = '2026-01-15', "
+                     "conversion_rate = 0.9, converted_amount = 26.33, conversion_rate_date = '2026-01-15', "
+                     "conversion_ref = 'EUR' WHERE id = ?", (pending_doc,))
+    usd = ExtractionResult(**{**MOCK_EXTRACTION.__dict__, "currency": "USD"})
+    mock_extract.return_value = LLMExtractionResult(extraction=usd, tokens_in=1, tokens_out=1, model="m")
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT conversion_rate, converted_amount, conversion_ref FROM documents WHERE id = ?", (pending_doc,)).fetchone()
+    assert (doc["conversion_rate"], doc["converted_amount"], doc["conversion_ref"]) == (3.6, 105.3, "ILS")
