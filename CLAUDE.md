@@ -38,6 +38,7 @@ backend/                 # FastAPI application
 frontend/src/           # React SPA
   lib/api.ts            # Fetch wrapper with auth handling
   lib/pdf-builder.ts    # Scanned pages -> PDF (page size from pixels, see Gotchas)
+  lib/conversion.ts     # How a document's currency conversion reads in the UI (#72)
   lib/scanner/          # Detection + geometry: canvas-utils, geometry, coords,
                         # smoother, classical-detector, ml-detector,
                         # detection-size (the shared detection resolution)
@@ -84,9 +85,9 @@ cd .claude/skills/gstack && ./setup
 
 ## Architecture Notes
 
-- **Single process:** FastAPI app with background asyncio tasks for the processing queue and backup scheduler. No separate worker or message broker.
+- **Single process:** FastAPI app with background asyncio tasks for the processing queue, backup scheduler, Gmail poller, watched folder and exchange-rate task (`currency.run_rates_task`). No separate worker or message broker.
 - **Database:** SQLite in WAL mode. Hand-rolled migrations (numbered SQL files in `migrations/`). `schema_version` table tracks applied versions. Global `_db_path` is set by `init_db()` and protected by a threading lock.
-- **Processing pipeline:** Documents are processed sequentially. Queue polls for `status='pending'`, sets to `processing`, runs normalize → LLM extract → file → update DB. Failures set `status='failed'` with error message.
+- **Processing pipeline:** Documents are processed sequentially. Queue polls for `status='pending'`, sets to `processing`, runs normalize → LLM extract → file → update DB, then converts the amount after that commit (`currency.apply_conversion`; a conversion failure never fails the document). Failures set `status='failed'` with error message.
 - **LLM extraction:** Single-pass via litellm. Prompt includes user's business info (names, addresses, tax IDs in multiple languages) and category list with descriptions. Response is parsed into `ExtractionResult` via a tolerant JSON parse ladder (strict parse → fence/salvage recovery).
 - **Static files in production:** `app.mount("/", StaticFiles(...))` serves `frontend/dist/`. This catch-all mount MUST be registered last (after all API routes) and is disabled when `RECEIPTORY_DEV=1`.
 

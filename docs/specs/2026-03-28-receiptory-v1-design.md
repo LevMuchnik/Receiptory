@@ -165,7 +165,7 @@ Starter user categories (seeded): `office_supplies`, `travel`, `meals`, `utiliti
 
 ### `documents_fts` (FTS5 virtual table)
 
-Indexed columns: `raw_extracted_text`, `vendor_name`, `description`, `document_title`.
+Indexed columns: `raw_extracted_text`, `vendor_name`, `description`, `document_title`, `original_filename` (migration 003). The update trigger fires only for an UPDATE that writes one of them (migration 011).
 
 ### `backups`
 
@@ -239,6 +239,10 @@ Background asyncio task started via FastAPI lifespan. Processes documents sequen
 - Record processing metadata (model, tokens, cost, timestamp)
 - Insert into FTS5 index
 
+**8. Currency conversion** (#72)
+- After the database update commits, `currency.apply_conversion` stores the rate into `reference_currency`
+- A rate-site failure never fails the document: the rate stays NULL and the rates task retries it
+
 ---
 
 ## Backup System
@@ -296,7 +300,7 @@ All under `/api/`, all require auth (httponly session cookie) except `/api/auth/
 - `GET /api/documents/{id}/pages/{page_num}` — serve rendered page image (cached on disk)
 
 ### Export
-- `POST /api/export` — accepts filter criteria + presets (`since_last_export`, `month`, `date_range`, `full_year`). Returns zip: `category/yyyy-mm-dd-vendor_receipt_id-hash.pdf` + `metadata.csv`. Updates `last_exported_date`.
+- `POST /api/export` — accepts filter criteria + presets (`since_last_export`, `month`, `date_range`, `full_year`). Returns zip: `category/yyyy-mm-dd-vendor_receipt_id-hash.pdf` + `metadata.csv` (conversion columns appended, #72). Updates `last_exported_date`.
 
 ### Categories
 - `GET /api/categories` — list (excludes soft-deleted unless `?include_deleted=true`)
@@ -306,7 +310,7 @@ All under `/api/`, all require auth (httponly session cookie) except `/api/auth/
 
 ### Settings
 - `GET /api/settings` — all settings (API keys masked)
-- `PATCH /api/settings` — update settings
+- `PATCH /api/settings` — update settings; 400 for a `reference_currency` neither rate source publishes, before any key is saved (#72)
 
 ### Backup
 - `POST /api/backup/trigger` — trigger manual backup
@@ -318,7 +322,7 @@ All under `/api/`, all require auth (httponly session cookie) except `/api/auth/
 - `GET /api/queue/status` — depth, current document, recent completions/failures
 
 ### Stats
-- `GET /api/stats/dashboard` — documents this month, expenses by category, pending review count, recent activity
+- `GET /api/stats/dashboard` — documents this month, expenses by category, pending review count, recent activity. Expenses are in `reference_currency` (returned with them); documents without a current rate are counted in `unconverted_count`, not summed (#72)
 - `GET /api/stats/processing-costs` — tokens and cost by model and time period
 
 ### Logs

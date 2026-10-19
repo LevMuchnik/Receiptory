@@ -176,6 +176,7 @@ Most settings are configurable via the admin UI. Environment variables take prec
 | `RECEIPTORY_TELEGRAM_BOT_TOKEN` | — | Telegram bot token from @BotFather |
 | `RECEIPTORY_GMAIL_ADDRESS` | — | Gmail address to poll via IMAP |
 | `RECEIPTORY_GMAIL_APP_PASSWORD` | — | Gmail App Password (16 chars) |
+| `RECEIPTORY_REFERENCE_CURRENCY` | `ILS` | Currency amounts are converted into: ILS or a code the Bank of Israel or the ECB publishes (also in Administration > General) |
 | `RECEIPTORY_BACKUP_SCHEDULE` | `0 2 * * *` | Backup cron schedule |
 | `RECEIPTORY_THEME` | `light` | Default theme: `light`, `dark`, or `system` |
 | `RECEIPTORY_DEV` | `0` | Set to `1` when running with Vite dev server |
@@ -392,6 +393,7 @@ receiptory/
 │   ├── auth.py                # Session-based authentication
 │   ├── database.py            # SQLite WAL + migration runner
 │   ├── storage.py             # File I/O, page rendering
+│   ├── currency.py            # Exchange rates (Bank of Israel, ECB cross), conversion
 │   ├── models.py              # Pydantic request/response models
 │   ├── api/                   # REST endpoint routers
 │   ├── processing/            # LLM extraction pipeline, queue
