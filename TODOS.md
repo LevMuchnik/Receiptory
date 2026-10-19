@@ -70,6 +70,41 @@ Deferred items captured during planning and review. Organized by component, sort
 **Priority:** P2
 **Depends on:** None
 
+## Export and currency
+
+### Export every document in the period, whatever its status
+
+**What:** A period export (`POST /api/export` without `document_ids`) selects only `status = 'processed'`. Include every non-deleted document in the period, using its original file (`atomic.find_original`) when it has no filed copy; keep `status` as a CSV column.
+
+**Why:** Owner rule (2026-10-19): documents are the key. The accountant works from the exported documents; extracted data and conversions are only the owner's overview. Today a `needs_review`, `failed` or `pending` document never reaches the accountant, silently (live DB 2026-10-19: 1 failed document of 312, no filed PDF).
+
+**Context:**
+- Found during /ship of #72; owner chose a separate PR right after #72, before #73 (D9).
+- `backend/api/export.py`: `conditions.append("d.status = 'processed'")` predates #72; the `omitted` set and `since_last_export` stamping rules must keep working (a document stamped only once it is delivered).
+- Bundle the "#72 review follow-ups" entry below into the same PR.
+
+**Effort:** M
+**Priority:** P1
+**Depends on:** #72 merged
+
+### #72 review follow-ups (currency conversion polish)
+
+**What:** Items the owner deferred from the #72 ship review (D10, D11) to the PR above.
+
+**Why:** None loses or corrupts documents; each is a rough edge in conversion or the Settings page.
+
+**Context:**
+- Rate fetch: back off a whole source only on transport errors and 5xx; treat a 4xx or a non-CSV 200 as a per-query failure (one failing document runs first in every pass, `ORDER BY id`, and keeps the source backed off); read the CSV header with the csv module (a quoted header would look like an outage) and feed the real BoI/ECB CSV shapes through `_get_csv` in a test; catch a `LookupError` from a bogus charset; a whole-call deadline for inline conversions (the 20s deadline is checked per chunk only); one `convert_pending` at a time; the CAS write should also check the reference; backoff warnings logged once per pass, not per document.
+- PATCH: decide whether to reconvert from the live row (always call `apply_conversion`; it returns at once when current).
+- Settings: the inline reference-currency error can be cleared by the tab click that blurred the field, and by another field's successful save; keep `INLINE_ERROR_KEYS` and the FieldGroup wiring in one helper.
+- An invalid reference currency (set via .env or an old value) reads as "no exchange rate yet" on the dashboard and document page: say why. Add an API-level test under such a reference.
+- A way to purge bad cached rates and recompute conversions (cached rates never expire).
+- Wording: the retry-vs-backoff comment, the deadline in `run_rates_task`'s docstring and CLAUDE.md, the empty-window WARNING causes, the rates-task test name.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** #72 merged
+
 ## Ingestion
 
 _No open items. Locating originals with `find_original` landed in #69; see Completed._
