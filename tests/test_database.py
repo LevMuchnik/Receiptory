@@ -231,6 +231,10 @@ def test_a_conversion_write_does_not_reindex_the_document(db_conn):
     """Ship review: the FTS update trigger rewrote the whole search row (the
     full extracted text) on every rate write. It fires only when an indexed
     column is written, and search still follows those."""
+    import backend.database as database
+    sql = (Path(__file__).resolve().parents[1] / "migrations/011_fts_update_trigger_on_indexed_columns.sql").read_text(encoding="utf-8")
+    # the trigger's BEGIN ... END is not a transaction: 011 runs wrapped, atomically
+    assert database._UNWRAPPED_RE.search(sql) is None
     db_conn.execute(
         "INSERT INTO documents (original_filename, file_hash, file_size_bytes, status, submission_channel, vendor_name, raw_extracted_text) "
         "VALUES ('a.pdf', 'h', 1, 'processed', 'web_upload', 'Acme', 'invoice text')")
