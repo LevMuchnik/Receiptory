@@ -41,15 +41,19 @@ function SectionCard({ title, icon, children, badge }: { title: string; icon: st
   );
 }
 
-function FieldGroup({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
+function FieldGroup({ label, children, hint, error }: { label: string; children: React.ReactNode; hint?: string; error?: string | null }) {
   return (
     <div className="space-y-1.5">
       <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider block">{label}</Label>
       {children}
+      {error && <p role="alert" className="text-[11px] font-medium text-destructive leading-snug">Not saved: {error}</p>}
       {hint && <p className="text-[11px] text-muted-foreground leading-snug">{hint}</p>}
     </div>
   );
 }
+
+// Fields that show a rejected save under themselves rather than above the tabs.
+const INLINE_ERROR_KEYS = new Set(["reference_currency"]);
 
 const inputCls = "bg-muted dark:bg-[#272a2d] border-none rounded-lg text-sm focus-visible:ring-primary/20 h-10";
 
@@ -97,7 +101,10 @@ export default function SettingsPage() {
   const [gmailStatus, setGmailStatus] = useState<any>(null);
   const [gmailPollResult, setGmailPollResult] = useState<string | null>(null);
   const [notifyTestResult, setNotifyTestResult] = useState<string | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  // The last rejected save, shown under its field (or above the tabs for a
+  // field without its own message); cleared by the next save, an edit of that
+  // field, or a tab change.
+  const [saveError, setSaveError] = useState<{ key: string; message: string } | null>(null);
   const [modelInfo, setModelInfo] = useState<any>(null);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [envKeys, setEnvKeys] = useState<string[]>([]);
@@ -173,7 +180,7 @@ export default function SettingsPage() {
       // A rejected value (a 400, e.g. a reference currency no rate source
       // publishes) was not saved: say why, and show the stored value again
       // below rather than leave the rejected text looking saved.
-      setSaveError(e?.message || "The setting was not saved");
+      setSaveError({ key: Object.keys(updates)[0] ?? "", message: e?.message || "The setting was not saved" });
     }
     const fresh = await api.get("/settings");
     setSettings(fresh);
@@ -239,9 +246,9 @@ export default function SettingsPage() {
         <h1 className="text-3xl font-headline font-extrabold text-primary tracking-tight">System Administration</h1>
         <p className="text-muted-foreground font-medium mt-1">Configure your precision extraction engine and global connectivity.</p>
       </div>
-      {saveError && (
-        <p role="alert" className="text-sm font-medium text-destructive bg-destructive/10 rounded-lg px-4 py-2">
-          Not saved: {saveError}
+      {saveError && !INLINE_ERROR_KEYS.has(saveError.key) && (
+        <p role="alert" className="text-sm font-medium text-destructive bg-destructive/10 dark:bg-destructive/20 rounded-lg px-4 py-2">
+          Not saved: {saveError.message}
         </p>
       )}
 
@@ -250,7 +257,7 @@ export default function SettingsPage() {
         {TABS.map((tab) => (
           <button
             key={tab.key}
-            onClick={() => setActiveTab(tab.key)}
+            onClick={() => { setActiveTab(tab.key); setSaveError(null); }}
             className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-colors ${
               activeTab === tab.key
                 ? "bg-primary text-white"
@@ -308,8 +315,8 @@ export default function SettingsPage() {
                     onChange={(e) => setSettings({ ...settings, business_tax_ids: e.target.value })}
                   />
                 </FieldGroup>
-                <FieldGroup label="Reference Currency" hint={envHint("reference_currency")}>
-                  <Input className={inputCls} disabled={envLocked("reference_currency")} value={settings.reference_currency || ""} onBlur={(e) => save({ reference_currency: e.target.value })} onChange={(e) => setSettings({ ...settings, reference_currency: e.target.value })} />
+                <FieldGroup label="Reference Currency" hint={envHint("reference_currency")} error={saveError?.key === "reference_currency" ? saveError.message : null}>
+                  <Input className={inputCls} disabled={envLocked("reference_currency")} value={settings.reference_currency || ""} onBlur={(e) => save({ reference_currency: e.target.value })} onChange={(e) => { setSettings({ ...settings, reference_currency: e.target.value }); if (saveError?.key === "reference_currency") setSaveError(null); }} />
                 </FieldGroup>
               </div>
             </SectionCard>

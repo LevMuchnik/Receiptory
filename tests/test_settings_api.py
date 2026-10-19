@@ -46,6 +46,8 @@ def test_reference_currency_must_be_a_currency_code(authed_client, value):
     """#72: an invalid reference would leave every conversion unusable."""
     resp = authed_client.patch("/api/settings", json={"settings": {"reference_currency": value}})
     assert resp.status_code == 400
+    # shown under the Reference Currency field: worded with its label, not the key
+    assert resp.json()["detail"].startswith("Reference currency must be")
     assert authed_client.get("/api/settings").json()["reference_currency"] == "ILS"
 
 

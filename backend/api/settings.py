@@ -117,7 +117,7 @@ def patch_settings(body: SettingsUpdate, background_tasks: BackgroundTasks, user
         # Checked before any key is written, so a rejected body saves nothing.
         code = currency.normalize_code(settings["reference_currency"])
         if code not in currency.REFERENCE_CURRENCIES:
-            raise HTTPException(status_code=400, detail="reference_currency must be a currency the Bank of Israel or the ECB publishes, such as ILS")
+            raise HTTPException(status_code=400, detail="Reference currency must be a currency the Bank of Israel or the ECB publishes, such as ILS")
         settings["reference_currency"] = code
     for key, value in settings.items():
         if key not in DEFAULTS:

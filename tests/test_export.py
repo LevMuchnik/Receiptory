@@ -430,23 +430,22 @@ def test_export_appends_the_conversion_columns_and_writes_them_to_excel(authed_c
 
 
 
-def test_since_last_export_repeats_a_row_exported_before_its_rate(authed_client, docs_with_files):
-    """Red team: an incremental export taken while a rate site is down must not
-    retire a foreign document with blank converted columns for good. A row that
-    can never convert (no currency, or one no source publishes) is stamped."""
+def test_since_last_export_delivers_every_document_once_converted_or_not(authed_client, docs_with_files):
+    """Owner (2026-10-19): documents are the key; the accountant works from
+    them, and a conversion is only an extra column. A document without a rate
+    is exported and stamped like any other, never held back or resent."""
     with get_connection() as conn:
-        conn.execute("UPDATE documents SET currency = 'USD' WHERE file_hash = 'h1'")  # no rate yet
-        conn.execute("UPDATE documents SET currency = 'XYZ' WHERE file_hash = 'h2'")  # never converts
+        conn.execute("UPDATE documents SET currency = 'USD' WHERE file_hash = 'h1'")  # no rate (yet)
+        conn.execute("UPDATE documents SET currency = 'ILS' WHERE file_hash = 'h2'")  # rate 1, nothing stored
     first = authed_client.post("/api/export", json={"preset": "since_last_export"})
-    assert first.status_code == 200
+    rows = {r["vendor_name"]: r for r in csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(first.content)).read("metadata.csv").decode("utf-8")))}
+    assert set(rows) == {"Vendor A", "Vendor B"}
+    assert (rows["Vendor A"]["total_amount"], rows["Vendor A"]["currency"], rows["Vendor A"]["converted_amount"]) == ("100.0", "USD", "")
+    assert (rows["Vendor B"]["converted_amount"], rows["Vendor B"]["conversion_rate"]) == ("200.0", "1.0")
     with get_connection() as conn:
-        stamped = {r["file_hash"]: r["last_exported_date"] for r in conn.execute("SELECT file_hash, last_exported_date FROM documents")}
-    assert stamped["h1"] is None and stamped["h2"] is not None
-    with get_connection() as conn:
-        conn.execute("UPDATE documents SET conversion_rate = 3.0, converted_amount = 300.0, conversion_ref = 'ILS' WHERE file_hash = 'h1'")
+        assert all(r[0] is not None for r in conn.execute("SELECT last_exported_date FROM documents"))
     second = authed_client.post("/api/export", json={"preset": "since_last_export"})
-    rows = list(csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(second.content)).read("metadata.csv").decode("utf-8"))))
-    assert [(r["vendor_name"], r["converted_amount"]) for r in rows] == [("Vendor A", "300.0")]
+    assert list(csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(second.content)).read("metadata.csv").decode("utf-8")))) == []
 
 
 def test_export_fills_a_reference_currency_row_before_its_rate_is_stored(authed_client, docs_with_files):

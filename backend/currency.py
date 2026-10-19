@@ -54,6 +54,11 @@ ECB_CURRENCIES = frozenset({"AUD", "BRL", "CAD", "CHF", "CNY", "CZK", "DKK", "GB
                             "TRY", "USD", "ZAR"})
 # What reference_currency may be: a code these sources can convert into today.
 REFERENCE_CURRENCIES = frozenset({"ILS"}) | BOI_CURRENCIES | ECB_CURRENCIES
+# Every code a document can be converted from: also the ECB's discontinued
+# series, which still answer for their years (BGN until 2025). Any other code
+# is never looked up.
+KNOWN_CURRENCIES = REFERENCE_CURRENCIES | frozenset({"ARS", "BGN", "CYP", "DZD", "EEK", "GRD", "HRK", "LTL", "LVL",
+                                                      "MAD", "MTL", "RUB", "SIT", "SKK", "TWD"})
 # One fetch covers this many days before the date: no publication gap
 # (weekend plus holidays) is longer.
 LOOKBACK_DAYS = 14
@@ -70,8 +75,10 @@ OUTAGE_BACKOFF_S = 600
 # A window a source answered with no rates is not asked again for a day.
 EMPTY_ANSWER_TTL_S = 24 * 3600
 # The rates task: backfill, retries for unreachable sites, and recomputes
-# after a reference-currency change (owner, 2026-10-18).
+# after a reference-currency change (owner, 2026-10-18). A pass that met an
+# unreachable site runs again sooner, once the backoff below has passed.
 RATES_TASK_INTERVAL_S = 3 * 3600
+OUTAGE_RETRY_S = 15 * 60
 _ISRAEL = ZoneInfo("Asia/Jerusalem")
 _CODE_RE = re.compile(r"[A-Z]{3}")
 _DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
@@ -141,13 +148,26 @@ def _get_csv(url: str, params: dict) -> list[tuple[str, float]]:
             body, size = [], 0
             for chunk in resp.iter_bytes():
                 size += len(chunk)
-                if size > MAX_RESPONSE_BYTES or time.monotonic() > deadline:
-                    raise RateUnavailable(f"{url}: response over {MAX_RESPONSE_BYTES} bytes or {REQUEST_DEADLINE_S}s")
+                if size > MAX_RESPONSE_BYTES:
+                    raise RateUnavailable(f"{url}: response over {MAX_RESPONSE_BYTES} bytes")
+                if time.monotonic() > deadline:
+                    raise RateUnavailable(f"{url}: response took over {REQUEST_DEADLINE_S}s")
                 body.append(chunk)
             text = b"".join(body).decode(resp.encoding or "utf-8", errors="replace")
     except httpx.HTTPError as e:
         raise RateUnavailable(f"{url}: {e}") from e
-    return parse_csv(text)
+    # An empty 200 is a window with no rates (the ECB answers some that way);
+    # any other 200 that is not the rates CSV (a maintenance or bot-check
+    # page) is an outage to retry, not "no rates" to remember for a day.
+    if not text.strip():
+        return []
+    header = text.splitlines()[0].split(",")
+    if "TIME_PERIOD" not in header or "OBS_VALUE" not in header:
+        raise RateUnavailable(f"{url}: HTTP 200 without a rates CSV")
+    try:
+        return parse_csv(text)
+    except csv.Error as e:
+        raise RateUnavailable(f"{url}: unreadable CSV: {e}") from e
 
 
 def fetch_boi(ccy: str, start: str, end: str) -> list[tuple[str, float]]:
@@ -245,6 +265,8 @@ def rate_to_ils(ccy: str, day: str) -> tuple[float, str] | None:
     day = min(day, today_israel().isoformat())
     if ccy == "ILS":
         return 1.0, day
+    if ccy not in KNOWN_CURRENCIES:
+        return None
     if ccy in BOI_CURRENCIES:
         return _latest("boi", ccy, day)
     per_eur = _latest("ecb", ccy, day)
@@ -309,12 +331,6 @@ def effective_conversion(row, ref) -> dict:
     return dict.fromkeys(CONVERSION_COLUMNS)
 
 
-def convertible(currency_value) -> bool:
-    """Whether a source publishes this currency, so a missing conversion is
-    only waiting for a rate rather than impossible."""
-    return normalize_code(currency_value) in REFERENCE_CURRENCIES
-
-
 _KEEP = object()
 
 
@@ -354,13 +370,14 @@ def _converted(total, value):
 
 
 def reference_currency() -> str | None:
-    return normalize_code(get_setting("reference_currency"))
-
-
-def needs_network(currency_value, ref) -> bool:
-    """Whether converting this currency into ref can need a rate site."""
-    code = normalize_code(currency_value)
-    return code is not None and ref is not None and code != ref
+    """The reference code, or None when it is not one the sources can convert
+    into (PATCH /settings refuses those, but .env, an older saved value or a
+    restored backup can still hold one): nothing then converts, and no stored
+    rate is overwritten."""
+    code = normalize_code(get_setting("reference_currency"))
+    if code not in REFERENCE_CURRENCIES:
+        return None
+    return code
 
 
 def apply_conversion(doc_id: int) -> str:
@@ -418,15 +435,15 @@ def apply_conversion(doc_id: int) -> str:
 
 def convert_pending() -> dict:
     """One pass of the rates task over documents with a currency and no usable
-    rate (none yet, or computed for another reference). After the first
-    unreachable site the pass keeps going only for documents that need no
-    site (already in the reference currency); the next pass retries the rest.
-    One document that raises is logged and skipped. An invalid
-    reference_currency setting makes the pass a no-op."""
+    rate (none yet, or computed for another reference). A source that turns
+    out unreachable is backed off (_fetch), so the rest of the pass skips it
+    without a request and the other source keeps converting. One document that
+    raises is logged and skipped. An invalid reference_currency setting makes
+    the pass a no-op."""
     counts = {"converted": 0, "no_rate": 0, "superseded": 0, "unavailable": 0, "error": 0}
     ref = reference_currency()
     if ref is None:
-        logger.warning("reference_currency is not a currency code; exchange-rate pass skipped")
+        logger.warning("reference_currency is not a currency the rate sources publish; exchange-rate pass skipped")
         return counts
     with get_connection() as conn:
         docs = conn.execute(
@@ -434,32 +451,32 @@ def convert_pending() -> dict:
             "AND (conversion_rate IS NULL OR conversion_ref IS NOT ?) ORDER BY id",
             (ref,),
         ).fetchall()
-    offline = False
     for doc in docs:
-        if offline and needs_network(doc["currency"], ref):
-            continue
         try:
             status = apply_conversion(doc["id"])
         except Exception:
             logger.exception("Exchange rate for document %d failed", doc["id"])
             status = "error"
         counts[status] += 1
-        offline = offline or status == "unavailable"
     return counts
 
 
 async def run_rates_task() -> None:
-    """Runs convert_pending at startup and then every RATES_TASK_INTERVAL_S,
-    in a worker thread: a hung rate site must not block the event loop. The
-    pipeline and a PATCH also convert their one document inline, which an
-    unreachable site can delay by up to the HTTP timeouts per request; this
-    task retries whatever they left unconverted."""
+    """Runs convert_pending at startup and then every RATES_TASK_INTERVAL_S
+    (OUTAGE_RETRY_S after a pass that met an unreachable site), in a worker
+    thread: a hung rate site must not block the event loop. The pipeline and
+    a PATCH also convert their one document inline; an unreachable site
+    delays the first of them by up to REQUEST_DEADLINE_S, and the rest fail at
+    once for OUTAGE_BACKOFF_S. This task retries whatever they left."""
     logger.info("Exchange-rate task started")
     while True:
+        delay = RATES_TASK_INTERVAL_S
         try:
             counts = await asyncio.to_thread(convert_pending)
             if any(counts.values()):
                 logger.info("Exchange-rate pass: %s", counts)
+            if counts.get("unavailable"):
+                delay = OUTAGE_RETRY_S
         except Exception:
             logger.exception("Exchange-rate pass failed")
-        await asyncio.sleep(RATES_TASK_INTERVAL_S)
+        await asyncio.sleep(delay)

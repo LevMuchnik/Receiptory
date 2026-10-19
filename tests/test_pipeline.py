@@ -658,3 +658,21 @@ def test_an_edit_during_extraction_never_leaves_its_rate_on_another_currency(moc
         doc = conn.execute("SELECT currency, conversion_rate, converted_amount FROM documents WHERE id = ?", (pending_doc,)).fetchone()
     # conftest blocks the rate sites, so the reconversion is left to the rates task
     assert (doc["currency"], doc["conversion_rate"], doc["converted_amount"]) == ("USD", None, None)
+
+
+
+@patch("backend.processing.pipeline.extract_document")
+def test_a_reprocess_refetches_a_rate_computed_for_another_reference(mock_extract, pending_doc, setup_db, monkeypatch):
+    """State-machine review: same currency and date keep the stored rate in the
+    UPDATE, but one computed for another reference is recomputed right away."""
+    _boi_usd(monkeypatch)
+    with get_connection() as conn:
+        conn.execute("UPDATE documents SET status = 'pending', currency = 'USD', receipt_date = '2026-01-15', "
+                     "conversion_rate = 0.9, converted_amount = 26.33, conversion_rate_date = '2026-01-15', "
+                     "conversion_ref = 'EUR' WHERE id = ?", (pending_doc,))
+    usd = ExtractionResult(**{**MOCK_EXTRACTION.__dict__, "currency": "USD"})
+    mock_extract.return_value = LLMExtractionResult(extraction=usd, tokens_in=1, tokens_out=1, model="m")
+    process_document(pending_doc, setup_db)
+    with get_connection() as conn:
+        doc = conn.execute("SELECT conversion_rate, converted_amount, conversion_ref FROM documents WHERE id = ?", (pending_doc,)).fetchone()
+    assert (doc["conversion_rate"], doc["converted_amount"], doc["conversion_ref"]) == (3.6, 105.3, "ILS")
