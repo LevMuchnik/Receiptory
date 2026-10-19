@@ -290,9 +290,12 @@ def rate(ccy, ref, day) -> tuple[float, str | None] | None:
 # current reference, a document already in the reference currency at face
 # value, and NULL (unconverted) otherwise. effective_conversion is the same
 # rule for Python readers; keep the two together.
+# Both rules trim the same characters (SQLite's trim() alone strips only
+# spaces; model output can carry a newline or a tab).
+_TRIM = " \t\r\n"
 CONVERTED_AMOUNT_SQL = (
     "CASE WHEN d.conversion_ref = :ref THEN d.converted_amount "
-    "WHEN upper(trim(d.currency)) = :ref THEN d.total_amount END"
+    "WHEN upper(trim(d.currency, ' ' || char(9) || char(13) || char(10))) = :ref THEN d.total_amount END"
 )
 CONVERSION_COLUMNS = ("conversion_rate", "converted_amount", "conversion_rate_date", "conversion_ref")
 
@@ -301,7 +304,7 @@ def effective_conversion(row, ref) -> dict:
     """The four conversion columns as readers present them (CONVERTED_AMOUNT_SQL's rule)."""
     if row["conversion_ref"] == ref and ref is not None:
         return {c: row[c] for c in CONVERSION_COLUMNS}
-    if ref is not None and (row["currency"] or "").strip().upper() == ref:
+    if ref is not None and (row["currency"] or "").strip(_TRIM).upper() == ref:
         return {"conversion_rate": 1.0, "converted_amount": row["total_amount"], "conversion_rate_date": None, "conversion_ref": ref}
     return dict.fromkeys(CONVERSION_COLUMNS)
 
