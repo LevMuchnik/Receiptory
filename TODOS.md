@@ -72,24 +72,9 @@ Deferred items captured during planning and review. Organized by component, sort
 
 ## Export and currency
 
-### Export every document in the period, whatever its status
-
-**What:** A period export (`POST /api/export` without `document_ids`) selects only `status = 'processed'`. Include every non-deleted document in the period, using its original file (`atomic.find_original`) when it has no filed copy; keep `status` as a CSV column.
-
-**Why:** Owner rule (2026-10-19): documents are the key. The accountant works from the exported documents; extracted data and conversions are only the owner's overview. Today a `needs_review`, `failed` or `pending` document never reaches the accountant, silently (live DB 2026-10-19: 1 failed document of 312, no filed PDF).
-
-**Context:**
-- Found during /ship of #72; owner chose a separate PR right after #72, before #73 (D9).
-- `backend/api/export.py`: `conditions.append("d.status = 'processed'")` predates #72; the `omitted` set and `since_last_export` stamping rules must keep working (a document stamped only once it is delivered).
-- Bundle the "#72 review follow-ups" entry below into the same PR.
-
-**Effort:** M
-**Priority:** P1
-**Depends on:** #72 merged
-
 ### #72 review follow-ups (currency conversion polish)
 
-**What:** Items the owner deferred from the #72 ship review (D10, D11) to the PR above.
+**What:** Items the owner deferred from the #72 ship review (D10, D11). Kept out of the export PR (owner, 2026-10-22); the next PR, before #73.
 
 **Why:** None loses or corrupts documents; each is a rough edge in conversion or the Settings page.
 
@@ -575,6 +560,10 @@ _No open items. Locating originals with `find_original` landed in #69; see Compl
 **Depends on:** Issue #12 (parse-retry loop) landing first.
 
 ## Completed
+
+### Export every document in the period, whatever its status
+
+**Done 2026-10-22 (branch `issue/export-all-documents`).** Period exports drop the `status = 'processed'` filter; only deletion keeps a document out. A document without a usable filed copy goes into the zip as its original (`find_original`, named by `filing.download_name`), including a filed copy renamed mid-export. On the issue-date basis an undated or malformed `receipt_date` uses the upload date. A document with neither file is metadata-only, unstamped, and reported in the UI (`X-Export-Omitted`). `last_exported_date` keeps the first delivery. New `exported_file` column, last. Plan and review: `docs/plans/2026-10-19-export-every-document.md`.
 
 ### Locate originals with `find_original` everywhere
 

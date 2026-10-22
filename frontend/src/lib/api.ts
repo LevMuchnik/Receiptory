@@ -17,6 +17,20 @@ function parseFilename(disposition: string | null): string {
 }
 
 /**
+ * What the owner is told after an export whose zip is missing some documents'
+ * files (neither the filed PDF nor the original was on disk). The server
+ * reports the count in X-Export-Omitted; those rows are still in the
+ * spreadsheet and stay unstamped, so the next "since last export" retries them.
+ */
+export function exportOmittedWarning(header: string | null): string | null {
+  const n = Number.parseInt(header ?? "", 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n === 1
+    ? "1 document had no file on disk and is only in the spreadsheet."
+    : `${n} documents had no file on disk and are only in the spreadsheet.`;
+}
+
+/**
  * FastAPI's `detail` is a string for HTTPException but an ARRAY of
  * `{loc, msg, type}` objects for 422 validation errors. Passing the array
  * straight to `new Error()` yields the useless literal "[object Object]", so
@@ -156,7 +170,7 @@ export const api = {
     }
     return res.json();
   },
-  exportDocs: async (body: unknown): Promise<{ blob: Blob; filename: string }> => {
+  exportDocs: async (body: unknown): Promise<{ blob: Blob; filename: string; warning: string | null }> => {
     const res = await fetch(`${API_BASE}/export`, {
       method: "POST",
       credentials: "include",
@@ -164,7 +178,11 @@ export const api = {
       body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error("Export failed");
-    return { blob: await res.blob(), filename: parseFilename(res.headers.get("Content-Disposition")) };
+    return {
+      blob: await res.blob(),
+      filename: parseFilename(res.headers.get("Content-Disposition")),
+      warning: exportOmittedWarning(res.headers.get("X-Export-Omitted")),
+    };
   },
   uploadScannerTestFrame: async (
     blob: Blob,

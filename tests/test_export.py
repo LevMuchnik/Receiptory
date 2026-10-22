@@ -160,11 +160,16 @@ def test_export_null_receipt_date_ingestion(authed_client, db_path, tmp_data_dir
     rows = list(csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(resp.content)).read("metadata.csv").decode())))
     assert any(r["vendor_name"] == "No Date Vendor" for r in rows)
 
-    # Silently excluded with receipt basis (receipt_date IS NULL)
+    # With the Issue Date basis it falls under its upload date (owner,
+    # 2026-10-22): it used to be silently left out of every such export.
     resp2 = authed_client.post("/api/export", json={"date_basis": "receipt", "date_from": "2026-05-01", "date_to": "2026-05-31"})
     assert resp2.status_code == 200
     rows2 = list(csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(resp2.content)).read("metadata.csv").decode())))
-    assert not any(r["vendor_name"] == "No Date Vendor" for r in rows2)
+    assert any(r["vendor_name"] == "No Date Vendor" for r in rows2)
+    # ...and only there: not in a neighbouring month.
+    resp3 = authed_client.post("/api/export", json={"preset": "month", "month": "2026-04", "date_basis": "receipt"})
+    rows3 = list(csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(resp3.content)).read("metadata.csv").decode())))
+    assert not any(r["vendor_name"] == "No Date Vendor" for r in rows3)
 
 
 def test_export_date_to_boundary_ingestion(authed_client, db_path, tmp_data_dir):
@@ -422,11 +427,13 @@ def test_export_appends_the_conversion_columns_and_writes_them_to_excel(authed_c
     resp = authed_client.post("/api/export", json={"date_basis": "receipt", "date_from": "2026-01-01", "date_to": "2026-12-31"})
     zf = zipfile.ZipFile(io.BytesIO(resp.content))
     header = next(csv.reader(io.StringIO(zf.read("metadata.csv").decode("utf-8"))))
-    assert header[-4:] == ["converted_amount", "conversion_rate", "conversion_rate_date", "conversion_ref"]
+    assert header[-5:] == ["converted_amount", "conversion_rate", "conversion_rate_date", "conversion_ref", "exported_file"]
     ws = openpyxl.load_workbook(io.BytesIO(zf.read("metadata.xlsx"))).active
     rows = list(ws.iter_rows(values_only=True))
-    assert list(rows[0][-4:]) == header[-4:]
-    assert (300.0, 3.0, "2026-01-15", "ILS") in [tuple(r[-4:]) for r in rows[1:]]
+    assert list(rows[0][-5:]) == header[-5:]
+    assert (300.0, 3.0, "2026-01-15", "ILS") in [tuple(r[-5:-1]) for r in rows[1:]]
+    # exported_file names the row's file in the zip, in both sheets
+    assert {r[-1] for r in rows[1:]} == {n for n in zf.namelist() if n.endswith(".pdf")}
 
 
 
@@ -454,3 +461,181 @@ def test_export_fills_a_reference_currency_row_before_its_rate_is_stored(authed_
     resp = authed_client.post("/api/export", json={"date_basis": "receipt", "date_from": "2026-01-01", "date_to": "2026-12-31"})
     rows = {r["vendor_name"]: r for r in csv.DictReader(io.StringIO(zipfile.ZipFile(io.BytesIO(resp.content)).read("metadata.csv").decode("utf-8")))}
     assert (rows["Vendor A"]["converted_amount"], rows["Vendor A"]["conversion_rate"], rows["Vendor A"]["conversion_ref"]) == ("100.0", "1.0", "ILS")
+
+
+# --- Every non-deleted document is exported (owner, 2026-10-19: documents are
+# the key). Real sha256 hashes from here on: the fixtures above use 'h1'/'h2',
+# which find_original refuses, so their omission tests never reach the
+# original fallback.
+
+import hashlib
+
+
+def _add_doc(tmp_data_dir, *, name, status="processed", content=b"%PDF-1.4 original\n", ext=".pdf",
+             stored=None, filed=False, original=True, receipt_date=None,
+             submission_date="2026-09-03T07:18:00Z", deleted=0, category_id=None):
+    file_hash = hashlib.sha256(content + name.encode()).hexdigest()
+    storage = os.path.join(str(tmp_data_dir), "storage")
+    if original:
+        with open(os.path.join(storage, "originals", file_hash + ext), "wb") as f:
+            f.write(content)
+    if filed:
+        _write_dummy_pdf(os.path.join(storage, "filed", stored))
+    with get_connection() as conn:
+        cur = conn.execute(
+            """INSERT INTO documents (original_filename, file_hash, file_size_bytes, status, stored_filename,
+               receipt_date, submission_date, vendor_name, category_id, submission_channel, is_deleted)
+               VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, 'email', ?)""",
+            (name, file_hash, status, stored, receipt_date, submission_date, name, category_id, deleted),
+        )
+        return cur.lastrowid, file_hash
+
+
+def _export(client, body):
+    resp = client.post("/api/export", json=body)
+    assert resp.status_code == 200
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    rows = {r["vendor_name"]: r for r in csv.DictReader(io.StringIO(zf.read("metadata.csv").decode("utf-8")))}
+    return resp, zf, rows
+
+
+def _stamp(doc_id):
+    with get_connection() as conn:
+        return conn.execute("SELECT last_exported_date FROM documents WHERE id = ?", (doc_id,)).fetchone()[0]
+
+
+SEPT = {"preset": "month", "month": "2026-09", "date_basis": "ingestion"}
+
+
+def test_a_failed_document_with_no_filed_copy_is_exported_as_its_original(authed_client, db_path, tmp_data_dir):
+    """The live case (doc 274): a failed .mht invoice, never filed. It used to
+    be dropped by the status filter, and by the missing filed copy."""
+    doc_id, file_hash = _add_doc(tmp_data_dir, name="חשבונית מס 704012515.mht", status="failed",
+                                 content=b"MIME-Version: 1.0\n", ext=".mht")
+    resp, zf, rows = _export(authed_client, SEPT)
+    row = rows["חשבונית מס 704012515.mht"]
+    assert row["status"] == "failed"
+    arcname = row["exported_file"]
+    assert arcname.startswith(f"other/0-uncategorized/2026-09-03-{file_hash[:8]}-")
+    assert arcname.endswith(".mht")
+    assert zf.read(arcname) == b"MIME-Version: 1.0\n"
+    assert _stamp(doc_id) is not None, "a delivered document is stamped, processed or not"
+    assert resp.headers["X-Export-Omitted"] == "0"
+
+
+def test_a_needs_review_document_is_exported_with_its_filed_copy(authed_client, db_path, tmp_data_dir):
+    _add_doc(tmp_data_dir, name="review.pdf", status="needs_review",
+             stored="2026-09-03-77-aaaaaaaa.pdf", filed=True)
+    _, zf, rows = _export(authed_client, SEPT)
+    assert rows["review.pdf"]["status"] == "needs_review"
+    assert rows["review.pdf"]["exported_file"] == "other/0-uncategorized/2026-09-03-77-aaaaaaaa.pdf"
+    assert zf.read(rows["review.pdf"]["exported_file"]) == b"%PDF-1.4\n%%EOF\n"
+
+
+def test_a_missing_filed_copy_falls_back_to_the_original(authed_client, db_path, tmp_data_dir):
+    """Name borrowed from the filed name, extension from the file on disk."""
+    doc_id, _ = _add_doc(tmp_data_dir, name="scan.jpg", content=b"\xff\xd8jpeg", ext=".jpg",
+                         stored="2026-09-01-55-bbbbbbbb.pdf", filed=False)
+    _, zf, rows = _export(authed_client, SEPT)
+    assert rows["scan.jpg"]["exported_file"] == "other/0-uncategorized/2026-09-01-55-bbbbbbbb.jpg"
+    assert zf.read(rows["scan.jpg"]["exported_file"]) == b"\xff\xd8jpeg"
+    assert _stamp(doc_id) is not None
+
+
+def test_an_escaping_stored_filename_is_delivered_as_its_original(authed_client, db_path, tmp_data_dir, tmp_path):
+    """The containment check still refuses the path; the document is not lost."""
+    secret = tmp_path / "secret.txt"
+    secret.write_text("not a receipt")
+    _add_doc(tmp_data_dir, name="evil.pdf", stored=str(secret), content=b"%PDF real\n")
+    _, zf, rows = _export(authed_client, SEPT)
+    arcname = rows["evil.pdf"]["exported_file"]
+    assert zf.read(arcname) == b"%PDF real\n"
+    assert all(b"not a receipt" != zf.read(n) for n in zf.namelist())
+
+
+def test_a_filed_copy_that_vanishes_mid_export_falls_back_to_the_original(
+    authed_client, db_path, tmp_data_dir, monkeypatch
+):
+    """A concurrent reprocess renames the filed copy between exists() and write()."""
+    doc_id, _ = _add_doc(tmp_data_dir, name="race.pdf", content=b"%PDF original\n",
+                         stored="2026-09-03-9-cccccccc.pdf", filed=True)
+    real_write = zipfile.ZipFile.write
+
+    def write(self, filename, arcname=None, *a, **kw):
+        if str(filename).endswith("2026-09-03-9-cccccccc.pdf") and "filed" in str(filename):
+            raise FileNotFoundError(filename)
+        return real_write(self, filename, arcname, *a, **kw)
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", write)
+    resp, zf, rows = _export(authed_client, SEPT)
+    assert zf.read(rows["race.pdf"]["exported_file"]) == b"%PDF original\n"
+    assert _stamp(doc_id) is not None
+    assert resp.headers["X-Export-Omitted"] == "0"
+
+
+def test_a_document_with_no_file_at_all_is_reported_and_left_unstamped(authed_client, db_path, tmp_data_dir):
+    doc_id, _ = _add_doc(tmp_data_dir, name="gone.pdf", original=False, stored="2026-09-03-1-dddddddd.pdf")
+    resp, zf, rows = _export(authed_client, SEPT)
+    assert rows["gone.pdf"]["exported_file"] == ""
+    assert resp.headers["X-Export-Omitted"] == "1"
+    assert _stamp(doc_id) is None, "an undelivered document must stay eligible for since_last_export"
+
+
+def test_a_deleted_document_is_never_exported(authed_client, db_path, tmp_data_dir):
+    doc_id, _ = _add_doc(tmp_data_dir, name="deleted.pdf", deleted=1, stored="2026-09-03-2-eeeeeeee.pdf", filed=True)
+    for body in (SEPT, {"preset": "since_last_export"}):
+        _, _, rows = _export(authed_client, body)
+        assert "deleted.pdf" not in rows
+    assert _stamp(doc_id) is None
+
+
+def test_an_explicit_status_filter_still_narrows_the_export(authed_client, db_path, tmp_data_dir):
+    _add_doc(tmp_data_dir, name="ok.pdf", stored="2026-09-03-3-ffffffff.pdf", filed=True)
+    _add_doc(tmp_data_dir, name="bad.pdf", status="failed")
+    _, _, rows = _export(authed_client, {**SEPT, "status": "failed"})
+    assert set(rows) == {"bad.pdf"}
+
+
+def test_two_originals_with_the_same_name_do_not_collide(authed_client, db_path, tmp_data_dir):
+    _add_doc(tmp_data_dir, name="receipt.pdf", status="pending", content=b"one")
+    with get_connection() as conn:
+        conn.execute("UPDATE documents SET vendor_name = 'first' WHERE vendor_name = 'receipt.pdf'")
+    _add_doc(tmp_data_dir, name="receipt.pdf", status="pending", content=b"two")
+    _, zf, rows = _export(authed_client, SEPT)
+    a, b = rows["first"]["exported_file"], rows["receipt.pdf"]["exported_file"]
+    assert a != b
+    assert {zf.read(a), zf.read(b)} == {b"one", b"two"}
+
+
+@pytest.mark.parametrize("receipt_date", ["", "2026/01/15", "unknown"])
+def test_a_malformed_issue_date_falls_under_the_upload_date(authed_client, db_path, tmp_data_dir, receipt_date):
+    """receipt_date is model output stored verbatim: not NULL is not a date."""
+    _add_doc(tmp_data_dir, name="odd.pdf", receipt_date=receipt_date)
+    _, _, rows = _export(authed_client, {"preset": "month", "month": "2026-09", "date_basis": "receipt"})
+    assert "odd.pdf" in rows
+    _, _, rows = _export(authed_client, {"preset": "month", "month": "2026-01", "date_basis": "receipt"})
+    assert "odd.pdf" not in rows
+
+
+def test_a_valid_issue_date_still_decides_the_issue_date_period(authed_client, db_path, tmp_data_dir):
+    _add_doc(tmp_data_dir, name="dated.pdf", receipt_date="2026-01-15")
+    _, _, rows = _export(authed_client, {"preset": "month", "month": "2026-01", "date_basis": "receipt"})
+    assert "dated.pdf" in rows
+    _, _, rows = _export(authed_client, {"preset": "month", "month": "2026-09", "date_basis": "receipt"})
+    assert "dated.pdf" not in rows
+
+
+def test_an_undated_export_is_named_after_the_upload_dates(authed_client, db_path, tmp_data_dir):
+    """The zip name's derived range uses the same period rule as the WHERE."""
+    _add_doc(tmp_data_dir, name="nodate.pdf")
+    resp = authed_client.post("/api/export", json={"date_basis": "receipt"})
+    assert "2026_09_03" in resp.headers["Content-Disposition"]
+
+
+def test_a_re_export_keeps_the_first_export_date(authed_client, db_path, tmp_data_dir):
+    doc_id, _ = _add_doc(tmp_data_dir, name="twice.pdf", stored="2026-09-03-4-abababab.pdf", filed=True)
+    _export(authed_client, SEPT)
+    with get_connection() as conn:
+        conn.execute("UPDATE documents SET last_exported_date = '2026-09-30T00:00:00Z' WHERE id = ?", (doc_id,))
+    _export(authed_client, SEPT)
+    assert _stamp(doc_id) == "2026-09-30T00:00:00Z"

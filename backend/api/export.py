@@ -9,15 +9,92 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from backend.atomic import find_original, is_contained_name
 from backend.auth import require_auth
 from backend.config import get_setting
 from backend.currency import CONVERSION_COLUMNS, effective_conversion, reference_currency
 from backend.database import get_connection
 from backend.models import ExportRequest
+from backend.processing.filing import download_name
 from backend.storage import get_filed_path
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# The issue-date period of a document (owner, 2026-10-22). An issue date that
+# is not a YYYY-MM-DD date files the document under its upload date instead:
+# NULL when the model found none, but also an empty or differently shaped
+# string, because receipt_date is model output stored verbatim. Without this a
+# document the model could not date never reached any "Issue Date" export.
+# submission_date is NOT NULL (migration 001). _period_date is the Python twin;
+# change both together.
+RECEIPT_PERIOD_SQL = (
+    "CASE WHEN d.receipt_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' "
+    "THEN substr(d.receipt_date, 1, 10) ELSE substr(d.submission_date, 1, 10) END"
+)
+# [0-9], not \d: \d also matches non-ASCII digits, which GLOB does not.
+_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def _period_date(row, date_basis: str) -> str | None:
+    """The YYYY-MM-DD a row is exported under, as the WHERE clause sees it."""
+    if date_basis == "ingestion":
+        value = row["submission_date"]
+    else:
+        value = row["receipt_date"]
+        if not (isinstance(value, str) and _ISO_DATE.match(value)):
+            value = row["submission_date"]
+    return str(value)[:10] if value else None
+
+
+def _file_candidates(row, data_dir: str) -> list[tuple[str, str]]:
+    """Where a document's file can come from, best first: (path, name in its folder).
+
+    The filed copy, then the original. Documents are the key (owner,
+    2026-10-19): a pending, failed or unfiled document is still delivered, as
+    the file that was submitted, and so is one whose filed copy is gone. The
+    caller tries each in turn, so a filed copy that vanishes mid-export (a
+    concurrent reprocess renames it) still leaves the original.
+    """
+    candidates = []
+    stored = row["stored_filename"]
+    if stored:
+        # Resolved, not joined. An absolute stored_filename made os.path.join
+        # return that path verbatim, os.path.exists say yes, and the export
+        # copy the file into the zip as root -- with an arcname of
+        # "<section>/<cat>//etc/shadow". Such a row falls back to its original.
+        try:
+            pdf_path = get_filed_path(stored, data_dir)
+        except ValueError:
+            logger.warning(
+                "Document %s has a stored_filename outside filed/; exporting "
+                "its original instead, if there is one", row["id"]
+            )
+        else:
+            if os.path.exists(pdf_path):
+                candidates.append((pdf_path, stored))
+            else:
+                logger.warning(
+                    "Document %s: filed copy %s is missing; exporting its "
+                    "original instead, if there is one", row["id"], stored
+                )
+    # find_original refuses a file_hash that is not a sha256 digest, so a
+    # tampered row cannot name a path outside originals/.
+    original = find_original(os.path.join(data_dir, "storage"), row["file_hash"])
+    if original is not None:
+        # The namer behind the document page's "download original" (#69): the
+        # extension is the one on disk, and a Content-Disposition value, control
+        # characters or "Invoice.pdf.exe" in the sent name are cleaned out.
+        ext = os.path.splitext(original)[1].lower()
+        name = download_name(stored, row["original_filename"], row["id"], ext)
+        if not (isinstance(stored, str) and is_contained_name(stored)):
+            # No filed name to borrow date and hash from: two uploads both
+            # called receipt.pdf must not collide in one category folder.
+            # file_hash is 64 hex here (find_original checked it).
+            prefix = _slugify(f"{str(row['submission_date'])[:10]}-{row['file_hash'][:8]}")
+            name = f"{prefix}-{name}"
+        candidates.append((original, name))
+    return candidates
 
 
 def _slugify(value: str) -> str:
@@ -46,8 +123,9 @@ def _export_basename(body: ExportRequest, rows: list) -> str:
         date_part = "_to_".join(d.replace("-", "_") for d in (body.date_from, body.date_to) if d)
     else:
         # Derive range from the exported rows, else fall back to today.
-        date_col = "submission_date" if body.date_basis == "ingestion" else "receipt_date"
-        dates = sorted(str(r[date_col])[:10].replace("-", "_") for r in rows if r[date_col])
+        dates = sorted(
+            d.replace("-", "_") for d in (_period_date(r, body.date_basis) for r in rows) if d
+        )
         if dates and dates[0] == dates[-1]:
             date_part = dates[0]
         elif dates:
@@ -68,6 +146,9 @@ EXPORT_CSV_FIELDS = [
     "submission_date", "submission_channel", "category_name",
     # Appended (#72), so a sheet reading earlier columns by position keeps working.
     "converted_amount", "conversion_rate", "conversion_rate_date", "conversion_ref",
+    # Appended: the file's path inside the zip, empty when no file could be
+    # added. An original has no stored_filename to match a row on.
+    "exported_file",
 ]
 
 
@@ -75,7 +156,12 @@ EXPORT_CSV_FIELDS = [
 def export_documents(body: ExportRequest, request: Request, username: str = Depends(require_auth)):
     data_dir = request.app.state.data_dir
 
-    # Build query conditions
+    # Build query conditions. Only deletion keeps a document out: no status
+    # filter (owner, 2026-10-19: everything submitted in the period is
+    # exported; a pending, failed or needs_review document goes out as its
+    # original). What reaches Receiptory at all is decided at ingestion (the
+    # Gmail labels, the Telegram chat, an upload); an explicit body.status
+    # below still narrows an API call.
     conditions = ["d.is_deleted = 0"]
     params: list = []
 
@@ -84,10 +170,8 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
         placeholders = ",".join("?" * len(body.document_ids))
         conditions.append(f"d.id IN ({placeholders})")
         params.extend(body.document_ids)
-    else:
-        conditions.append("d.status = 'processed'")
 
-    date_col = "d.submission_date" if body.date_basis == "ingestion" else "d.receipt_date"
+    date_col = "d.submission_date" if body.date_basis == "ingestion" else RECEIPT_PERIOD_SQL
 
     if not body.document_ids and body.preset == "since_last_export":
         conditions.append("d.last_exported_date IS NULL")
@@ -155,11 +239,14 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
             params,
         ).fetchall()
 
-    # Documents whose PDF did not make it into the zip. They must NOT be
-    # stamped as exported below: preset="since_last_export" filters on
+    # Documents with no file in the zip (neither copy on disk). They must NOT
+    # be stamped as exported below: preset="since_last_export" filters on
     # last_exported_date IS NULL, so marking an undelivered document would
     # retire it from every future incremental export, silently and forever.
+    # Their count goes back in X-Export-Omitted so the page can say so.
     omitted: set[int] = set()
+    # Document id -> its path inside the zip (the exported_file column).
+    exported_file: dict[int, str] = {}
 
     # Build zip in memory
     buf = io.BytesIO()
@@ -186,58 +273,30 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
             # else reads. Ids start at 1, so 0 is a fallback no row can claim.
             cat_id = row["category_id"] or 0
             cat_name = f"{cat_id}-" + (_slugify(row["category_name"] or "") or "uncategorized")
-            stored = row["stored_filename"]
-            if not stored:
-                # No filed copy was ever recorded, so there is no PDF to ship.
-                # Reachable: when document_ids is supplied the query skips the
-                # status='processed' filter, so a pending or failed row can be
-                # exported by id straight from the Documents list. Stamping it
-                # would retire it from every future since_last_export run --
-                # the same defect as the two branches below, one case wider.
-                omitted.add(row["id"])
-                continue
-            if stored:
-                # Resolved, not joined. An absolute stored_filename made
-                # os.path.join return that path verbatim, os.path.exists say
-                # yes, and this line copy the file into the zip as root -- with
-                # an arcname of "<section>/<cat>//etc/shadow". One bad row must
-                # not take the export down either, so it is skipped and logged.
+            for path, name in _file_candidates(row, data_dir):
+                arcname = f"{section}/{cat_name}/{name}"
                 try:
-                    pdf_path = get_filed_path(stored, data_dir)
-                except ValueError:
-                    omitted.add(row["id"])
+                    zf.write(path, arcname)
+                except FileNotFoundError:
+                    # exists() then write() is a gap: storage.remove_filed
+                    # unlinks a filed copy when a reprocess renames a document,
+                    # and export takes no lock. zf.write stats the file before
+                    # it writes anything, so nothing partial is left behind;
+                    # the next candidate (the original) is tried instead.
                     logger.warning(
-                        "Document %s has a stored_filename outside filed/; its "
-                        "PDF is omitted from the export (the metadata row is "
-                        "still included)", row["id"]
+                        "Document %s: %s vanished while the export was being "
+                        "built (concurrent reprocess); trying the next copy",
+                        row["id"], name
                     )
                     continue
-                if os.path.exists(pdf_path):
-                    try:
-                        zf.write(pdf_path, f"{section}/{cat_name}/{stored}")
-                    except FileNotFoundError:
-                        # exists() then write() is a gap, and this change is what
-                        # made it reachable: storage.remove_filed now genuinely
-                        # unlinks this exact path when a reprocess renames a
-                        # document. Export takes no lock, so a reprocess mid-zip
-                        # would otherwise raise out of here as an unhandled 500
-                        # and lose the whole archive -- and the Documents page
-                        # offers batch-reprocess and export on the same
-                        # selection. One document omitted beats no export.
-                        omitted.add(row["id"])
-                        logger.warning(
-                            "Document %s: %s vanished while the export was being "
-                            "built (concurrent reprocess); its PDF is omitted",
-                            row["id"], stored
-                        )
-                else:
-                    # Pre-existing trigger, same consequence: the row is in the
-                    # metadata but its PDF is not in the archive.
-                    omitted.add(row["id"])
-                    logger.warning(
-                        "Document %s: filed copy %s is missing; its PDF is "
-                        "omitted from the export", row["id"], stored
-                    )
+                exported_file[row["id"]] = arcname
+                break
+            else:
+                omitted.add(row["id"])
+                logger.warning(
+                    "Document %s has neither a filed copy nor an original on "
+                    "disk; only its metadata row is exported", row["id"]
+                )
 
         # A conversion computed for another reference currency is stale (#72):
         # export the document as unconverted rather than mix currencies.
@@ -247,6 +306,8 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
         def _cell(row, f):
             if f in CONVERSION_COLUMNS:
                 return conversions[row["id"]][f]
+            if f == "exported_file":
+                return exported_file.get(row["id"], "")
             return row[f] if f in row.keys() else None
 
         # Add CSV metadata
@@ -278,13 +339,14 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
 
     # Update last_exported_date
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Every delivered document is stamped, converted or not (owner,
-    # 2026-10-19): the accountant works from the documents; a conversion is
-    # an extra column, never a reason to hold one back or send it twice.
+    # Every delivered document is stamped, converted or not, processed or
+    # not (owner, 2026-10-19 and 2026-10-22): the accountant works from the
+    # documents; a conversion or a pending status is never a reason to hold
+    # one back or send it twice.
     doc_ids = [row["id"] for row in rows if row["id"] not in omitted]
     if omitted:
         logger.warning(
-            "%d document(s) had no PDF in this export and were left unstamped, "
+            "%d document(s) had no file in this export and were left unstamped, "
             "so they stay eligible for the next since_last_export run",
             len(omitted),
         )
@@ -292,7 +354,10 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
         placeholders = ",".join("?" * len(doc_ids))
         with get_connection() as conn:
             conn.execute(
-                f"UPDATE documents SET last_exported_date = ? WHERE id IN ({placeholders})",
+                # The first delivery is kept (owner, 2026-10-22): re-exporting a
+                # month does not move it. since_last_export tests only NULL.
+                f"UPDATE documents SET last_exported_date = COALESCE(last_exported_date, ?) "
+                f"WHERE id IN ({placeholders})",
                 [now] + doc_ids,
             )
 
@@ -307,5 +372,5 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
     return StreamingResponse(
         buf,
         media_type="application/zip",
-        headers={"Content-Disposition": disposition},
+        headers={"Content-Disposition": disposition, "X-Export-Omitted": str(len(omitted))},
     )

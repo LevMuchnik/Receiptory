@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { api, MissingOriginalError } from "./api";
+import { api, MissingOriginalError, exportOmittedWarning } from "./api";
 
 /**
  * `api.upload` error extraction.
@@ -222,5 +222,33 @@ describe("api.downloadOriginal", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/**
+ * Export omissions (owner, 2026-10-22): a document with no file on disk is in
+ * the spreadsheet only, and the owner must hear about it before the zip goes
+ * to the accountant.
+ */
+describe("exportOmittedWarning", () => {
+  it("says nothing when every document is in the zip or the header is absent", () => {
+    for (const h of ["0", null, "", "abc", "-1"]) expect(exportOmittedWarning(h)).toBeNull();
+  });
+
+  it("counts the missing documents", () => {
+    expect(exportOmittedWarning("1")).toBe("1 document had no file on disk and is only in the spreadsheet.");
+    expect(exportOmittedWarning("3")).toBe("3 documents had no file on disk and are only in the spreadsheet.");
+  });
+
+  it("reaches the caller of api.exportDocs", async () => {
+    stubFetch({
+      ok: true,
+      status: 200,
+      blob: () => Promise.resolve(new Blob(["zip"])),
+      headers: new Headers({ "Content-Disposition": 'attachment; filename="x.zip"', "X-Export-Omitted": "2" }),
+    } as Partial<Response>);
+    const res = await api.exportDocs({ preset: "since_last_export" });
+    expect(res.filename).toBe("x.zip");
+    expect(res.warning).toBe("2 documents had no file on disk and are only in the spreadsheet.");
   });
 });
