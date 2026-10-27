@@ -17,17 +17,42 @@ function parseFilename(disposition: string | null): string {
 }
 
 /**
- * What the owner is told after an export whose zip is missing some documents'
- * files (neither the filed PDF nor the original was on disk). The server
- * reports the count in X-Export-Omitted; those rows are still in the
- * spreadsheet and stay unstamped, so the next "since last export" retries them.
+ * What the owner is told after an export, from two counts the server sends.
+ * X-Export-Omitted: documents with no file on disk; they are in the
+ * spreadsheet only and stay unstamped, so the next "since last export"
+ * retries them. X-Export-Unprocessed: documents delivered before processing
+ * finished, as their original file with blank fields; they are stamped
+ * (owner, 2026-10-22), so they will not come again. X-Export-Excel-Failed:
+ * metadata.xlsx is missing from the zip (metadata.csv has the same rows).
  */
-export function exportOmittedWarning(header: string | null): string | null {
-  const n = Number.parseInt(header ?? "", 10);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return n === 1
-    ? "1 document had no file on disk and is only in the spreadsheet."
-    : `${n} documents had no file on disk and are only in the spreadsheet.`;
+export function exportWarning(
+  omittedHeader: string | null,
+  unprocessedHeader: string | null = null,
+  excelFailedHeader: string | null = null,
+): string | null {
+  const count = (h: string | null) => {
+    const n = Number.parseInt(h ?? "", 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  const omitted = count(omittedHeader);
+  const unprocessed = count(unprocessedHeader);
+  const parts: string[] = [];
+  if (omitted) {
+    parts.push(
+      omitted === 1
+        ? "1 document had no file on disk and is only in the spreadsheet."
+        : `${omitted} documents had no file on disk and are only in the spreadsheet.`,
+    );
+  }
+  if (unprocessed) {
+    parts.push(
+      unprocessed === 1
+        ? "1 document was not processed yet and went out as its original file, without extracted fields; it will not be sent again."
+        : `${unprocessed} documents were not processed yet and went out as their original files, without extracted fields; they will not be sent again.`,
+    );
+  }
+  if (excelFailedHeader === "1") parts.push("The Excel sheet could not be written; metadata.csv has every row.");
+  return parts.length ? parts.join(" ") : null;
 }
 
 /**
@@ -181,7 +206,11 @@ export const api = {
     return {
       blob: await res.blob(),
       filename: parseFilename(res.headers.get("Content-Disposition")),
-      warning: exportOmittedWarning(res.headers.get("X-Export-Omitted")),
+      warning: exportWarning(
+        res.headers.get("X-Export-Omitted"),
+        res.headers.get("X-Export-Unprocessed"),
+        res.headers.get("X-Export-Excel-Failed"),
+      ),
     };
   },
   uploadScannerTestFrame: async (

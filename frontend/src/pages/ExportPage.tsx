@@ -73,7 +73,9 @@ export default function ExportPage() {
       a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
-      if (warning) toast.warning(warning);
+      // Stays until closed: the browser's download prompt appears at the same
+      // moment, and this is the one message that says the package is not complete.
+      if (warning) toast.warning(warning, { duration: Infinity, closeButton: true });
       setLastExport(new Date().toLocaleString());
     } finally {
       setExporting(false);

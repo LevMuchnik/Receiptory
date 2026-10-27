@@ -1,5 +1,6 @@
 import io
 import csv
+import hashlib
 import zipfile
 import pytest
 import bcrypt
@@ -315,7 +316,11 @@ def test_export_arcname_cannot_escape_the_extraction_directory(authed_client, do
 def test_a_document_whose_pdf_was_omitted_is_not_marked_exported(authed_client, docs_with_files, tmp_path):
     """last_exported_date is what preset='since_last_export' filters on, so
     stamping a document whose PDF never made it into the zip retires it from
-    every future incremental export, silently and permanently."""
+    every future incremental export, silently and permanently.
+
+    No file of either kind here: the fixture's 'h2' is not a sha256, so
+    find_original refuses it. With an original on disk the document is
+    delivered instead (test_an_escaping_stored_filename_is_delivered_as_its_original)."""
     from backend.database import get_connection
 
     secret = tmp_path / "secret.txt"
@@ -349,10 +354,10 @@ def test_a_document_whose_pdf_was_omitted_is_not_marked_exported(authed_client, 
 def test_a_document_whose_filed_copy_is_missing_is_not_marked_exported(
     authed_client, docs_with_files, tmp_data_dir
 ):
-    """The OTHER omitted branch, and the one that actually fires in production:
-    the row is fine, the file is gone -- lost to exactly the rename churn this
-    PR is about. Mutation-proven gap: replacing that omitted.add with `pass`
-    left tests/test_export.py at 15/15 green."""
+    """The OTHER omitted branch: the row is fine, the filed copy is gone. Here
+    there is no original either ('h2' is not a sha256, so find_original refuses
+    it); with one, the document is delivered as its original
+    (test_a_missing_filed_copy_falls_back_to_the_original)."""
     from backend.database import get_connection
 
     os.unlink(os.path.join(str(tmp_data_dir), "storage", "filed", "2026-01-20-INV002-h2.pdf"))
@@ -468,8 +473,6 @@ def test_export_fills_a_reference_currency_row_before_its_rate_is_stored(authed_
 # which find_original refuses, so their omission tests never reach the
 # original fallback.
 
-import hashlib
-
 
 def _add_doc(tmp_data_dir, *, name, status="processed", content=b"%PDF-1.4 original\n", ext=".pdf",
              stored=None, filed=False, original=True, receipt_date=None,
@@ -559,14 +562,14 @@ def test_a_filed_copy_that_vanishes_mid_export_falls_back_to_the_original(
     """A concurrent reprocess renames the filed copy between exists() and write()."""
     doc_id, _ = _add_doc(tmp_data_dir, name="race.pdf", content=b"%PDF original\n",
                          stored="2026-09-03-9-cccccccc.pdf", filed=True)
-    real_write = zipfile.ZipFile.write
+    real_from_file = zipfile.ZipInfo.from_file
 
-    def write(self, filename, arcname=None, *a, **kw):
+    def from_file(filename, arcname=None, *a, **kw):
         if str(filename).endswith("2026-09-03-9-cccccccc.pdf") and "filed" in str(filename):
             raise FileNotFoundError(filename)
-        return real_write(self, filename, arcname, *a, **kw)
+        return real_from_file(filename, arcname, *a, **kw)
 
-    monkeypatch.setattr(zipfile.ZipFile, "write", write)
+    monkeypatch.setattr(zipfile.ZipInfo, "from_file", staticmethod(from_file))
     resp, zf, rows = _export(authed_client, SEPT)
     assert zf.read(rows["race.pdf"]["exported_file"]) == b"%PDF original\n"
     assert _stamp(doc_id) is not None
@@ -639,3 +642,213 @@ def test_a_re_export_keeps_the_first_export_date(authed_client, db_path, tmp_dat
         conn.execute("UPDATE documents SET last_exported_date = '2026-09-30T00:00:00Z' WHERE id = ?", (doc_id,))
     _export(authed_client, SEPT)
     assert _stamp(doc_id) == "2026-09-30T00:00:00Z"
+
+
+def test_an_unreadable_copy_falls_back_instead_of_failing_the_export(authed_client, db_path, tmp_data_dir, monkeypatch):
+    """A permission or I/O error on one file must not cost the whole archive."""
+    doc_id, _ = _add_doc(tmp_data_dir, name="locked.pdf", content=b"%PDF original\n",
+                         stored="2026-09-03-8-c0c0c0c0.pdf", filed=True)
+    real_open = os.open
+
+    def guarded_open(file, *a, **kw):
+        if str(file).endswith("2026-09-03-8-c0c0c0c0.pdf") and "filed" in str(file):
+            raise PermissionError(file)
+        return real_open(file, *a, **kw)
+
+    monkeypatch.setattr(os, "open", guarded_open)
+    resp, zf, rows = _export(authed_client, SEPT)
+    assert zf.read(rows["locked.pdf"]["exported_file"]) == b"%PDF original\n"
+    assert _stamp(doc_id) is not None
+
+
+def test_a_directory_in_place_of_the_filed_copy_is_not_delivered(authed_client, db_path, tmp_data_dir):
+    _add_doc(tmp_data_dir, name="dir.pdf", content=b"%PDF the original\n", stored="2026-09-03-7-dededede.pdf")
+    os.makedirs(os.path.join(str(tmp_data_dir), "storage", "filed", "2026-09-03-7-dededede.pdf"))
+    _, zf, rows = _export(authed_client, SEPT)
+    assert zf.read(rows["dir.pdf"]["exported_file"]) == b"%PDF the original\n"
+
+
+def test_original_names_are_safe_to_unpack(authed_client, db_path, tmp_data_dir):
+    """Sender-chosen names reach the zip: no Windows-forbidden characters, no
+    path separators, a bounded length, the extension of the file on disk."""
+    _add_doc(tmp_data_dir, name='Invoice: Oct? <2026>|x*"q".pdf', status="pending")
+    _add_doc(tmp_data_dir, name="../../../tmp/evil.pdf", status="failed")
+    _add_doc(tmp_data_dir, name="חשבונית " * 40 + ".pdf", status="pending")
+    resp = authed_client.post("/api/export", json={"date_basis": "ingestion"})
+    names = [n for n in zipfile.ZipFile(io.BytesIO(resp.content)).namelist() if not n.startswith("metadata.")]
+    assert len(names) == 3
+    for n in names:
+        folder, cat, leaf = n.split("/")
+        assert not set('<>:"\\|?*') & set(leaf), leaf
+        assert ".." not in (folder, cat, leaf) and not n.startswith("/")
+        assert len(leaf.encode("utf-8")) < 255 and leaf.endswith(".pdf")
+
+
+def test_receipt_basis_date_to_includes_the_whole_last_day(authed_client, db_path, tmp_data_dir):
+    _add_doc(tmp_data_dir, name="late.pdf", submission_date="2026-05-31T23:00:00Z")
+    _add_doc(tmp_data_dir, name="timed.pdf", receipt_date="2026-05-31T10:00:00", submission_date="2026-01-01T00:00:00Z")
+    _, _, rows = _export(authed_client, {"date_basis": "receipt", "date_from": "2026-05-01", "date_to": "2026-05-31"})
+    assert {"late.pdf", "timed.pdf"} <= set(rows)
+
+
+@pytest.mark.parametrize("receipt_date", ["2026-13-01", "2026-00-10", "2026-02-00", "2026-02-32"])
+def test_an_out_of_range_issue_date_falls_under_the_upload_date(authed_client, db_path, tmp_data_dir, receipt_date):
+    _add_doc(tmp_data_dir, name="odd-range.pdf", receipt_date=receipt_date)
+    _, _, rows = _export(authed_client, {"preset": "month", "month": "2026-09", "date_basis": "receipt"})
+    assert "odd-range.pdf" in rows
+
+
+def test_documents_delivered_unprocessed_are_counted(authed_client, db_path, tmp_data_dir):
+    _add_doc(tmp_data_dir, name="done.pdf", stored="2026-09-03-5-bcbcbcbc.pdf", filed=True)
+    _add_doc(tmp_data_dir, name="waiting.pdf", status="pending")
+    _add_doc(tmp_data_dir, name="broken.pdf", status="failed")
+    _add_doc(tmp_data_dir, name="gone.pdf", status="failed", original=False)  # omitted, not counted twice
+    # needs_review from the pipeline has its filed PDF and fields: not "unprocessed"
+    _add_doc(tmp_data_dir, name="unsure.pdf", status="needs_review", stored="2026-09-03-6-cdcdcdcd.pdf", filed=True)
+    # Value: protects=a processed document delivered as its original (filed copy gone) is not "unprocessed"; fails_when=the
+    # count tests kind == "original" alone; why_new=no processed row reached the original branch here; seam=none;
+    # no_claim=none beyond protects
+    _add_doc(tmp_data_dir, name="refiled.pdf", stored="2026-09-03-6-abcdabcd.pdf", filed=False)
+    resp, _, _ = _export(authed_client, SEPT)
+    assert resp.headers["X-Export-Unprocessed"] == "2"
+    assert resp.headers["X-Export-Omitted"] == "1"
+
+
+def test_the_export_counts_are_readable_by_the_dev_frontend(authed_client):
+    """The Vite dev server is another origin: unexposed headers read as null."""
+    resp = authed_client.post("/api/export", json={"preset": "since_last_export"},
+                              headers={"Origin": "http://localhost:5173"})
+    exposed = resp.headers.get("access-control-expose-headers", "").lower()
+    assert "x-export-omitted" in exposed and "x-export-unprocessed" in exposed
+    # Value: protects=the dev frontend can read X-Export-Excel-Failed cross-origin; fails_when=the header is dropped from
+    # expose_headers in main.py; why_new=only the two count headers were asserted; seam=none; no_claim=production is same-origin
+    assert "x-export-excel-failed" in exposed
+
+
+def test_control_characters_do_not_drop_the_excel_sheet(authed_client, db_path, tmp_data_dir):
+    import openpyxl
+    _add_doc(tmp_data_dir, name="ctrl\x01name.pdf", status="pending")
+    _, zf, _ = _export(authed_client, SEPT)
+    ws = openpyxl.load_workbook(io.BytesIO(zf.read("metadata.xlsx"))).active
+    assert any(r[2] == "ctrlname.pdf" for r in ws.iter_rows(min_row=2, values_only=True))
+
+
+def test_an_original_dated_before_1980_does_not_fail_the_export(authed_client, db_path, tmp_data_dir):
+    """Originals keep the sender's mtime; a scanner with a dead clock writes 1970."""
+    doc_id, file_hash = _add_doc(tmp_data_dir, name="epoch.pdf", status="pending", content=b"%PDF old clock\n")
+    os.utime(os.path.join(str(tmp_data_dir), "storage", "originals", file_hash + ".pdf"), (0, 0))
+    resp, zf, rows = _export(authed_client, SEPT)
+    assert zf.read(rows["epoch.pdf"]["exported_file"]) == b"%PDF old clock\n"
+    assert _stamp(doc_id) is not None
+
+
+def test_a_sender_chosen_extension_is_made_safe(authed_client, db_path, tmp_data_dir):
+    _add_doc(tmp_data_dir, name="Invoice October.pd:f", status="pending", ext=".pd:f")
+    _, zf, rows = _export(authed_client, SEPT)
+    leaf = rows["Invoice October.pd:f"]["exported_file"].rsplit("/", 1)[1]
+    assert leaf.endswith(".pd_f") and ":" not in leaf
+
+
+def test_a_long_name_keeps_its_hash_when_cut(authed_client, db_path, tmp_data_dir):
+    stored = "2026-09-03-" + "9" * 200 + "-a1b2c3d4.pdf"
+    _add_doc(tmp_data_dir, name="long.jpg", ext=".jpg", content=b"\xff\xd8", stored=stored)  # filed copy missing
+    _, _, rows = _export(authed_client, SEPT)
+    leaf = rows["long.jpg"]["exported_file"].rsplit("/", 1)[1]
+    assert leaf.endswith("-a1b2c3d4.jpg") and len(leaf.encode()) < 200
+
+
+def test_spreadsheet_text_is_never_a_formula(authed_client, db_path, tmp_data_dir):
+    import openpyxl
+    _add_doc(tmp_data_dir, name="=HYPERLINK(1).pdf", status="pending")
+    _, zf, _ = _export(authed_client, SEPT)
+    ws = openpyxl.load_workbook(io.BytesIO(zf.read("metadata.xlsx"))).active
+    cell = next(c for row in ws.iter_rows(min_row=2) for c in row if c.value == "=HYPERLINK(1).pdf")
+    assert cell.data_type == "s"
+
+
+def test_a_failed_excel_sheet_is_reported(authed_client, db_path, tmp_data_dir, monkeypatch):
+    import openpyxl
+
+    def broken(*a, **kw):
+        raise RuntimeError("openpyxl down")
+
+    monkeypatch.setattr(openpyxl, "Workbook", broken)
+    _add_doc(tmp_data_dir, name="any.pdf", stored="2026-09-03-1-efefefef.pdf", filed=True)
+    resp, zf, rows = _export(authed_client, SEPT)
+    assert resp.headers["X-Export-Excel-Failed"] == "1"
+    assert "metadata.xlsx" not in zf.namelist() and "any.pdf" in rows
+
+
+def test_csv_text_that_excel_would_run_is_escaped(authed_client, db_path, tmp_data_dir):
+    _add_doc(tmp_data_dir, name="=HYPERLINK(1).pdf", status="pending")
+    with get_connection() as conn:
+        conn.execute("UPDATE documents SET description = '-50% discount', total_amount = -12.5 "
+                     "WHERE vendor_name = '=HYPERLINK(1).pdf'")
+    _, _, rows = _export(authed_client, SEPT)
+    row = rows["'=HYPERLINK(1).pdf"]
+    assert row["original_filename"] == "'=HYPERLINK(1).pdf"
+    assert row["description"] == "'-50% discount"
+    assert row["total_amount"] == "-12.5", "numbers are not text and are left alone"
+
+
+# Value: protects=a dotless original (uploaded as "receipt") keeps its name in the zip; fails_when=the stem cut becomes
+# name[:-len(ext)], which is "" for ext "" and exports it as "document"; why_new=every other test's original has an
+# extension; seam=none; no_claim=none beyond protects
+def test_an_original_with_no_extension_keeps_its_name(authed_client, db_path, tmp_data_dir):
+    _, file_hash = _add_doc(tmp_data_dir, name="receipt", status="pending", content=b"%PDF dotless\n", ext="")
+    _, zf, rows = _export(authed_client, SEPT)
+    arcname = rows["receipt"]["exported_file"]
+    assert arcname == f"other/0-uncategorized/2026-09-03-{file_hash[:8]}-receipt"
+    assert zf.read(arcname) == b"%PDF dotless\n"
+
+
+# Value: protects=Export Selected (document_ids) delivers exactly the picked documents, a failed one as its original,
+# an already-exported one again with its first stamp kept; fails_when=the id filter is lost, a status filter returns,
+# or the stamp is overwritten; why_new=no export test sends document_ids; seam=none; no_claim=the DocumentsPage toast (DOM, untested by policy)
+def test_export_selected_delivers_exactly_the_selected_documents(authed_client, db_path, tmp_data_dir):
+    failed_id, _ = _add_doc(tmp_data_dir, name="picked-failed.mht", status="failed",
+                            content=b"MIME-Version: 1.0\n", ext=".mht")
+    done_id, _ = _add_doc(tmp_data_dir, name="picked-done.pdf", stored="2026-09-03-1-a0a0a0a0.pdf", filed=True)
+    other_id, _ = _add_doc(tmp_data_dir, name="not-picked.pdf", stored="2026-09-03-2-b0b0b0b0.pdf", filed=True)
+    with get_connection() as conn:
+        conn.execute("UPDATE documents SET last_exported_date = '2026-09-30T00:00:00Z' WHERE id = ?", (done_id,))
+    resp, zf, rows = _export(authed_client, {"document_ids": [failed_id, done_id]})
+    assert set(rows) == {"picked-failed.mht", "picked-done.pdf"}
+    assert zf.read(rows["picked-failed.mht"]["exported_file"]) == b"MIME-Version: 1.0\n"
+    assert resp.headers["X-Export-Unprocessed"] == "1"
+    assert _stamp(failed_id) is not None
+    assert _stamp(done_id) == "2026-09-30T00:00:00Z"
+    assert _stamp(other_id) is None
+
+
+# Value: protects=a row whose file_hash is not a sha256 never ships a file from originals/, even one planted
+# under that name; fails_when=find_original's hash check is bypassed in the export; why_new=the 'h2' omission
+# tests have no original on disk, so they pass either way; seam=none; no_claim=none beyond protects
+def test_an_original_under_an_invalid_hash_never_reaches_the_zip(authed_client, db_path, tmp_data_dir):
+    planted = os.path.join(str(tmp_data_dir), "storage", "originals", "notahash.pdf")
+    with open(planted, "wb") as f:
+        f.write(b"%PDF planted\n")
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO documents (original_filename, file_hash, file_size_bytes, status,
+               submission_date, vendor_name, submission_channel)
+               VALUES ('x.pdf', 'notahash', 1, 'failed', '2026-09-03T07:18:00Z', 'planted', 'web_upload')"""
+        )
+    resp, zf, rows = _export(authed_client, SEPT)
+    assert rows["planted"]["exported_file"] == ""
+    assert all(zf.read(n) != b"%PDF planted\n" for n in zf.namelist())
+    assert resp.headers["X-Export-Omitted"] == "1"
+
+
+# Value: protects=a document with an empty original_filename (NULL is refused by the schema) still ships under
+# a usable name; fails_when=download_name's document-<id> fallback or the date-hash prefix is lost; why_new=every
+# other naming test has a sender name; seam=none; no_claim=none beyond protects
+def test_an_original_without_a_sent_name_is_still_named(authed_client, db_path, tmp_data_dir):
+    original_filename = ""
+    doc_id, file_hash = _add_doc(tmp_data_dir, name="nameless", status="pending", content=b"%PDF nameless\n")
+    with get_connection() as conn:
+        conn.execute("UPDATE documents SET original_filename = ? WHERE id = ?", (original_filename, doc_id))
+    _, zf, rows = _export(authed_client, SEPT)
+    leaf = rows["nameless"]["exported_file"].rsplit("/", 1)[1]
+    assert leaf == f"2026-09-03-{file_hash[:8]}-document-{doc_id}.pdf"
+    assert zf.read(rows["nameless"]["exported_file"]) == b"%PDF nameless\n"

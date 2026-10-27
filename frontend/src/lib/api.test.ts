@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { api, MissingOriginalError, exportOmittedWarning } from "./api";
+import { api, MissingOriginalError, exportWarning } from "./api";
 
 /**
  * `api.upload` error extraction.
@@ -226,18 +226,33 @@ describe("api.downloadOriginal", () => {
 });
 
 /**
- * Export omissions (owner, 2026-10-22): a document with no file on disk is in
- * the spreadsheet only, and the owner must hear about it before the zip goes
- * to the accountant.
+ * Export warnings (owner, 2026-10-22): a document with no file on disk is in
+ * the spreadsheet only, and one delivered before processing has blank fields;
+ * the owner must hear about both before the zip goes to the accountant.
  */
-describe("exportOmittedWarning", () => {
-  it("says nothing when every document is in the zip or the header is absent", () => {
-    for (const h of ["0", null, "", "abc", "-1"]) expect(exportOmittedWarning(h)).toBeNull();
+describe("exportWarning", () => {
+  it("says nothing when every document is in the zip, processed, or the headers are absent", () => {
+    for (const h of ["0", null, "", "abc", "-1"]) expect(exportWarning(h, h)).toBeNull();
   });
 
   it("counts the missing documents", () => {
-    expect(exportOmittedWarning("1")).toBe("1 document had no file on disk and is only in the spreadsheet.");
-    expect(exportOmittedWarning("3")).toBe("3 documents had no file on disk and are only in the spreadsheet.");
+    expect(exportWarning("1")).toBe("1 document had no file on disk and is only in the spreadsheet.");
+    expect(exportWarning("3", "0")).toBe("3 documents had no file on disk and are only in the spreadsheet.");
+  });
+
+  it("counts the unprocessed documents, after the missing ones", () => {
+    expect(exportWarning("0", "1")).toBe(
+      "1 document was not processed yet and went out as its original file, without extracted fields; it will not be sent again.",
+    );
+    expect(exportWarning("2", "4")).toBe(
+      "2 documents had no file on disk and are only in the spreadsheet. " +
+        "4 documents were not processed yet and went out as their original files, without extracted fields; they will not be sent again.",
+    );
+  });
+
+  it("says when the Excel sheet is missing", () => {
+    expect(exportWarning("0", "0", "1")).toBe("The Excel sheet could not be written; metadata.csv has every row.");
+    expect(exportWarning("0", "0", "0")).toBeNull();
   });
 
   it("reaches the caller of api.exportDocs", async () => {
@@ -245,10 +260,21 @@ describe("exportOmittedWarning", () => {
       ok: true,
       status: 200,
       blob: () => Promise.resolve(new Blob(["zip"])),
-      headers: new Headers({ "Content-Disposition": 'attachment; filename="x.zip"', "X-Export-Omitted": "2" }),
+      headers: new Headers({
+        "Content-Disposition": 'attachment; filename="x.zip"',
+        "X-Export-Omitted": "2",
+        "X-Export-Unprocessed": "1",
+        // Value: protects=exportDocs forwards X-Export-Excel-Failed to the warning; fails_when=the third header is not passed to
+        // exportWarning; why_new=the test sent only the two count headers; seam=none; no_claim=the page's toast (DOM, untested by policy)
+        "X-Export-Excel-Failed": "1",
+      }),
     } as Partial<Response>);
     const res = await api.exportDocs({ preset: "since_last_export" });
     expect(res.filename).toBe("x.zip");
-    expect(res.warning).toBe("2 documents had no file on disk and are only in the spreadsheet.");
+    expect(res.warning).toBe(
+      "2 documents had no file on disk and are only in the spreadsheet. " +
+        "1 document was not processed yet and went out as its original file, without extracted fields; it will not be sent again. " +
+        "The Excel sheet could not be written; metadata.csv has every row.",
+    );
   });
 });

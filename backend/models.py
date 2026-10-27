@@ -122,7 +122,7 @@ class DocumentResponse(BaseModel):
     edit_history: list[dict] | None = None
     user_notes: str | None
 
-    last_exported_date: str | None
+    last_exported_date: str | None  # the FIRST delivery since 2026-10-22; re-exports keep it
     created_at: str
     updated_at: str
 

@@ -1,6 +1,6 @@
 # Export every document in the period
 
-**Status:** draft for /plan-eng-review
+**Status:** implemented on `issue/export-all-documents` (eng review and /review below; the code is the reference where this text and it differ)
 **Origin:** TODOS.md "Export every document in the period, whatever its status"; owner rule 2026-10-19 (documents are the key): "everything submitting during the export period must be exported... Accountants will process exported receipts themselves."
 
 ## Problem
@@ -150,11 +150,11 @@ Data flow after the change:
 
 ```
 POST /api/export
-  -> WHERE is_deleted = 0 [+ period on submission_date | COALESCE(receipt_date, date(submission_date))] [+ optional filters]
+  -> WHERE is_deleted = 0 [+ period on submission_date | RECEIPT_PERIOD_SQL (valid receipt_date, else upload date)] [+ optional filters]
   -> for each row:
        stored_filename ok and filed file present  -> zip <section>/<cat>/<stored>          (stamp)
        else, or filed file vanished mid-write      -> find_original(storage, file_hash)
-            found                                  -> zip <section>/<cat>/<date>-<slug>-<hash8><ext> (stamp)
+            found                                  -> zip <section>/<cat>/<date>-<hash8>-<download_name><ext> (stamp)
             not found / bad hash                   -> omitted (CSV row kept, exported_file empty, NOT stamped)
   -> metadata.csv / metadata.xlsx (+ exported_file, last column)
   -> UPDATE last_exported_date for delivered rows
@@ -164,8 +164,8 @@ Dispositions: A1 accepted (covered by C3 approval D9). A2 no change.
 
 ## Section 2: Code quality
 
-- Q1 [P2] (confidence: 8/10) backend/api/export.py:158-245. The per-row loop already has three nested exits; a third file source makes it unreadable. Move the choice into one local function `_file_for_row(row, data_dir) -> (path, arcname) | None` in export.py, with the loop doing only `zf.write` + `omitted`. Single caller, so this is structure, not shared code.
-- Q2 [P2] (confidence: 8/10) proposed original arcname. `original_filename` can be NULL, empty, all punctuation or long (Hebrew `.mht` names are 25+ chars); slug falls back to `document` and is capped at 80 characters; the extension comes from the path `find_original` returned (lowercased), never from `original_filename`.
+- Q1 [P2] (confidence: 8/10) backend/api/export.py:158-245. The per-row loop already has three nested exits; a third file source makes it unreadable. Move the choice into one local generator, `_file_candidates(row, data_dir)` (implemented; superseded the `_file_for_row` shape per outside-voice finding 2), with the loop doing only `zf.write` + `omitted`. Single caller, so this is structure, not shared code.
+- Q2 [P2] (confidence: 8/10) proposed original arcname (superseded: `filing.download_name` plus `_zip_safe_stem`, outside-voice finding 4 and /review). `original_filename` can be NULL, empty, all punctuation or long (Hebrew `.mht` names are 25+ chars); slug falls back to `document` and is capped at 80 characters; the extension comes from the path `find_original` returned (lowercased), never from `original_filename`.
 - Q3 resolved (confidence: 9/10) migrations/001_initial_schema.sql:71 `submission_date TEXT NOT NULL DEFAULT (...)`, so the C2 COALESCE always yields a date. No null branch needed.
 
 Dispositions: Q1, Q2 accepted as implementation of C3 (D9); Q3 no change.
@@ -269,6 +269,18 @@ Sequential implementation, no parallelization opportunity.
 - Outside voice: codex not installed; native Claude Plan fallback completed (11 findings)
 - Parallelization: 1 lane, 0 parallel / 1 sequential
 - Lake Score: 4/4
+
+## /review (2026-10-22)
+
+Seven specialists, the native adversarial pass and a red team; Codex not installed. Live-data smoke on a backup-API copy of the database: full year 2026 by upload date exported all 315 documents with 315 files and 0 omitted, the failed `.mht` as its original; the issue-date year includes all 9 undated documents.
+
+Fixed: sender names made safe to unpack (Windows-forbidden characters, 150-byte stem cap); the original looked up lazily; a copy that cannot be opened (any `OSError`) falls back instead of failing the export; `isfile` for the filed copy; out-of-range issue dates use the upload date; control characters stripped from Excel cells; the omission toast stays until closed; "Last Exported" relabelled "First Exported"; the old omission tests say they cover "no file of either kind". Owner D1 (/review): a second count, `X-Export-Unprocessed`, in the same warning. Owner D2 (advisory, accepted): the Python twin of the period rule removed; the query returns `period_date`.
+
+Second pass (adversarial re-review of the fixes) fixed: a pre-1980 mtime no longer fails every export (`strict_timestamps=False`); the sender's extension is sanitised and capped too; long names are cut from the middle so the hash stays; Excel cells are text, never formulas; `X-Export-Unprocessed` counts only documents delivered as their original; a failed Excel sheet is reported (`X-Export-Excel-Failed`); the source is opened with `O_NOFOLLOW`.
+
+Owner (/review, 2026-10-22): CSV text cells starting with `= + - @` are escaped with a leading `'` (`_csv_text`); the xlsx keeps the exact text as a string cell.
+
+Recorded, not changed: implausible years (e.g. 2020 misread for 2026) still use that year; raw `.html`/`.mht`/`.bin` originals reach the accountant (C3); the unauthorized-sender quarantine is not an export filter (R4); issue-date periods can move after export (C2 limit); the zip is built in memory (pre-existing).
 
 ## GSTACK REVIEW REPORT
 
