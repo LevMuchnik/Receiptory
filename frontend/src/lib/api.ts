@@ -17,10 +17,10 @@ function parseFilename(disposition: string | null): string {
 }
 
 /**
- * What the owner is told after an export, from two counts the server sends.
- * X-Export-Omitted: documents with no file on disk; they are in the
- * spreadsheet only and stay unstamped, so the next "since last export"
- * retries them. X-Export-Unprocessed: documents delivered before processing
+ * What the owner is told after an export, from the headers the server sends.
+ * X-Export-Omitted: documents with no readable file on disk (missing, or
+ * none could be opened); they are in the spreadsheet only and stay
+ * unstamped, so the next "since last export" retries them. X-Export-Unprocessed: documents delivered before processing
  * finished, as their original file with blank fields; they are stamped
  * (owner, 2026-10-22), so they will not come again. X-Export-Excel-Failed:
  * metadata.xlsx is missing from the zip (metadata.csv has the same rows).
@@ -40,8 +40,8 @@ export function exportWarning(
   if (omitted) {
     parts.push(
       omitted === 1
-        ? "1 document had no file on disk and is only in the spreadsheet."
-        : `${omitted} documents had no file on disk and are only in the spreadsheet.`,
+        ? "1 document had no readable file on disk and is only in the spreadsheet."
+        : `${omitted} documents had no readable file on disk and are only in the spreadsheet.`,
     );
   }
   if (unprocessed) {

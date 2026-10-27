@@ -226,7 +226,7 @@ describe("api.downloadOriginal", () => {
 });
 
 /**
- * Export warnings (owner, 2026-10-22): a document with no file on disk is in
+ * Export warnings (owner, 2026-10-22): a document with no readable file on disk is in
  * the spreadsheet only, and one delivered before processing has blank fields;
  * the owner must hear about both before the zip goes to the accountant.
  */
@@ -236,8 +236,8 @@ describe("exportWarning", () => {
   });
 
   it("counts the missing documents", () => {
-    expect(exportWarning("1")).toBe("1 document had no file on disk and is only in the spreadsheet.");
-    expect(exportWarning("3", "0")).toBe("3 documents had no file on disk and are only in the spreadsheet.");
+    expect(exportWarning("1")).toBe("1 document had no readable file on disk and is only in the spreadsheet.");
+    expect(exportWarning("3", "0")).toBe("3 documents had no readable file on disk and are only in the spreadsheet.");
   });
 
   it("counts the unprocessed documents, after the missing ones", () => {
@@ -245,7 +245,7 @@ describe("exportWarning", () => {
       "1 document was not processed yet and went out as its original file, without extracted fields; it will not be sent again.",
     );
     expect(exportWarning("2", "4")).toBe(
-      "2 documents had no file on disk and are only in the spreadsheet. " +
+      "2 documents had no readable file on disk and are only in the spreadsheet. " +
         "4 documents were not processed yet and went out as their original files, without extracted fields; they will not be sent again.",
     );
   });
@@ -272,7 +272,7 @@ describe("exportWarning", () => {
     const res = await api.exportDocs({ preset: "since_last_export" });
     expect(res.filename).toBe("x.zip");
     expect(res.warning).toBe(
-      "2 documents had no file on disk and are only in the spreadsheet. " +
+      "2 documents had no readable file on disk and are only in the spreadsheet. " +
         "1 document was not processed yet and went out as its original file, without extracted fields; it will not be sent again. " +
         "The Excel sheet could not be written; metadata.csv has every row.",
     );

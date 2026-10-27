@@ -65,7 +65,8 @@ def _zip_safe_ext(ext: str) -> str:
 
 
 def _file_candidates(row, data_dir: str):
-    """Where a document's file can come from, best first: (path, name in its folder).
+    """Where a document's file can come from, best first: (path, name in its folder, kind),
+    kind being "filed" or "original".
 
     The filed copy, then the original. Documents are the key (owner,
     2026-10-19): a pending, failed or unfiled document is still delivered, as
@@ -343,8 +344,9 @@ def export_documents(body: ExportRequest, request: Request, username: str = Depe
             else:
                 omitted.add(row["id"])
                 logger.warning(
-                    "Document %s has neither a filed copy nor an original on "
-                    "disk; only its metadata row is exported", row["id"]
+                    "Document %s has no readable file (no filed copy or original "
+                    "on disk, or none could be opened); only its metadata row is "
+                    "exported", row["id"]
                 )
 
         # A conversion computed for another reference currency is stale (#72):
