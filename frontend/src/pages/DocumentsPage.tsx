@@ -5,6 +5,7 @@ import { useFileDrop } from "@/lib/useFileDrop";
 import { Button } from "@/components/ui/button";
 import FilterBar, { type Filters, defaultFilters } from "@/components/FilterBar";
 import DocumentTable from "@/components/DocumentTable";
+import { toast } from "sonner";
 
 export default function DocumentsPage() {
   const [searchParams] = useSearchParams();
@@ -99,13 +100,16 @@ export default function DocumentsPage() {
     if (selected.size === 0) return;
     setExporting(true);
     try {
-      const { blob, filename } = await api.exportDocs({ document_ids: Array.from(selected) });
+      const { blob, filename, warning } = await api.exportDocs({ document_ids: Array.from(selected) });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
+      // Stays until closed: the browser's download prompt appears at the same
+      // moment, and this is the one message that says the package is not complete.
+      if (warning) toast.warning(warning, { duration: Infinity, closeButton: true });
     } finally {
       setExporting(false);
     }

@@ -17,6 +17,45 @@ function parseFilename(disposition: string | null): string {
 }
 
 /**
+ * What the owner is told after an export, from the headers the server sends.
+ * X-Export-Omitted: documents with no readable file on disk (missing, or
+ * none could be opened); they are in the spreadsheet only and stay
+ * unstamped, so the next "since last export" retries them. X-Export-Unprocessed: documents delivered before processing
+ * finished, as their original file with blank fields; they are stamped
+ * (owner, 2026-10-22), so they will not come again. X-Export-Excel-Failed:
+ * metadata.xlsx is missing from the zip (metadata.csv has the same rows).
+ */
+export function exportWarning(
+  omittedHeader: string | null,
+  unprocessedHeader: string | null = null,
+  excelFailedHeader: string | null = null,
+): string | null {
+  const count = (h: string | null) => {
+    const n = Number.parseInt(h ?? "", 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  const omitted = count(omittedHeader);
+  const unprocessed = count(unprocessedHeader);
+  const parts: string[] = [];
+  if (omitted) {
+    parts.push(
+      omitted === 1
+        ? "1 document had no readable file on disk and is only in the spreadsheet."
+        : `${omitted} documents had no readable file on disk and are only in the spreadsheet.`,
+    );
+  }
+  if (unprocessed) {
+    parts.push(
+      unprocessed === 1
+        ? "1 document was not processed yet and went out as its original file, without extracted fields; it will not be sent again."
+        : `${unprocessed} documents were not processed yet and went out as their original files, without extracted fields; they will not be sent again.`,
+    );
+  }
+  if (excelFailedHeader === "1") parts.push("The Excel sheet could not be written; metadata.csv has every row.");
+  return parts.length ? parts.join(" ") : null;
+}
+
+/**
  * FastAPI's `detail` is a string for HTTPException but an ARRAY of
  * `{loc, msg, type}` objects for 422 validation errors. Passing the array
  * straight to `new Error()` yields the useless literal "[object Object]", so
@@ -156,7 +195,7 @@ export const api = {
     }
     return res.json();
   },
-  exportDocs: async (body: unknown): Promise<{ blob: Blob; filename: string }> => {
+  exportDocs: async (body: unknown): Promise<{ blob: Blob; filename: string; warning: string | null }> => {
     const res = await fetch(`${API_BASE}/export`, {
       method: "POST",
       credentials: "include",
@@ -164,7 +203,15 @@ export const api = {
       body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error("Export failed");
-    return { blob: await res.blob(), filename: parseFilename(res.headers.get("Content-Disposition")) };
+    return {
+      blob: await res.blob(),
+      filename: parseFilename(res.headers.get("Content-Disposition")),
+      warning: exportWarning(
+        res.headers.get("X-Export-Omitted"),
+        res.headers.get("X-Export-Unprocessed"),
+        res.headers.get("X-Export-Excel-Failed"),
+      ),
+    };
   },
   uploadScannerTestFrame: async (
     blob: Blob,

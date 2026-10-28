@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
+import { toast } from "sonner";
 
 function BasisToggle({
   value,
@@ -65,13 +66,16 @@ export default function ExportPage() {
   const doExport = async (body: any) => {
     setExporting(true);
     try {
-      const { blob, filename } = await api.exportDocs(body);
+      const { blob, filename, warning } = await api.exportDocs(body);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
+      // Stays until closed: the browser's download prompt appears at the same
+      // moment, and this is the one message that says the package is not complete.
+      if (warning) toast.warning(warning, { duration: Infinity, closeButton: true });
       setLastExport(new Date().toLocaleString());
     } finally {
       setExporting(false);
@@ -211,7 +215,7 @@ export default function ExportPage() {
               </div>
               <div>
                 <p className="text-sm font-bold">Ready for bundling</p>
-                <p className="text-xs text-[#96a9be]">Generates PDF + CSV package of all documents not yet exported</p>
+                <p className="text-xs text-[#96a9be]">Packages every document not yet exported, with CSV and Excel metadata</p>
               </div>
             </div>
             <button
@@ -240,7 +244,7 @@ export default function ExportPage() {
             <h3 className="text-xs font-black uppercase text-muted-foreground tracking-[0.2em] mb-4">Output Standard</h3>
             <div className="space-y-4">
               {[
-                { label: "High-Res PDFs",  sub: "Category-based directory structure" },
+                { label: "Every document", sub: "Filed PDF, or the original file; by category" },
                 { label: "CSV Metadata",   sub: "Universal mapping for accounting software" },
               ].map((f) => (
                 <div key={f.label} className="flex items-start gap-3">

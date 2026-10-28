@@ -194,7 +194,7 @@ export default function MetadataForm({ doc, onSave }: Props) {
           <div className="flex justify-between"><span className="text-muted-foreground">Processed At</span><span>{doc.processing_date || "-"}</span></div>
           <div className="flex justify-between"><span className="text-muted-foreground">Attempts</span><span>{doc.processing_attempts ?? 0}</span></div>
           {doc.processing_error && <div className="flex justify-between"><span className="text-muted-foreground">Error</span><span className="text-destructive">{doc.processing_error}</span></div>}
-          <div className="flex justify-between"><span className="text-muted-foreground">Last Exported</span><span>{doc.last_exported_date || "Never"}</span></div>
+          <div className="flex justify-between"><span className="text-muted-foreground">First Exported</span><span>{doc.last_exported_date || "Never"}</span></div>
         </div>
       </details>
 

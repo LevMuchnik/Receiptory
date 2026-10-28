@@ -300,7 +300,7 @@ All under `/api/`, all require auth (httponly session cookie) except `/api/auth/
 - `GET /api/documents/{id}/pages/{page_num}` — serve rendered page image (cached on disk)
 
 ### Export
-- `POST /api/export` — accepts filter criteria + presets (`since_last_export`, `month`, `date_range`, `full_year`). Returns zip: `category/yyyy-mm-dd-vendor_receipt_id-hash.pdf` + `metadata.csv` (conversion columns appended, #72). Updates `last_exported_date`.
+- `POST /api/export` — accepts filter criteria + presets (`since_last_export`, `month`, `date_range`, `full_year`). Every non-deleted document in the period is exported, whatever its status. On the issue-date basis, a document without a valid `YYYY-MM-DD` `receipt_date` falls under its upload date. Returns zip: `<section>/<category id>-<category>/` holding the filed copy (`yyyy-mm-dd-vendor_receipt_id-hash.pdf`), or the original file when there is no filed copy (`yyyy-mm-dd-<hash8>-<original name><ext>`, or the filed stem with the original's extension), + `metadata.csv`/`metadata.xlsx` (conversion columns appended, #72; `exported_file`, the path inside the zip, last). Sets `last_exported_date` once, on first delivery. A document with neither file is only in the metadata, left unstamped, and counted in the `X-Export-Omitted` response header; documents delivered as their original before processing finished are counted in `X-Export-Unprocessed`; a missing `metadata.xlsx` sets `X-Export-Excel-Failed`. The UI reports them.
 
 ### Categories
 - `GET /api/categories` — list (excludes soft-deleted unless `?include_deleted=true`)

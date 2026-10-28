@@ -45,7 +45,7 @@ Receiptory is a single-container web application that ingests receipts and invoi
 - Document detail view with rendered page images and editable metadata, and a download of the original file exactly as it arrived
 - Custom categories with LLM-guided classification (see [sample categories](#sample-categories))
 - Foreign-currency amounts converted to your reference currency (default ILS) with Bank of Israel daily rates (ECB cross rates for currencies the BoI doesn't publish), fetched once and cached
-- Export to ZIP with category-organized PDFs, CSV, and Excel metadata
+- Export to ZIP with every document in the period, by category (the filed PDF, or the original file), plus CSV and Excel metadata
 
 **Infrastructure**
 - Cloud backup to Google Drive and/or OneDrive via OAuth (or any rclone remote)
